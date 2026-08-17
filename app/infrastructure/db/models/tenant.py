@@ -110,7 +110,7 @@ class Session(Base):
     actor: Mapped[str] = mapped_column(String(10), nullable=False)  # staff | patient
     subject_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     company_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ip: Mapped[str | None] = mapped_column(String(64))
     user_agent: Mapped[str | None] = mapped_column(String(300))
@@ -126,7 +126,7 @@ class OtpChallenge(PKMixin, Base):
     code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
     max_attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=3)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     company_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     meta: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)

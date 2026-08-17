@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import hmac
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import SESSION_KEY, RequestMeta, StaffPrincipal, build_staff_principal, invalidate_session_cache
@@ -23,7 +24,8 @@ from app.core.security import (
     verify_password,
 )
 from app.core.textutil import is_valid_uz_phone, norm_phone
-from app.infrastructure.db.models import Company, Employee, OtpChallenge, Patient, Session as SessionModel
+from app.infrastructure.db.models import Company, Employee, OtpChallenge, Patient
+from app.infrastructure.db.models import Session as SessionModel
 from app.infrastructure.redis import rate_limit
 from app.infrastructure.redis.client import get_redis
 from app.modules.auth.schemas import PatientOtpRequestOut, PatientSessionOut, StaffSessionOut
@@ -97,6 +99,9 @@ async def staff_login(session: AsyncSession, login: str, password: str, meta: Re
                 emp.failed_logins = 0
                 log.warning("employee %s locked after repeated failures", emp.id)
         await audit(session, actor_type="staff", actor_id=emp.id if emp else None, company_id=emp.company_id if emp else None, action="login_failed", entity="employee", entity_id=emp.id if emp else login_norm, ip=meta.ip, request_id=meta.request_id)
+        # The request session is rolled back on the exception below - persist the
+        # lockout counter and the audit row first, otherwise the lockout is dead.
+        await session.commit()
         raise AuthError("Login yoki parol noto‘g‘ri")
     if emp.status != "active":
         from app.core.exceptions import ForbiddenError
@@ -115,7 +120,7 @@ async def staff_login(session: AsyncSession, login: str, password: str, meta: Re
 
 
 async def staff_me(session: AsyncSession, principal: StaffPrincipal, token: str) -> StaffSessionOut:
-    """Sliding expiry: extend the session while it is in use (max TTL from settings)."""
+    """Return the current session; records `last_seen_at`. Expiry is fixed at login (JWT exp)."""
     row = await session.get(SessionModel, principal.jti)
     exp = principal.token_exp
     if row:
@@ -143,7 +148,7 @@ async def request_patient_otp(session: AsyncSession, phone_raw: str, meta: Reque
         pass
 
     patient = (
-        await session.execute(select(Patient).where(Patient.phone == phone, Patient.deleted_at.is_(None)).order_by(Patient.created_at.asc()).limit(1))
+        await session.execute(select(Patient).where(Patient.phone == phone, Patient.deleted_at.is_(None)).order_by(Patient.created_at.asc(), Patient.id.asc()).limit(1))
     ).scalar_one_or_none()
     if not patient:
         raise NotFoundError("Bu raqam bilan bemor topilmadi. Klinikaga murojaat qiling.")
@@ -182,18 +187,22 @@ async def verify_patient_otp(session: AsyncSession, challenge_id: str, code: str
         cid = uuid.UUID(challenge_id)
     except ValueError as exc:
         raise AuthError("Kod muddati tugagan", code="otp_expired") from exc
+    await rate_limit.enforce(f"rl:otp:verify:ip:{meta.ip or '?'}", settings.auth_rate_limit_per_minute, 60)
+    await rate_limit.enforce(f"rl:otp:verify:ch:{cid}", settings.otp_max_attempts, settings.otp_ttl_seconds, "Kod muddati tugagan")
     ch = await session.get(OtpChallenge, cid)
     now = datetime.now(UTC)
     if not ch or ch.consumed_at or ch.expires_at < now or ch.purpose != "portal":
         raise AuthError("Kod muddati tugagan", code="otp_expired")
     if ch.attempts >= ch.max_attempts:
         raise AuthError("Kod muddati tugagan", code="otp_expired")
-    if sha256_hex(code.strip()) != ch.code_hash:
-        ch.attempts += 1
+    if not hmac.compare_digest(sha256_hex(code.strip()), ch.code_hash):
+        # Persist the failed attempt before raising (the request session is rolled back on error).
+        await session.execute(update(OtpChallenge).where(OtpChallenge.id == cid).values(attempts=OtpChallenge.attempts + 1))
+        await session.commit()
         raise AuthError("Kod noto‘g‘ri", code="otp_invalid")
     ch.consumed_at = now
     patient = (
-        await session.execute(select(Patient).where(Patient.phone == ch.phone, Patient.deleted_at.is_(None)).order_by(Patient.created_at.asc()).limit(1))
+        await session.execute(select(Patient).where(Patient.phone == ch.phone, Patient.deleted_at.is_(None)).order_by(Patient.created_at.asc(), Patient.id.asc()).limit(1))
     ).scalar_one_or_none()
     if not patient:
         raise NotFoundError("Bemor topilmadi")

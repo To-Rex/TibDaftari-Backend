@@ -9,7 +9,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -54,7 +54,8 @@ class Settings(BaseSettings):
     # ---- integrations ------------------------------------------------------
     xabarchi_base_url: str = "https://api.xabarchi.uz"
     xabarchi_timeout_seconds: float = 15
-    otp_dev_mode: bool = True
+    # Returns the OTP in the API response / logs. Never honoured in production.
+    otp_dev_mode: bool = False
     otp_ttl_seconds: int = 300
     otp_length: int = 4
     otp_max_attempts: int = 3
@@ -73,6 +74,12 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [o.strip() for o in value.split(",") if o.strip()]
         return value
+
+    @model_validator(mode="after")
+    def _no_otp_dev_mode_in_production(self) -> Settings:
+        if self.app_env == "production" and self.otp_dev_mode:
+            self.otp_dev_mode = False
+        return self
 
     @property
     def is_production(self) -> bool:

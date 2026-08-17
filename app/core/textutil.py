@@ -58,7 +58,7 @@ def fmt_phone(p: str | None) -> str:
 
 def fmt_money_ru(v: int | float) -> str:
     """JS `toLocaleString('ru-RU')` — thousands grouped with U+00A0."""
-    n = int(round(v))
+    n = round(v)
     sign = "-" if n < 0 else ""
     return sign + f"{abs(n):,}".replace(",", " ")
 

@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api.deps import client_ip
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.exceptions import install_exception_handlers
@@ -88,7 +89,7 @@ def create_app() -> FastAPI:
         if cl and cl.isdigit() and int(cl) > settings.max_request_body_bytes:
             return JSONResponse({"error": {"code": "payload_too_large", "message": "So‘rov hajmi juda katta"}}, status_code=413)
         # per-IP rate limit (auth endpoints have a stricter one inside the auth router)
-        ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or (request.client.host if request.client else "?")
+        ip = client_ip(request) or "?"
         if request.url.path.startswith("/api/") and not request.url.path.endswith("/health"):
             count, _ = await hit(f"rl:ip:{ip}", 60)
             if count > settings.rate_limit_per_minute:
@@ -113,7 +114,7 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["X-Request-ID", "Content-Disposition"],
+        expose_headers=["X-Request-ID", "Content-Disposition", "X-Invalid-Recipients"],
         max_age=600,
     )
     app.include_router(api_router, prefix="/api/v1")

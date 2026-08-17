@@ -16,6 +16,7 @@ from urllib.parse import unquote_to_bytes
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from app.core.config import settings
 from app.core.exceptions import ValidationError
@@ -73,11 +74,14 @@ async def store_bytes(
     is_public: bool = False,
 ) -> StoredFile:
     sha = hashlib.sha256(data).hexdigest()
-    existing = (
-        await session.execute(select(StoredFile).where(StoredFile.company_id == company_id, StoredFile.sha256 == sha).limit(1))
+    # Dedupe by hash without pulling the existing blob into memory (only the id is needed).
+    existing_id = (
+        await session.execute(select(StoredFile.id).where(StoredFile.company_id == company_id, StoredFile.sha256 == sha).limit(1))
     ).scalar_one_or_none()
-    if existing:
-        return existing
+    if existing_id:
+        existing = await session.get(StoredFile, existing_id, options=[defer(StoredFile.data)])
+        if existing:
+            return existing
     row = StoredFile(company_id=company_id, sha256=sha, mime=mime, size=len(data), filename=filename, data=data, is_public=is_public, created_by=created_by)
     session.add(row)
     await session.flush()

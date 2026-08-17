@@ -22,9 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.exceptions import AuthError, ForbiddenError
-from app.core.permissions import resolve_permissions
+from app.core.permissions import PLATFORM_PERMISSIONS, resolve_permissions
 from app.core.security import decode_token
-from app.infrastructure.db.models import Employee, Patient as PatientModel, Role, Session as SessionModel
+from app.infrastructure.db.models import Employee, Role
+from app.infrastructure.db.models import Patient as PatientModel
+from app.infrastructure.db.models import Session as SessionModel
 from app.infrastructure.db.session import get_session
 from app.infrastructure.redis.client import get_redis
 
@@ -40,14 +42,26 @@ class RequestMeta:
     user_agent: str | None
 
 
-def request_meta(request: Request) -> RequestMeta:
-    ip = None
+def client_ip(request: Request) -> str | None:
+    """Best-effort client address.
+
+    Proxy headers are honoured only when `TRUST_PROXY_HEADERS` is set, and then the
+    *right-most* `X-Forwarded-For` hop (the one appended by our own proxy) or
+    `X-Real-IP` is used - the left-most value is client-supplied and spoofable.
+    """
     if settings.trust_proxy_headers:
-        fwd = request.headers.get("x-forwarded-for")
-        if fwd:
-            ip = fwd.split(",")[0].strip()
-    if not ip and request.client:
-        ip = request.client.host
+        real = (request.headers.get("x-real-ip") or "").strip()
+        if real:
+            return real
+        fwd = request.headers.get("x-forwarded-for") or ""
+        hops = [h.strip() for h in fwd.split(",") if h.strip()]
+        if hops:
+            return hops[-1]
+    return request.client.host if request.client else None
+
+
+def request_meta(request: Request) -> RequestMeta:
+    ip = client_ip(request)
     return RequestMeta(ip=ip, request_id=getattr(request.state, "request_id", None), user_agent=(request.headers.get("user-agent") or "")[:300])
 
 
@@ -147,7 +161,7 @@ async def build_staff_principal(session: AsyncSession, employee_id: uuid.UUID, j
     if emp.status != "active":
         raise ForbiddenError("Hisob faol emas", code="inactive")
     role = await session.get(Role, emp.role_id) if emp.role_id else None
-    perms = resolve_permissions(role.permissions if role else [], emp.overrides)
+    perms = [p for p in resolve_permissions(role.permissions if role else [], emp.overrides) if p not in PLATFORM_PERMISSIONS]
     if emp.is_super_admin:
         from app.core.permissions import PERMISSIONS
 

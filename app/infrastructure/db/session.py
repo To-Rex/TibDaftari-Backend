@@ -5,6 +5,8 @@
   success, rollback on error. Services never call `commit()` themselves except
   in explicit multi-step flows (`session.begin_nested()` for savepoints).
 * `session_scope()` is for background workers / CLI.
+* Both replay cache invalidations collected during the transaction once more after COMMIT
+  (see `app.infrastructure.redis.cache`), so concurrent readers cannot pin stale data.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import orjson
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import settings
+from app.infrastructure.redis import cache
 
 
 def _json_serializer(obj: object) -> str:
@@ -42,24 +45,34 @@ SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
-    async with SessionLocal() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
+    token = cache.begin_deferred()
+    try:
+        async with SessionLocal() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+            await cache.run_deferred()
+    finally:
+        cache.end_deferred(token)
 
 
 @asynccontextmanager
 async def session_scope() -> AsyncIterator[AsyncSession]:
-    async with SessionLocal() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
+    token = cache.begin_deferred()
+    try:
+        async with SessionLocal() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+            await cache.run_deferred()
+    finally:
+        cache.end_deferred(token)
 
 
 async def dispose_engine() -> None:
