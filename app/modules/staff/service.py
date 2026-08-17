@@ -240,6 +240,8 @@ async def update_employee(session: AsyncSession, employee_id: uuid.UUID, body: E
         emp.branch_ids = await _resolve_branch_ids(session, emp.company_id, body.branch_ids)
     if body.category_ids is not None:
         emp.category_ids = _parse_ids(body.category_ids, "categoryId")
+        # lab/confirm restriction cache (orders.service.allowed_category_ids) must follow immediately
+        await cache.delete(f"co:{emp.company_id}:empcats:{emp.id}")
     if body.overrides is not None:
         emp.overrides = _validate_overrides(body.overrides, staff)
     if data.get("status") and data["status"] != emp.status:

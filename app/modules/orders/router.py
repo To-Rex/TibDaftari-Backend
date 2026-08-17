@@ -141,7 +141,7 @@ async def worklist(
     company_id: uuid.UUID, q: Annotated[WorklistQuery, Query()], staff: Staff, session: DbSession
 ) -> Page[WorklistItemOut]:
     staff.require("lab.worklist.read").scope(company_id)
-    return await service.worklist(session, company_id, q)
+    return await service.worklist(session, company_id, q, staff)
 
 
 @router.get("/items/{item_id}", response_model=OrderItemOut, summary="Get order item")

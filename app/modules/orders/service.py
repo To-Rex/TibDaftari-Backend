@@ -23,7 +23,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.api.deps import RequestMeta, StaffPrincipal
 from app.core.audit import audit
-from app.core.exceptions import ConflictError, NotFoundError, StateError, ValidationError
+from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError, StateError, ValidationError
 from app.core.pagination import page_of
 from app.core.schemas import Page, iso_z
 from app.core.textutil import slugify
@@ -38,6 +38,7 @@ from app.infrastructure.db.models import (
     ResultTemplate,
     empty_progress,
 )
+from app.infrastructure.redis import cache
 from app.modules.files import service as files_svc
 from app.modules.messaging import service as messaging
 from app.modules.orders import repository as repo
@@ -640,11 +641,54 @@ async def cancel_order(
     return order_out(order)
 
 
+# ----------------------------------------------------------------------------- category restriction
+
+CATEGORY_FORBIDDEN = "Bu kategoriya sizga biriktirilmagan"
+
+
+async def allowed_category_ids(session: AsyncSession, staff: StaffPrincipal, company_id: uuid.UUID) -> set[uuid.UUID] | None:
+    """Categories the employee may work with (own `category_ids` + all descendants).
+
+    `None` = unrestricted (superadmin, or no categories assigned). Cached per employee for 60 s
+    because the lab pages poll the worklist frequently."""
+    ids = list(staff.employee.category_ids or [])
+    if staff.is_super_admin or not ids:
+        return None
+    key = f"co:{company_id}:empcats:{staff.id}"
+    cached = await cache.get_json(key)
+    if isinstance(cached, list):
+        return {uuid.UUID(x) for x in cached}
+    from app.modules.catalog import repository as catalog_repo
+
+    allowed: set[uuid.UUID] = set()
+    for root in ids:
+        allowed |= await catalog_repo.descendant_category_ids(session, company_id, root)
+        allowed.add(root)  # keep the id even if the category was archived/deleted (harmless)
+    await cache.set_json(key, [str(x) for x in allowed], 60)
+    return allowed
+
+
+def ensure_category_access(item: OrderItem, allowed: set[uuid.UUID] | None) -> None:
+    """403 when the employee is restricted to categories and the item is outside them."""
+    if allowed is not None and item.category_id not in allowed:
+        raise ForbiddenError(CATEGORY_FORBIDDEN)
+
+
+
 # ----------------------------------------------------------------------------- lab
 
 
-async def worklist(session: AsyncSession, company_id: uuid.UUID, q: WorklistQuery) -> Page[WorklistItemOut]:
-    """Lab worklist rows (item + order snapshots + live patient gender/birth date)."""
+async def worklist(session: AsyncSession, company_id: uuid.UUID, q: WorklistQuery, staff: StaffPrincipal | None = None) -> Page[WorklistItemOut]:
+    """Lab worklist rows (item + order snapshots + live patient gender/birth date).
+
+    Employees bound to categories only ever see items of those categories (server-side)."""
+    allowed = await allowed_category_ids(session, staff, company_id) if staff else None
+    if allowed is not None:
+        wanted = set(repo.parse_uuids(q.category_ids)) if q.category_ids else None
+        effective = (wanted & allowed) if wanted is not None else allowed
+        if not effective:
+            return page_of([], q, 0)
+        q = q.model_copy(update={"category_ids": [str(x) for x in effective]})
     rows, total = await repo.worklist(session, company_id, q)
     out = [
         WorklistItemOut(
@@ -671,6 +715,7 @@ async def save_values(
     """Replace result values wholesale; pending/rejected -> entered, entered/submitted keep their status."""
     item = await get_item_or_404(session, item_id, scope_company(staff))
     order = await _lock_order_of_item(session, item)
+    ensure_category_access(item, await allowed_category_ids(session, staff, item.company_id))
     if item.status == "approved":
         raise ConflictError("Tasdiqlangan natijani o‘zgartirib bo‘lmaydi", code="approved")
     if item.status == "cancelled":
@@ -711,6 +756,7 @@ async def submit_item(
     """Toggle entered <-> submitted after validating required schema fields."""
     item = await get_item_or_404(session, item_id, scope_company(staff))
     order = await _lock_order_of_item(session, item)
+    ensure_category_access(item, await allowed_category_ids(session, staff, item.company_id))
     if item.status not in ("entered", "submitted"):
         raise StateError("Avval natijalarni saqlang", code="state")
     schema = (await repo.schemas_by_ids(session, [item.schema_id])).get(item.schema_id) if item.schema_id else None
@@ -752,6 +798,7 @@ async def reject_item(
     """Doctor sends a submitted result back to the lab."""
     item = await get_item_or_404(session, item_id, scope_company(staff))
     order = await _lock_order_of_item(session, item)
+    ensure_category_access(item, await allowed_category_ids(session, staff, item.company_id))
     if item.status != "submitted":
         raise StateError("Faqat yuborilgan natijani qaytarish mumkin", code="state")
     now = utcnow()
@@ -931,6 +978,7 @@ async def approve_item(
     """Doctor approves one submitted item -> item-scoped document + PDF + notifications."""
     item = await get_item_or_404(session, item_id, scope_company(staff))
     order = await _lock_order_of_item(session, item)
+    ensure_category_access(item, await allowed_category_ids(session, staff, item.company_id))
     if item.status != "submitted":
         raise StateError("Faqat yuborilgan natijani tasdiqlash mumkin", code="state")
     template = await _resolve_item_template(session, item, body.template_id)
@@ -1008,6 +1056,9 @@ async def approve_order(
     to_approve = [i for i in covered if i.status == "submitted"]
     if not to_approve:
         raise StateError("Tasdiqlash uchun yuborilgan tahlil yo‘q", code="state")
+    allowed = await allowed_category_ids(session, staff, order.company_id)
+    for it in to_approve:
+        ensure_category_access(it, allowed)
     now = utcnow()
     for it in to_approve:
         it.status = "approved"
