@@ -102,8 +102,11 @@ Bemor portali: telefon raqam bo‘yicha OTP. `OTP_DEV_MODE=true` bo‘lsa kod SM
 
 ## Deploy (Dokploy + Railpack)
 
-Repo ildizida `railpack.json` bor — Dokploy uni avtomatik ishlatadi (Python 3.12,
-start buyrug‘i `python -m app`). `Dockerfile` ham mavjud (Docker provider tanlansa).
+Repo ildizida `railpack.json` bor — Dokploy uni avtomatik ishlatadi (Python `3.12` —
+eng yangi 3.12.x, start buyrug‘i `python -m app`). `mise.toml` faqat `[settings]` saqlaydi
+(`python.github_attestations = false`) — mise 2026.x attestation’siz eski CPython build’larida
+`No GitHub artifact attestations found` xatosi bilan to‘xtamasligi uchun. `Dockerfile` ham
+mavjud (Docker provider tanlansa).
 
 1. Dokploy’da PostgreSQL 16 va Redis servislarini yarating (yoki tashqi manzil bering).
 2. Application → Git repo → branch. Build: Railpack (default) yoki Dockerfile.

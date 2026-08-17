@@ -1,0 +1,11 @@
+# Railpack copies this file into /app before `mise install` (MISE_TRUSTED_CONFIG_PATHS=/app),
+# so [settings] here apply to the build. Tools/versions are NOT declared here on purpose —
+# the Python version comes from railpack.json ("packages.python").
+#
+# mise >= 2026.3 verifies GitHub artifact attestations for python-build-standalone tarballs.
+# Older builds (e.g. 3.12.8+20250115) have none and the build fails with
+# "No GitHub artifact attestations found for python@…". railpack.json now pins "3.12"
+# (latest patch, which IS attested); this setting is a safety net so a build never
+# fails again on a missing attestation.
+[settings]
+python.github_attestations = false
