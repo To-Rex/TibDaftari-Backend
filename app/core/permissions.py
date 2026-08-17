@@ -40,3 +40,34 @@ def resolve_permissions(role_permissions: Iterable[str] | None, overrides: dict 
 
 def invalid_permission_keys(keys: Iterable[str]) -> list[str]:
     return [k for k in keys if k not in PERMISSION_SET]
+
+
+# Roles every new company starts with (keys are stable machine names used by the frontend).
+DEFAULT_COMPANY_ROLES: tuple[dict, ...] = (
+    {"key": ADMIN_ROLE_KEY, "name": "Administrator", "is_system": True, "permissions": list(COMPANY_ADMIN_PERMISSIONS)},
+    {
+        "key": "registrator",
+        "name": "Registrator / Kassir",
+        "is_system": False,
+        "permissions": [
+            "reception.patient.read", "reception.patient.write", "reception.order.create", "reception.order.cancel",
+            "reception.payment.create", "reports.operations.read", "messaging.send",
+        ],
+    },
+    {"key": "laborant", "name": "Laborant", "is_system": False, "permissions": ["lab.worklist.read", "lab.result.write", "lab.result.submit"]},
+    {
+        "key": "vrach",
+        "name": "Vrach",
+        "is_system": False,
+        "permissions": [
+            "lab.worklist.read", "lab.result.write", "confirm.result.read", "confirm.result.approve", "confirm.result.resend",
+            "reception.patient.read",
+        ],
+    },
+    {
+        "key": "rahbar",
+        "name": "Rahbar",
+        "is_system": False,
+        "permissions": ["reports.finance.read", "reports.operations.read", "reports.export", "reception.patient.read", "admin.employee.read"],
+    },
+)

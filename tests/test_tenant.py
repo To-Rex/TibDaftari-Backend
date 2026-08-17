@@ -124,6 +124,11 @@ def test_create_company_superadmin(ctx: dict) -> None:
     d = r.json()
     assert d["slug"] == f"t-tenant-c-{SFX}" and d["locale"] == "uz" and d["isActive"] is True
     assert d["sms"]["provider"] == "none" and d["branchCount"] == 0
+    # a fresh company gets the standard role set (admin system role + 4 defaults) so an admin can be created at once
+    roles = c.get(f"/api/v1/companies/{d['id']}/roles", headers=h(ctx, "super")).json()
+    keys = {r["key"] for r in roles}
+    assert {"admin", "registrator", "laborant", "vrach", "rahbar"} <= keys
+    assert next(r for r in roles if r["key"] == "admin")["isSystem"] is True
     assert c.post("/api/v1/companies", json={"name": "T-tenant-C2", "slug": f"t-tenant-c-{SFX}"}, headers=h(ctx, "super")).status_code == 409
     assert c.post("/api/v1/companies", json={"name": "T-tenant-C3"}, headers=h(ctx, "admin-a")).status_code == 403
 

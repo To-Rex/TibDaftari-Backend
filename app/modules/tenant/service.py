@@ -17,10 +17,11 @@ from app.core.audit import audit
 from app.core.crypto import decrypt, encrypt
 from app.core.exceptions import ConflictError, ExternalServiceError, NotFoundError, ValidationError
 from app.core.pagination import page_of
+from app.core.permissions import DEFAULT_COMPANY_ROLES
 from app.core.schemas import Page, PageQuery
 from app.core.security import mask_secret
 from app.core.textutil import is_valid_uz_phone, norm_phone, slugify
-from app.infrastructure.db.models import Branch, Company
+from app.infrastructure.db.models import Branch, Company, Role
 from app.infrastructure.redis import cache
 from app.modules.messaging import xabarchi
 from app.modules.tenant import repository as repo
@@ -205,6 +206,11 @@ async def create_company(session: AsyncSession, body: CompanyCreateIn, staff: St
     if body.sms_templates:
         _apply_sms_templates(company, body.sms_templates)
     session.add(company)
+    await session.flush()
+    # every company starts with the standard role set (admin is a system role) so the superadmin
+    # can immediately create its first administrator
+    for spec in DEFAULT_COMPANY_ROLES:
+        session.add(Role(company_id=company.id, key=spec["key"], name=spec["name"], permissions=list(spec["permissions"]), is_system=bool(spec["is_system"]), created_by=staff.id))
     await session.flush()
     await audit(session, actor_type="staff", actor_id=staff.id, company_id=company.id, action="create", entity="company", entity_id=company.id, after=_company_snapshot(company), ip=meta.ip, request_id=meta.request_id)
     return company_out(company, 0, 0)
