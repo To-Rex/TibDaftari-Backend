@@ -136,6 +136,7 @@ class SmsTestIn(CamelModel):
 class SmsTestOut(CamelModel):
     ok: bool
     provider_message_id: str | None = None
+    to: str | None = None
 
 
 class TelegramSettingsIn(CamelModel):

@@ -49,6 +49,17 @@ class XabarchiTransientError(ExternalServiceError):
     """Retryable failure (network, 5xx, 429)."""
 
 
+def _detail(resp: httpx.Response) -> str:
+    """Xabarchi error envelope is flat `{"code", "message"}`; fall back to raw text."""
+    try:
+        data = resp.json()
+        if isinstance(data, dict):
+            return str(data.get("message") or data.get("detail") or data.get("code") or resp.status_code)[:200]
+        return str(data)[:200]
+    except ValueError:
+        return (resp.text or str(resp.status_code))[:200]
+
+
 async def send_sms(api_key: str, to: list[str], text: str, priority: str = "transactional") -> list[ProviderResult]:
     if not api_key:
         raise XabarchiError("Xabarchi API kaliti sozlanmagan", code="sms_not_configured")
@@ -58,16 +69,11 @@ async def send_sms(api_key: str, to: list[str], text: str, priority: str = "tran
     except httpx.HTTPError as exc:
         raise XabarchiTransientError(f"Xabarchi bilan aloqa yo‘q: {exc.__class__.__name__}") from exc
     if resp.status_code in (401, 403):
-        raise XabarchiError("Xabarchi API kaliti rad etildi (401/403)", code="sms_auth_error")
+        raise XabarchiError(f"Xabarchi API kaliti rad etildi ({_detail(resp)})", code="sms_auth_error")
     if resp.status_code == 429 or resp.status_code >= 500:
         raise XabarchiTransientError(f"Xabarchi vaqtincha javob bermadi ({resp.status_code})")
     if resp.status_code >= 400:
-        detail = ""
-        try:
-            detail = str(resp.json())[:300]
-        except Exception:
-            detail = resp.text[:300]
-        raise XabarchiError(f"Xabarchi so‘rovni rad etdi ({resp.status_code}): {detail}", code="sms_rejected")
+        raise XabarchiError(f"Xabarchi so‘rovni rad etdi ({resp.status_code}): {_detail(resp)}", code="sms_rejected")
     try:
         data = resp.json()
     except ValueError as exc:

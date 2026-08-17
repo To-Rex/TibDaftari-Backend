@@ -264,7 +264,7 @@ async def send_test_sms(session: AsyncSession, company_id: uuid.UUID, to_raw: st
     results = await xabarchi.send_sms(api_key, [to], SMS_TEST_TEXT.format(company=company.name), company.sms_default_priority)
     provider_id = results[0].provider_id if results else None
     await audit(session, actor_type="staff", actor_id=staff.id, company_id=company.id, action="sms_test", entity="company", entity_id=company.id, after={"to": to, "providerMessageId": provider_id}, ip=meta.ip, request_id=meta.request_id)
-    return SmsTestOut(ok=True, provider_message_id=provider_id)
+    return SmsTestOut(ok=True, provider_message_id=provider_id, to=to)
 
 
 def _mask_bot_token(token: str) -> str:

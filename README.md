@@ -159,8 +159,8 @@ python -m app.cli create-superadmin --login owner --password '...' --company-slu
 
 Har klinika o‘z SMS akkaunti va o‘z Telegram botiga ega — sozlamalar kompaniya darajasida.
 
-**Xabarchi SMS**
-1. Xabarchi kabinetidan API kalit oling.
+**Xabarchi SMS** (server manzili `XABARCHI_BASE_URL`, standart: `https://manager-xabarchi-backend-bula2s-f6aaa1-13-140-185-49.sslip.io`)
+1. Xabarchi kabinetidan API kalit oling (`xab_live_…`, `sms.send` huquqi).
 2. Sozlamalar → SMS: provayder `xabarchi`, API kalit, ustuvorlik (`urgent`/`transactional`/`bulk`), imzo.
    API: `PUT /api/v1/companies/{id}` (`sms.apiKey` faqat yozish uchun; javobda niqob).
 3. `POST /api/v1/companies/{id}/sms/test` — haqiqiy test SMS.

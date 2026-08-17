@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     trust_proxy_headers: bool = True
 
     # ---- integrations ------------------------------------------------------
-    xabarchi_base_url: str = "https://api.xabarchi.uz"
+    xabarchi_base_url: str = "https://manager-xabarchi-backend-bula2s-f6aaa1-13-140-185-49.sslip.io"
     xabarchi_timeout_seconds: float = 15
     # Returns the OTP in the API response / logs. Never honoured in production.
     otp_dev_mode: bool = False
