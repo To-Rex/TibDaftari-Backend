@@ -215,6 +215,7 @@ def test_overview_merges_clinics_and_redacts_patient(env: dict[str, Any]) -> Non
     assert docs[0]["pdfUrl"] == f"/api/v1/portal/documents/{env['doc']}/pdf"
     companies = {x["id"]: x["name"] for x in body["companies"]}
     assert companies == {env["co_a"]: env["co_a_name"], env["co_b"]: f"T-portal-B-{RUN}"}
+    assert body["branches"] == []  # fixture orders point at non-existent branches
 
 
 def test_order_redacts_unapproved_results_and_hides_foreign(env: dict[str, Any]) -> None:
@@ -254,6 +255,8 @@ def test_document_bundle_and_pdf(env: dict[str, Any]) -> None:
     assert [s["id"] for s in body["schemas"]] == [env["schema"]] and body["schemas"][0]["usedBy"] == 1
     assert body["serviceCodes"] == {env["st"]: env["st_code"]}
     assert body["category"]["id"] == env["cat"]
+    assert body["company"] == {"id": env["co_a"], "name": env["co_a_name"], "logoUrl": None, "phone": None, "address": None}
+    assert body["branch"] is None and body["assets"] == []
 
     r = c.get(f"{API}/portal/documents/{env['doc']}/pdf", headers=env["h"])
     assert r.status_code == 200 and r.headers["content-type"].startswith("application/pdf")

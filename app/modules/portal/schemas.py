@@ -13,7 +13,7 @@ from typing import Literal
 from app.core.schemas import CamelModel
 from app.modules.catalog.schemas import AttributeSchemaOut, CategoryOut
 from app.modules.orders.schemas import OrderItemOut, OrderOut, ResultDocumentOut
-from app.modules.templates.schemas import TemplateOut
+from app.modules.templates.schemas import TemplateAssetOut, TemplateOut
 
 
 class PortalAddressOut(CamelModel):
@@ -53,8 +53,23 @@ class PortalPatientOut(CamelModel):
 
 
 class PortalCompanyOut(CamelModel):
+    """Public clinic card (letterhead data) — no settings, secrets or counters."""
+
     id: str
     name: str
+    logo_url: str | None = None
+    phone: str | None = None
+    address: str | None = None
+
+
+class PortalBranchOut(CamelModel):
+    """Public branch card — enough for `{{branch.*}}` placeholders and place labels."""
+
+    id: str
+    company_id: str
+    name: str
+    address: str | None = None
+    phone: str | None = None
 
 
 class PortalOverviewOut(CamelModel):
@@ -62,12 +77,15 @@ class PortalOverviewOut(CamelModel):
     orders: list[OrderOut]
     documents: list[ResultDocumentOut]
     companies: list[PortalCompanyOut]
+    branches: list[PortalBranchOut]
 
 
 class PortalOrderOut(CamelModel):
     order: OrderOut
     items: list[OrderItemOut]
     documents: list[ResultDocumentOut]
+    company: PortalCompanyOut
+    branch: PortalBranchOut | None = None
 
 
 class PortalDocumentOut(CamelModel):
@@ -79,3 +97,6 @@ class PortalDocumentOut(CamelModel):
     schemas: list[AttributeSchemaOut]
     service_codes: dict[str, str]
     category: CategoryOut | None = None
+    company: PortalCompanyOut
+    branch: PortalBranchOut | None = None
+    assets: list[TemplateAssetOut]

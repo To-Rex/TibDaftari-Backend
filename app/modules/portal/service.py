@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import PatientPrincipal
 from app.core.exceptions import NotFoundError
-from app.infrastructure.db.models import Order, OrderItem, ResultDocument
+from app.infrastructure.db.models import Branch, Company, Order, OrderItem, ResultDocument
 from app.infrastructure.db.models import Patient as PatientModel
 from app.modules.catalog import service as catalog_svc
 from app.modules.orders import service as orders_svc
@@ -22,6 +22,7 @@ from app.modules.orders.schemas import OrderItemOut, ResultDocumentOut
 from app.modules.portal import repository as repo
 from app.modules.portal.schemas import (
     PortalAddressOut,
+    PortalBranchOut,
     PortalCompanyOut,
     PortalDocumentOut,
     PortalLinkOut,
@@ -60,6 +61,25 @@ def patient_out(p: PatientModel) -> PortalPatientOut:
         created_at=p.created_at,
         updated_at=p.updated_at,
     )
+
+
+def company_out(company: Company | None, company_id: uuid.UUID) -> PortalCompanyOut:
+    """Public clinic card; a missing company (hard-deleted) degrades to an id-only card."""
+    if not company:
+        return PortalCompanyOut(id=str(company_id), name="")
+    return PortalCompanyOut(id=str(company.id), name=company.name, logo_url=company.logo_url, phone=company.phone, address=company.address)
+
+
+def branch_out(b: Branch) -> PortalBranchOut:
+    """Public branch card."""
+    return PortalBranchOut(id=str(b.id), company_id=str(b.company_id), name=b.name, address=b.address, phone=b.phone)
+
+
+async def place_of(session: AsyncSession, o: Order) -> tuple[PortalCompanyOut, PortalBranchOut | None]:
+    """Clinic + branch cards of an order (headers and `{{company.*}}` / `{{branch.*}}` placeholders)."""
+    companies = await repo.companies_by_ids(session, [o.company_id])
+    branch = (await repo.branches_by_ids(session, [o.branch_id])).get(o.branch_id)
+    return company_out(companies.get(o.company_id), o.company_id), (branch_out(branch) if branch else None)
 
 
 def document_pdf_url(document_id: uuid.UUID | str) -> str:
@@ -104,11 +124,13 @@ async def overview(session: AsyncSession, principal: PatientPrincipal) -> Portal
         if o.company_id not in company_ids:
             company_ids.append(o.company_id)
     companies = await repo.companies_by_ids(session, company_ids)
+    branches = await repo.branches_by_ids(session, [o.branch_id for o in orders])
     return PortalOverviewOut(
         patient=patient_out(principal.patient),
         orders=[orders_svc.order_out(o) for o in orders],
         documents=[document_out(d) for d in documents],
-        companies=[PortalCompanyOut(id=str(cid), name=companies[cid].name if cid in companies else "") for cid in company_ids],
+        companies=[company_out(companies.get(cid), cid) for cid in company_ids],
+        branches=[branch_out(b) for b in branches.values()],
     )
 
 
@@ -125,10 +147,13 @@ async def order(session: AsyncSession, order_id: uuid.UUID, principal: PatientPr
     o = await get_owned_order(session, order_id, principal)
     items = await repo.items_of_order(session, o.id, o.company_id)
     documents = await repo.documents_of_orders(session, [o.id])
+    company, branch = await place_of(session, o)
     return PortalOrderOut(
         order=orders_svc.order_out(o),
         items=[item_out(i) for i in items],
         documents=[document_out(d) for d in documents],
+        company=company,
+        branch=branch,
     )
 
 
@@ -157,6 +182,8 @@ async def document(session: AsyncSession, document_id: uuid.UUID, principal: Pat
     service_codes = {str(i.service_type_id): codes.get(i.service_type_id) or str(i.service_type_id) for i in items}
     anchor = item or (items[0] if items else None)
     category = await repo.get_category(session, anchor.category_id, d.company_id) if anchor else None
+    company, branch = await place_of(session, o)
+    assets = await repo.assets_of_company(session, d.company_id)
     return PortalDocumentOut(
         document=document_out(d),
         template=templates_svc.template_out(template),
@@ -166,6 +193,9 @@ async def document(session: AsyncSession, document_id: uuid.UUID, principal: Pat
         schemas=[catalog_svc.schema_out(s, usage.get(s.id, 0)) for s in schemas],
         service_codes=service_codes,
         category=catalog_svc.category_out(category) if category else None,
+        company=company,
+        branch=branch,
+        assets=[templates_svc.asset_out(a) for a in assets],
     )
 
 

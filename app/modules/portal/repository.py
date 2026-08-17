@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.infrastructure.db.base import alive
 from app.infrastructure.db.models import (
     AttributeSchema,
+    Branch,
     Category,
     Company,
     Order,
@@ -18,6 +19,7 @@ from app.infrastructure.db.models import (
     ResultDocument,
     ResultTemplate,
     ServiceType,
+    TemplateAsset,
 )
 from app.infrastructure.db.models import Patient as PatientModel
 
@@ -59,6 +61,21 @@ async def companies_by_ids(session: AsyncSession, ids: Iterable[uuid.UUID]) -> d
         return {}
     rows = await session.execute(select(Company).where(Company.id.in_(wanted)))
     return {c.id: c for c in rows.scalars()}
+
+
+async def branches_by_ids(session: AsyncSession, ids: Iterable[uuid.UUID]) -> dict[uuid.UUID, Branch]:
+    """Branches by id (deleted ones included: an order keeps naming its branch)."""
+    wanted = list({i for i in ids if i})
+    if not wanted:
+        return {}
+    rows = await session.execute(select(Branch).where(Branch.id.in_(wanted)))
+    return {b.id: b for b in rows.scalars()}
+
+
+async def assets_of_company(session: AsyncSession, company_id: uuid.UUID) -> list[TemplateAsset]:
+    """Alive template assets (logo/stamp/signature/image) of a clinic — needed to render its documents."""
+    stmt = select(TemplateAsset).where(TemplateAsset.company_id == company_id, alive(TemplateAsset)).order_by(TemplateAsset.created_at.asc())
+    return list((await session.execute(stmt)).scalars())
 
 
 async def get_owned_order(session: AsyncSession, order_id: uuid.UUID, patient_ids: Sequence[uuid.UUID]) -> Order | None:
