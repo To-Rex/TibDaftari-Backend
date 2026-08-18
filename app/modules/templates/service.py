@@ -424,25 +424,14 @@ def sample_values(schema: dict[str, Any] | None) -> dict[str, Any]:
 def _sample_table_rows(f: dict[str, Any]) -> list[dict[str, Any]]:
     """Preview rows for a table field — mirrors the frontend `sampleValues`.
 
-    Preset (seeded) tables preview exactly like the real blank: EVERY preset row, preset cells
-    untouched, only two demo findings ("+6" / "+3" like the legacy SES sheet) in the first empty
-    value column. Tables without presets get 4 synthetic rows.
+    Preset (seeded) tables preview exactly like the empty blank: EVERY preset row, preset cells
+    untouched, result columns empty. Tables without presets get 4 synthetic rows.
     """
     preset = f.get("presetRows") or []
     columns = f.get("columns") or []
     if preset:
-        rows = [dict(r) for r in preset]
-        empty_cols = [
-            c for c in columns
-            if c.get("type") in ("text", "select") and all(r.get(c.get("key")) in (None, "") for r in preset)
-        ]
-        demo = empty_cols[min(1, len(empty_cols) - 1)] if empty_cols else None
-        if demo:
-            for i in (4, 5):
-                if i < len(rows):
-                    opts = demo.get("options") or []
-                    rows[i][demo["key"]] = (opts[0].get("value") if opts else "") if demo.get("type") == "select" else ("+6" if i == 4 else "+3")
-        return rows
+        # every preset row, preset cells untouched, result columns empty (filled by the lab, never by the template)
+        return [dict(r) for r in preset]
     rows = [{} for _ in range(4)]
     for i, row in enumerate(rows):
         for c in columns:
