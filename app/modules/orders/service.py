@@ -61,6 +61,7 @@ from app.modules.orders.schemas import (
     ProgressOut,
     ResultDocumentOut,
     SaveValuesIn,
+    WorklistCountsOut,
     WorklistItemOut,
     WorklistQuery,
 )
@@ -702,6 +703,20 @@ async def worklist(session: AsyncSession, company_id: uuid.UUID, q: WorklistQuer
         for item, number, patient_name, patient_phone, gender, birth_date in rows
     ]
     return page_of(out, q, total)
+
+
+async def worklist_counts(session: AsyncSession, company_id: uuid.UUID, q: WorklistQuery, staff: StaffPrincipal | None = None) -> WorklistCountsOut:
+    """Status-tab counters for the lab/confirm pages (same filters & category restriction as `worklist`)."""
+    allowed = await allowed_category_ids(session, staff, company_id) if staff else None
+    if allowed is not None:
+        wanted = set(repo.parse_uuids(q.category_ids)) if q.category_ids else None
+        effective = (wanted & allowed) if wanted is not None else allowed
+        if not effective:
+            return WorklistCountsOut(all=0, pending=0, entered=0, submitted=0, approved=0, rejected=0, cancelled=0)
+        q = q.model_copy(update={"category_ids": [str(x) for x in effective]})
+    counts = await repo.worklist_counts(session, company_id, q)
+    keys = ("pending", "entered", "submitted", "approved", "rejected", "cancelled")
+    return WorklistCountsOut(all=sum(counts.get(k, 0) for k in keys), **{k: counts.get(k, 0) for k in keys})
 
 
 async def get_item_dto(session: AsyncSession, item_id: uuid.UUID, staff: StaffPrincipal) -> OrderItemOut:

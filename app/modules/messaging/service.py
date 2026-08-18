@@ -25,7 +25,7 @@ from app.core.textutil import fmt_money_ru, is_valid_uz_phone, norm_phone
 from app.core.timeutil import to_iso
 from app.infrastructure.db.models import Company, Notification, OutboxMessage
 from app.modules.messaging import repository as repo
-from app.modules.messaging.schemas import NotificationOut, OutboxMessageOut, OutboxQuery, SendIn
+from app.modules.messaging.schemas import NotificationOut, OutboxCountsOut, OutboxMessageOut, OutboxQuery, SendIn
 
 # ----------------------------------------------------------------------------- texts
 
@@ -242,6 +242,13 @@ async def list_outbox(session: AsyncSession, company_id: uuid.UUID, q: OutboxQue
     """§8 `listOutbox`: status/kind exact, search on `to` digits or folded text, newest first."""
     rows, total = await repo.list_outbox(session, company_id, q, status=q.status, kind=q.kind)
     return page_of([OutboxMessageOut.model_validate(r) for r in rows], q, total)
+
+
+async def outbox_counts(session: AsyncSession, company_id: uuid.UUID, q: OutboxQuery) -> OutboxCountsOut:
+    """Status-tab counters for the messages page (same kind/search filters as the list)."""
+    counts = await repo.outbox_counts(session, company_id, kind=q.kind, search=q.search)
+    keys = ("scheduled", "queued", "sending", "sent", "delivered", "failed")
+    return OutboxCountsOut(all=sum(counts.values()), **{k: counts.get(k, 0) for k in keys})
 
 
 async def send(

@@ -81,6 +81,12 @@ async def role_in_use(session: AsyncSession, role_id: uuid.UUID) -> bool:
     return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
+async def employee_counts_by_role(session: AsyncSession, company_id: uuid.UUID) -> dict[uuid.UUID, int]:
+    """role_id → number of alive employees of the company (one GROUP BY)."""
+    stmt = select(Employee.role_id, func.count()).where(Employee.company_id == company_id, alive(Employee)).group_by(Employee.role_id)
+    return {rid: int(n) for rid, n in (await session.execute(stmt)).all()}
+
+
 async def list_roles(session: AsyncSession, company_id: uuid.UUID) -> Sequence[Role]:
     """Company roles + platform roles (company_id NULL)."""
     stmt = (

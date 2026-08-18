@@ -23,6 +23,18 @@ class OutboxQuery(PageQuery):
     kind: MessageKind | None = None
 
 
+class OutboxCountsOut(CamelModel):
+    """Outbox counters per status for the current filters."""
+
+    all: int
+    scheduled: int
+    queued: int
+    sending: int
+    sent: int
+    delivered: int
+    failed: int
+
+
 class OutboxMessageOut(CamelModel):
     id: uuid.UUID
     company_id: uuid.UUID

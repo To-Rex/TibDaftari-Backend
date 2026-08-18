@@ -71,3 +71,14 @@ def test_restricted_employee_sees_only_own_categories(client: TestClient) -> Non
     if own is not None:
         r = client.put(f"{API}/items/{own['id']}/values", headers=hl, json={"values": own["values"], "labNote": own.get("labNote")})
         assert r.status_code == 200, r.text
+
+
+def test_worklist_counts_match_list_totals(client: TestClient) -> None:
+    admin = _login(client, "admin")
+    h = {"Authorization": f"Bearer {admin['accessToken']}"}
+    cid = admin["companyId"]
+    counts = client.get(f"{API}/companies/{cid}/worklist/counts", headers=h).json()
+    assert set(counts) == {"all", "pending", "entered", "submitted", "approved", "rejected", "cancelled"}
+    assert counts["all"] == sum(v for k, v in counts.items() if k != "all")
+    submitted = client.get(f"{API}/companies/{cid}/worklist", headers=h, params={"pageSize": 1, "status": "submitted"}).json()
+    assert submitted["total"] == counts["submitted"]

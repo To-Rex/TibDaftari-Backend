@@ -30,6 +30,7 @@ from app.modules.orders.schemas import (
     ReasonIn,
     ResultDocumentOut,
     SaveValuesIn,
+    WorklistCountsOut,
     WorklistItemOut,
     WorklistQuery,
 )
@@ -142,6 +143,18 @@ async def worklist(
 ) -> Page[WorklistItemOut]:
     staff.require("lab.worklist.read").scope(company_id)
     return await service.worklist(session, company_id, q, staff)
+
+
+@router.get(
+    "/companies/{company_id}/worklist/counts",
+    response_model=WorklistCountsOut,
+    summary="Lab worklist counters per status (same filters as the worklist)",
+)
+async def worklist_counts(
+    company_id: uuid.UUID, q: Annotated[WorklistQuery, Query()], staff: Staff, session: DbSession
+) -> WorklistCountsOut:
+    staff.require("lab.worklist.read").scope(company_id)
+    return await service.worklist_counts(session, company_id, q, staff)
 
 
 @router.get("/items/{item_id}", response_model=OrderItemOut, summary="Get order item")

@@ -214,6 +214,18 @@ class OrderListQuery(PageQuery):
     patient_id: str | None = None
 
 
+class WorklistCountsOut(CamelModel):
+    """Counts per item status for the current worklist filters (+ `all`)."""
+
+    all: int
+    pending: int
+    entered: int
+    submitted: int
+    approved: int
+    rejected: int
+    cancelled: int
+
+
 class WorklistQuery(PageQuery):
     branch_id: str | None = None
     category_ids: list[str] = Field(default_factory=list)

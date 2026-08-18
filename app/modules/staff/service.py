@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import RequestMeta, StaffPrincipal
+from app.api.deps import RequestMeta, StaffPrincipal, invalidate_principal_cache
 from app.core.audit import audit
 from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from app.core.pagination import page_of
@@ -214,6 +214,7 @@ async def create_employee(session: AsyncSession, company_id: uuid.UUID, body: Em
     await session.flush()
     await audit(session, actor_type="staff", actor_id=staff.id, company_id=company.id, action="create", entity="employee", entity_id=emp.id, after=_employee_snapshot(emp), ip=meta.ip, request_id=meta.request_id)
     await tenant_service.invalidate_company_cache(company.id)
+    await _invalidate_roles_cache(emp.company_id)
     return employee_out(emp)
 
 
@@ -257,6 +258,8 @@ async def update_employee(session: AsyncSession, employee_id: uuid.UUID, body: E
     if revoke:
         await auth_service.revoke_all_for_subject(session, emp.id)
     await audit(session, actor_type="staff", actor_id=staff.id, company_id=emp.company_id, action="update", entity="employee", entity_id=emp.id, before=before, after={**_employee_snapshot(emp), "passwordChanged": bool(body.password)}, ip=meta.ip, request_id=meta.request_id)
+    await invalidate_principal_cache(emp.id)
+    await _invalidate_roles_cache(emp.company_id)
     return employee_out(emp)
 
 
@@ -269,6 +272,7 @@ async def set_overrides(session: AsyncSession, employee_id: uuid.UUID, overrides
     await session.flush()
     await session.refresh(emp, ["updated_at"])
     await audit(session, actor_type="staff", actor_id=staff.id, company_id=emp.company_id, action="set_overrides", entity="employee", entity_id=emp.id, before=before, after={"overrides": emp.overrides}, ip=meta.ip, request_id=meta.request_id)
+    await invalidate_principal_cache(emp.id)
     return employee_out(emp)
 
 
@@ -282,7 +286,8 @@ async def list_roles(session: AsyncSession, company_id: uuid.UUID) -> list[RoleO
     if hit is not None:
         return [RoleOut.model_validate(r) for r in hit]
     await tenant_service.get_company_or_404(session, company_id)
-    roles = [role_out(r) for r in await repo.list_roles(session, company_id)]
+    counts = await repo.employee_counts_by_role(session, company_id)
+    roles = [role_out(r).model_copy(update={"employee_count": counts.get(r.id, 0)}) for r in await repo.list_roles(session, company_id)]
     await cache.set_json(key, [r.model_dump(by_alias=True, mode="json") for r in roles], ROLES_CACHE_TTL)
     return roles
 
@@ -353,6 +358,7 @@ async def update_role(session: AsyncSession, role_id: uuid.UUID, body: RoleUpdat
     await session.flush()
     await audit(session, actor_type="staff", actor_id=staff.id, company_id=role.company_id, action="update", entity="role", entity_id=role.id, before=before, after=_role_snapshot(role), ip=meta.ip, request_id=meta.request_id)
     await _invalidate_roles_cache(role.company_id)
+    await invalidate_principal_cache()
     return role_out(role)
 
 
@@ -369,3 +375,4 @@ async def delete_role(session: AsyncSession, role_id: uuid.UUID, staff: StaffPri
     await session.flush()
     await audit(session, actor_type="staff", actor_id=staff.id, company_id=role.company_id, action="delete", entity="role", entity_id=role.id, before=_role_snapshot(role), ip=meta.ip, request_id=meta.request_id)
     await _invalidate_roles_cache(role.company_id)
+    await invalidate_principal_cache()

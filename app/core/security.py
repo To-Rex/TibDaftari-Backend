@@ -24,7 +24,7 @@ from argon2.exceptions import InvalidHashError, VerifyMismatchError
 from app.core.config import settings
 from app.core.exceptions import AuthError
 
-_hasher = PasswordHasher(time_cost=2, memory_cost=64 * 1024, parallelism=2, hash_len=32, salt_len=16)
+_hasher = PasswordHasher(time_cost=2, memory_cost=24 * 1024, parallelism=1, hash_len=32, salt_len=16)
 
 Actor = Literal["staff", "patient"]
 

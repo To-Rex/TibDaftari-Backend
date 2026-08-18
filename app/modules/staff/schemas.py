@@ -80,6 +80,8 @@ class RoleOut(CamelModel):
     description: str | None = None
     permissions: list[str]
     is_system: bool
+    # denormalised for the roles page (employees of the requesting company using this role)
+    employee_count: int = 0
 
 
 class RoleCreateIn(CamelModel):

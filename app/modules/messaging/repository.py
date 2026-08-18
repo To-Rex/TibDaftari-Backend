@@ -43,6 +43,12 @@ async def list_outbox(session: AsyncSession, company_id: uuid.UUID, q: PageQuery
     return await paginate_query(session, stmt, q, order_by=[OutboxMessage.created_at.desc(), OutboxMessage.id.desc()])
 
 
+async def outbox_counts(session: AsyncSession, company_id: uuid.UUID, *, kind: str | None, search: str | None) -> dict[str, int]:
+    """status → count for the outbox filters (one GROUP BY instead of one request per status tab)."""
+    base = outbox_select(company_id, status=None, kind=kind, search=search).with_only_columns(OutboxMessage.status, func.count()).order_by(None).group_by(OutboxMessage.status)
+    return {str(st): int(n) for st, n in (await session.execute(base)).all()}
+
+
 async def list_notifications(session: AsyncSession, company_id: uuid.UUID, employee_id: uuid.UUID, limit: int = 50) -> list[Notification]:
     """Newest company-wide + personal notifications for one employee."""
     stmt = (

@@ -203,25 +203,20 @@ def _worklist_search(search: str | None) -> ColumnElement[bool] | None:
     return or_(*clauses)
 
 
-async def worklist(session: AsyncSession, company_id: uuid.UUID, q: WorklistQuery) -> tuple[list[Row[Any]], int]:
-    """Items with a schema on paid/partial orders + order snapshots + live patient gender/birth date."""
-    stmt: Select = (
-        select(OrderItem, Order.number, Order.patient_name, Order.patient_phone, Patient.gender, Patient.birth_date)
-        .join(Order, Order.id == OrderItem.order_id)
-        .join(Patient, Patient.id == Order.patient_id, isouter=True)
-        .where(
-            OrderItem.company_id == company_id,
-            alive(OrderItem),
-            alive(Order),
-            OrderItem.schema_id.is_not(None),
-            Order.payment != "unpaid",
-        )
+def _worklist_filters(stmt: Select, company_id: uuid.UUID, q: WorklistQuery, *, with_status: bool) -> Select:
+    """Shared WHERE clause of the worklist (items with a schema on paid/partial orders)."""
+    stmt = stmt.where(
+        OrderItem.company_id == company_id,
+        alive(OrderItem),
+        alive(Order),
+        OrderItem.schema_id.is_not(None),
+        Order.payment != "unpaid",
     )
     if q.branch_id:
         stmt = stmt.where(OrderItem.branch_id == to_uuid(q.branch_id))
     if q.category_ids:
         stmt = stmt.where(OrderItem.category_id.in_(parse_uuids(q.category_ids) or [uuid.UUID(int=0)]))
-    if q.status:
+    if with_status and q.status:
         stmt = stmt.where(OrderItem.status.in_(list(q.status)))
     start, end = day_range(q.date_from, q.date_to)
     if start:
@@ -231,8 +226,27 @@ async def worklist(session: AsyncSession, company_id: uuid.UUID, q: WorklistQuer
     pred = _worklist_search(q.search)
     if pred is not None:
         stmt = stmt.where(pred)
+    return stmt
+
+
+async def worklist(session: AsyncSession, company_id: uuid.UUID, q: WorklistQuery) -> tuple[list[Row[Any]], int]:
+    """Items with a schema on paid/partial orders + order snapshots + live patient gender/birth date."""
+    stmt: Select = (
+        select(OrderItem, Order.number, Order.patient_name, Order.patient_phone, Patient.gender, Patient.birth_date)
+        .join(Order, Order.id == OrderItem.order_id)
+        .join(Patient, Patient.id == Order.patient_id, isouter=True)
+    )
+    stmt = _worklist_filters(stmt, company_id, q, with_status=True)
     order_by = [sort_clause(q.sort_by, q.sort_dir, WORKLIST_SORTABLE, "createdAt"), OrderItem.id.desc()]
     return await paginate_query(session, stmt, q, order_by=order_by, scalars=False)
+
+
+async def worklist_counts(session: AsyncSession, company_id: uuid.UUID, q: WorklistQuery) -> dict[str, int]:
+    """Per-status counts for the same filters (one GROUP BY instead of one request per status tab)."""
+    stmt: Select = select(OrderItem.status, func.count()).join(Order, Order.id == OrderItem.order_id)
+    stmt = _worklist_filters(stmt, company_id, q, with_status=False).group_by(OrderItem.status)
+    rows = (await session.execute(stmt)).all()
+    return {str(status): int(n) for status, n in rows}
 
 
 # ----------------------------------------------------------------------------- documents

@@ -103,6 +103,7 @@ def create_app() -> FastAPI:
         if settings.is_production:
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         duration = (time.perf_counter() - started) * 1000
+        response.headers["Server-Timing"] = f"app;dur={duration:.1f}"
         if duration > 1000:
             log.warning("slow request %s %s %.0fms", request.method, request.url.path, duration)
         return response
@@ -114,8 +115,8 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["X-Request-ID", "Content-Disposition", "X-Invalid-Recipients"],
-        max_age=600,
+        expose_headers=["X-Request-ID", "Content-Disposition", "Server-Timing", "X-Invalid-Recipients"],
+        max_age=7200,  # browsers cap preflight caching at 2h (Chrome); fewer OPTIONS round trips
     )
     app.include_router(api_router, prefix="/api/v1")
 
