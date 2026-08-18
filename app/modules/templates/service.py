@@ -422,12 +422,32 @@ def sample_values(schema: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _sample_table_rows(f: dict[str, Any]) -> list[dict[str, Any]]:
+    """Preview rows for a table field — mirrors the frontend `sampleValues`.
+
+    Preset (seeded) tables preview exactly like the real blank: EVERY preset row, preset cells
+    untouched, only two demo findings ("+6" / "+3" like the legacy SES sheet) in the first empty
+    value column. Tables without presets get 4 synthetic rows.
+    """
     preset = f.get("presetRows") or []
-    rows = [dict(r) for r in preset[:8]] if preset else [{} for _ in range(4)]
+    columns = f.get("columns") or []
+    if preset:
+        rows = [dict(r) for r in preset]
+        empty_cols = [
+            c for c in columns
+            if c.get("type") in ("text", "select") and all(r.get(c.get("key")) in (None, "") for r in preset)
+        ]
+        demo = empty_cols[min(1, len(empty_cols) - 1)] if empty_cols else None
+        if demo:
+            for i in (4, 5):
+                if i < len(rows):
+                    opts = demo.get("options") or []
+                    rows[i][demo["key"]] = (opts[0].get("value") if opts else "") if demo.get("type") == "select" else ("+6" if i == 4 else "+3")
+        return rows
+    rows = [{} for _ in range(4)]
     for i, row in enumerate(rows):
-        for c in f.get("columns") or []:
+        for c in columns:
             ck = c.get("key")
-            if not ck or row.get(ck) not in (None, ""):
+            if not ck:
                 continue
             ctype = c.get("type")
             opts = c.get("options") or []
@@ -438,7 +458,7 @@ def _sample_table_rows(f: dict[str, Any]) -> list[dict[str, Any]]:
             elif ctype == "boolean":
                 row[ck] = i % 2 == 0
             elif ctype == "multiselect":
-                row[ck] = [o.get("value") for o in opts[:1]]
+                row[ck] = [opts[0].get("value")] if opts else []
             else:
                 row[ck] = f"Namuna {i + 1}"
     return rows
