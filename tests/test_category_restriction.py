@@ -5,9 +5,8 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from fastapi.testclient import TestClient
-
 from app.core.config import settings
+from fastapi.testclient import TestClient
 
 API = "/api/v1"
 
