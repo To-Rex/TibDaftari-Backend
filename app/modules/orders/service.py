@@ -847,16 +847,20 @@ async def _resolve_item_template(session: AsyncSession, item: OrderItem, templat
         st[item.service_type_id].default_template_id if item.service_type_id in st else None
     )
     tpl = await repo.get_template(session, wanted, item.company_id) if wanted else None
+    if tpl is not None and tpl.branch_ids and item.branch_id not in tpl.branch_ids:
+        tpl = None  # bound to other branches — fall through the chain
     if tpl is None:
-        tpl = await repo.find_active_template(session, item.company_id, item.service_type_id, item.category_id)
+        tpl = await repo.find_active_template(session, item.company_id, item.service_type_id, item.category_id, item.branch_id)
     if tpl is None:
-        tpl = await repo.find_generic_template(session, item.company_id)
+        tpl = await repo.find_generic_template(session, item.company_id, item.branch_id)
     if tpl is None:
         raise ValidationError("Bu xizmat uchun faol shablon yo‘q", code="no_template")
     return tpl
 
 
 def _covers(tpl: ResultTemplate, item: OrderItem) -> bool:
+    if tpl.branch_ids and item.branch_id not in tpl.branch_ids:
+        return False  # template belongs to other branches
     st_ids, cat_ids = list(tpl.service_type_ids or []), list(tpl.category_ids or [])
     return item.service_type_id in st_ids or item.category_id in cat_ids or (not st_ids and not cat_ids)
 

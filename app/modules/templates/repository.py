@@ -21,8 +21,10 @@ async def list_templates(
     *,
     status: str | None = None,
     service_type_id: uuid.UUID | None = None,
+    branch_id: uuid.UUID | None = None,
 ) -> Sequence[ResultTemplate]:
-    """Alive templates of a company, updated_at desc; `service_type_id` → bound to it OR generic (empty)."""
+    """Alive templates of a company, updated_at desc; `service_type_id` → bound to it OR generic (empty);
+    `branch_id` → available in that branch (bound to it OR bound to no branch)."""
     stmt = select(ResultTemplate).where(ResultTemplate.company_id == company_id, alive(ResultTemplate))
     if status:
         stmt = stmt.where(ResultTemplate.status == status)
@@ -30,6 +32,8 @@ async def list_templates(
         stmt = stmt.where(
             ResultTemplate.service_type_ids.any(service_type_id) | (func.cardinality(ResultTemplate.service_type_ids) == 0)
         )
+    if branch_id is not None:
+        stmt = stmt.where(ResultTemplate.branch_ids.any(branch_id) | (func.cardinality(ResultTemplate.branch_ids) == 0))
     stmt = stmt.order_by(ResultTemplate.updated_at.desc(), ResultTemplate.id.desc())
     return (await session.execute(stmt)).scalars().all()
 

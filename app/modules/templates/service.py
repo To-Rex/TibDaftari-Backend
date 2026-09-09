@@ -136,6 +136,7 @@ def template_out(t: ResultTemplate) -> TemplateOut:
         version=t.version,
         service_type_ids=[str(x) for x in t.service_type_ids or []],
         category_ids=[str(x) for x in t.category_ids or []],
+        branch_ids=[str(x) for x in t.branch_ids or []],
         scope=t.scope,
         language=t.language,
         doc=t.doc or empty_doc(),
@@ -169,6 +170,7 @@ def _snapshot_of(t: ResultTemplate) -> dict[str, Any]:
         "language": t.language,
         "serviceTypeIds": [str(x) for x in t.service_type_ids or []],
         "categoryIds": [str(x) for x in t.category_ids or []],
+        "branchIds": [str(x) for x in t.branch_ids or []],
         "elements": len((t.doc or {}).get("elements") or []),
     }
 
@@ -193,7 +195,7 @@ async def get_template_or_404(session: AsyncSession, template_id: uuid.UUID, com
 
 async def list_templates(session: AsyncSession, company_id: uuid.UUID, q: TemplateQuery) -> list[TemplateOut]:
     """Templates of a company: status exact, serviceTypeId → bound or generic, folded search on name; updatedAt desc."""
-    rows = await repo.list_templates(session, company_id, status=q.status, service_type_id=_parse_uuid(q.service_type_id))
+    rows = await repo.list_templates(session, company_id, status=q.status, service_type_id=_parse_uuid(q.service_type_id), branch_id=_parse_uuid(q.branch_id))
     return [template_out(t) for t in rows if matches(t.name, q.search)]
 
 
@@ -213,6 +215,7 @@ def _template_from_cache(row: dict[str, Any]) -> ResultTemplate:
         version=row["version"],
         service_type_ids=[uuid.UUID(x) for x in row["serviceTypeIds"]],
         category_ids=[uuid.UUID(x) for x in row["categoryIds"]],
+        branch_ids=[uuid.UUID(x) for x in row.get("branchIds") or []],
         scope=row["scope"],
         language=row["language"],
         doc=row["doc"],
@@ -261,6 +264,7 @@ async def create_template(session: AsyncSession, company_id: uuid.UUID, body: Te
         version=1,
         service_type_ids=_uuid_list(body.service_type_ids),
         category_ids=_uuid_list(body.category_ids),
+        branch_ids=_uuid_list(body.branch_ids),
         scope=body.scope or "item",
         language=body.language or "uz",
         doc=body.doc if body.doc is not None else empty_doc(),
@@ -288,6 +292,8 @@ async def update_template(session: AsyncSession, template_id: uuid.UUID, body: T
         row.service_type_ids = _uuid_list(body.service_type_ids)
     if "category_ids" in data:
         row.category_ids = _uuid_list(body.category_ids)
+    if "branch_ids" in data:
+        row.branch_ids = _uuid_list(body.branch_ids)
     if "scope" in data and body.scope:
         row.scope = body.scope
     if "language" in data and body.language:
@@ -330,6 +336,7 @@ async def duplicate_template(session: AsyncSession, template_id: uuid.UUID, staf
         version=1,
         service_type_ids=list(src.service_type_ids or []),
         category_ids=list(src.category_ids or []),
+        branch_ids=list(src.branch_ids or []),
         scope=src.scope,
         language=src.language,
         doc=dict(src.doc or empty_doc()),

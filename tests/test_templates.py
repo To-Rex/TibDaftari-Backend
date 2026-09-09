@@ -244,7 +244,8 @@ def h(ctx: dict, who: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {ctx['tokens'][who]}"}
 
 
-TEMPLATE_KEYS = {"id", "companyId", "name", "description", "status", "version", "serviceTypeIds", "categoryIds", "scope", "language", "doc", "thumbnailUrl", "usage", "createdAt", "updatedAt"}
+TEMPLATE_KEYS = {"id", "companyId", "name", "description", "status", "version", "serviceTypeIds", "categoryIds",
+    "branchIds", "scope", "language", "doc", "thumbnailUrl", "usage", "createdAt", "updatedAt"}
 
 
 def test_templates_api_lifecycle(ctx: dict) -> None:

@@ -64,6 +64,8 @@ def validate_doc(doc: Any) -> dict[str, Any]:
 class TemplateQuery(CamelModel):
     status: TemplateStatus | None = None
     service_type_id: str | None = None
+    # only templates available in this branch (bound to it OR bound to no branch)
+    branch_id: str | None = None
     search: str | None = Field(default=None, max_length=200)
 
 
@@ -76,6 +78,7 @@ class TemplateOut(CamelModel):
     version: int
     service_type_ids: list[str]
     category_ids: list[str]
+    branch_ids: list[str]
     scope: TemplateScope
     language: TemplateLanguage
     doc: dict[str, Any]
@@ -90,6 +93,7 @@ class _TemplateWrite(CamelModel):
     description: str | None = Field(default=None, max_length=2000)
     service_type_ids: list[str] | None = Field(default=None, max_length=500)
     category_ids: list[str] | None = Field(default=None, max_length=500)
+    branch_ids: list[str] | None = Field(default=None, max_length=100)
     scope: TemplateScope | None = None
     language: TemplateLanguage | None = None
     doc: dict[str, Any] | None = None

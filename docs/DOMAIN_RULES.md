@@ -90,7 +90,8 @@ verbatim in the UI.
 * `publishSchema`: no fields → 422 empty; sets published; no version bump.
 
 ## 6. Templates
-* `list(q)`: status exact; serviceTypeId → `serviceTypeIds contains id OR serviceTypeIds empty`; search on name; sort updatedAt desc; full `doc` included.
+* `list(q)`: status exact; serviceTypeId → `serviceTypeIds contains id OR serviceTypeIds empty`; branchId → `branchIds contains id OR branchIds empty` (templates may be bound to branches; empty = every branch); search on name; sort updatedAt desc; full `doc` included.
+* **Branch binding**: `ResultTemplate.branchIds` (empty = all branches). The approval chain (explicit/default → active bound → active generic) and order-scope coverage only consider templates whose `branchIds` is empty or contains the item's branch.
 * `save` update: `version += 1` iff payload has `doc` AND status == active; doc/serviceTypeIds/categoryIds replaced wholesale. Create defaults: name 'Yangi shablon', status draft, version 1, scope item, language uz, doc = emptyDoc (A4 portrait #ffffff margin 40, elements []), usage 0.
 * `setStatus`: active with 0 elements → 422 empty. `duplicate`: name `"<name> (nusxa)"`, status draft, version 1, usage 0, bindings copied. `delete`: active → 409 active; else soft delete.
 * `listAssets` / `uploadAsset({kind,name,url(dataURI),width,height,employeeId?})` → store bytes in stored_files; `url` returned = `/api/v1/files/{fileId}` (public GET, cacheable, sniffed mime).

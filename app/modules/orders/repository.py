@@ -361,10 +361,15 @@ async def get_template(session: AsyncSession, template_id: uuid.UUID, company_id
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+def _branch_ok(branch_id: uuid.UUID):
+    """Template is usable in the branch: bound to it, or bound to no branch at all."""
+    return ResultTemplate.branch_ids.any(branch_id) | (func.cardinality(ResultTemplate.branch_ids) == 0)
+
+
 async def find_active_template(
-    session: AsyncSession, company_id: uuid.UUID, service_type_id: uuid.UUID, category_id: uuid.UUID
+    session: AsyncSession, company_id: uuid.UUID, service_type_id: uuid.UUID, category_id: uuid.UUID, branch_id: uuid.UUID
 ) -> ResultTemplate | None:
-    """First active template bound to the service type or its category (oldest first, deterministic)."""
+    """First active template of the branch bound to the service type or its category (oldest first)."""
     stmt = (
         select(ResultTemplate)
         .where(
@@ -372,6 +377,7 @@ async def find_active_template(
             alive(ResultTemplate),
             ResultTemplate.status == "active",
             or_(ResultTemplate.service_type_ids.any(service_type_id), ResultTemplate.category_ids.any(category_id)),
+            _branch_ok(branch_id),
         )
         .order_by(ResultTemplate.created_at, ResultTemplate.id)
         .limit(1)
@@ -379,8 +385,8 @@ async def find_active_template(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def find_generic_template(session: AsyncSession, company_id: uuid.UUID) -> ResultTemplate | None:
-    """First active template with no service-type bindings (catch-all)."""
+async def find_generic_template(session: AsyncSession, company_id: uuid.UUID, branch_id: uuid.UUID) -> ResultTemplate | None:
+    """First active template of the branch with no service-type bindings (catch-all)."""
     stmt = (
         select(ResultTemplate)
         .where(
@@ -388,6 +394,7 @@ async def find_generic_template(session: AsyncSession, company_id: uuid.UUID) ->
             alive(ResultTemplate),
             ResultTemplate.status == "active",
             func.cardinality(ResultTemplate.service_type_ids) == 0,
+            _branch_ok(branch_id),
         )
         .order_by(ResultTemplate.created_at, ResultTemplate.id)
         .limit(1)

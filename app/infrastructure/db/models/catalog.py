@@ -70,6 +70,8 @@ class ResultTemplate(PKMixin, AuditMixin, SoftDeleteMixin, TenantMixin, Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     service_type_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)), nullable=False, default=list)
     category_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)), nullable=False, default=list)
+    # branches this template belongs to; empty = every branch of the company
+    branch_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)), nullable=False, default=list, server_default=text("'{}'::uuid[]"))
     scope: Mapped[str] = mapped_column(String(10), nullable=False, default="item")  # item | order
     language: Mapped[str] = mapped_column(String(2), nullable=False, default="uz")
     doc: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
