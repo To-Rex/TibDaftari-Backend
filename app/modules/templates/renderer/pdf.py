@@ -30,6 +30,18 @@ FONT_DIR = Path(__file__).parent / "fonts"
 PX_TO_PT = 0.75
 PAPER_PX: dict[str, tuple[float, float]] = {"A4": (794, 1123), "A5": (559, 794), "Letter": (816, 1056)}
 ABN = "#c2413f"
+def _header_groups(cols: list[dict[str, Any]]) -> list[tuple[str | None, int, int]]:
+    """Consecutive columns sharing `group` → (group, first index, count); ungrouped columns are singletons."""
+    out: list[tuple[str | None, int, int]] = []
+    for i, c in enumerate(cols):
+        g = str(c.get("group") or "") or None
+        if out and out[-1][0] is not None and out[-1][0] == g:
+            out[-1] = (g, out[-1][1], out[-1][2] + 1)
+        else:
+            out.append((g, i, 1))
+    return out
+
+
 def _visible_rows(rows: list[Any], cols: list[dict[str, Any]], el: dict[str, Any], cell_text: Any) -> list[Any]:
     """`hideEmptyRows` + `maxRows` — same rule as the frontend `visibleTableRows`: value columns are the
     ones flagged `valueColumn`, else every column but the first; a row survives if any value cell is non-empty."""
@@ -525,13 +537,17 @@ class _Renderer:
         head_st = _style(el.get("headerStyle"))
         cell_st = _style(el.get("cellStyle"))
         row_h_min = _num(el.get("rowHeight"), 22)
+        nowrap = bool(el.get("nowrap"))
         bw = _num(el.get("borderWidth"), 1)
         bcolor = parse_color(el.get("borderColor")) or (195, 206, 201)
         zebra = parse_color(el.get("zebra"))
         show_num = bool(el.get("showRowNumber"))
         highlight = bool(el.get("highlightAbnormal"))
         total_w = sum(_num(c.get("width")) for c in cols_def) or 1.0
-        num_w = ROW_NUMBER_W if show_num else 0.0
+        num_w = _num(el.get("numberWidth"), ROW_NUMBER_W) if show_num else 0.0
+        num_header = str(el.get("numberHeader") or "№")
+        groups = _header_groups(cols_def)
+        has_groups = any(g[0] for g in groups)
         avail = max(0.0, w - num_w)
         widths = [_num(c.get("width")) / total_w * avail for c in cols_def]
 
@@ -556,17 +572,23 @@ class _Renderer:
             return (", ".join(ex.fmt(i) for i in v) if isinstance(v, list) else ex.fmt(v)), False
 
         # --- layout: compute row heights first (text wraps grow rows), then draw within the clip
-        def row_height(cells: list[tuple[str, str]], st: dict[str, Any], pad_v: float, weights: list[int | None]) -> tuple[float, list[list[tuple[str, bool]]]]:
+        def row_height(cells: list[tuple[str, str]], st: dict[str, Any], pad_v: float, weights: list[int | None], *, single: bool = False) -> tuple[float, list[list[tuple[str, bool]]]]:
+            # single-line rows (el.nowrap): no wrapping, no vertical padding — a row is exactly rowHeight unless the font is taller
             self.set_font(st)
             _, lh, _ = self.metrics(st)
             wrapped: list[list[tuple[str, bool]]] = []
             best = row_h_min
             for (text, _align), cw, wt in zip(cells, widths, weights, strict=False):
                 self.set_font(st, weight=wt)
-                lines = self.wrap(text, max(0.0, cw - 12)) if text else [("", True)]
+                lines = [(text, True)] if single else (self.wrap(text, max(0.0, cw - 12)) if text else [("", True)])
                 wrapped.append(lines)
-                best = max(best, len(lines) * lh + 2 * pad_v)
+                best = max(best, len(lines) * lh + (0.0 if single else 2 * pad_v))
             return best, wrapped
+
+        # header cells follow the column alignment unless the header style asks for centre/right explicitly
+        def head_align(c: dict[str, Any]) -> str:
+            ha = str(head_st.get("align") or "")
+            return ha if ha in ("center", "right") else str(c.get("align") or "left")
 
         # static tables may leave `bind` empty — cells are then addressed by column index (same as the frontend)
         def key_of(c: dict[str, Any], i: int) -> str:
@@ -577,21 +599,60 @@ class _Renderer:
         with self.clip(x, y, w, h):
             cy = y
             boundaries: list[float] = [y]
+            group_row: tuple[float, float] | None = None  # (top, bottom) of the spanning header row
             if el.get("showHeader"):
-                cells = [(str(c.get("header") or ""), str(c.get("align") or "left")) for c in cols_def]
-                rh, wrapped = row_height(cells, head_st, 4.0, [None] * len(cells))
-                self.draw_row(x, cy, rh, num_w, widths, "№" if show_num else None, cells, wrapped, head_st, 4.0, [False] * len(cells), highlight=False)
-                cy += rh
-                boundaries.append(cy)
+                if has_groups:
+                    # row 1: spanning group cells; ungrouped columns + № span both header rows
+                    span_cells = [(str(g[0] or cols_def[g[1]].get("header") or ""), "center" if g[0] else head_align(cols_def[g[1]])) for g in groups]
+                    span_widths = [sum(widths[g[1] : g[1] + g[2]]) for g in groups]
+                    self.set_font(head_st)
+                    _, lh, _ = self.metrics(head_st)
+                    rh1 = row_h_min
+                    wrapped1: list[list[tuple[str, bool]]] = []
+                    for (text, _a), cw in zip(span_cells, span_widths, strict=False):
+                        lines = self.wrap(text, max(0.0, cw - 12)) if text else [("", True)]
+                        wrapped1.append(lines)
+                        rh1 = max(rh1, len(lines) * lh + 8.0)
+                    cells2 = [(str(c.get("header") or ""), head_align(c)) for c in cols_def]
+                    rh2, wrapped2 = row_height(cells2, head_st, 4.0, [None] * len(cells2))
+                    # ungrouped columns are drawn once, vertically centred across both rows
+                    self.draw_row(x, cy, rh1 + rh2, num_w, [], num_header if show_num else None, [], [], head_st, 4.0, [], highlight=False)
+                    cx = x + num_w
+                    for (text, align), lines, cw, g in zip(span_cells, wrapped1, span_widths, groups, strict=False):
+                        if g[0]:
+                            self.draw_cells(cx, cy, rh1, [cw], [(text, align)], [lines], head_st, [False], highlight=False)
+                            # sub-headers of the grouped columns
+                            sub_w = widths[g[1] : g[1] + g[2]]
+                            sub_cells = cells2[g[1] : g[1] + g[2]]
+                            sub_wrapped = wrapped2[g[1] : g[1] + g[2]]
+                            self.draw_cells(cx, cy + rh1, rh2, sub_w, sub_cells, sub_wrapped, head_st, [False] * len(sub_w), highlight=False)
+                        else:
+                            self.draw_cells(cx, cy, rh1 + rh2, [cw], [(text, align)], [lines], head_st, [False], highlight=False)
+                        cx += cw
+                    group_row = (cy, cy + rh1)
+                    cy += rh1 + rh2
+                    boundaries.append(cy)
+                else:
+                    cells = [(str(c.get("header") or ""), head_align(c)) for c in cols_def]
+                    rh, wrapped = row_height(cells, head_st, 4.0, [None] * len(cells))
+                    self.draw_row(x, cy, rh, num_w, widths, num_header if show_num else None, cells, wrapped, head_st, 4.0, [False] * len(cells), highlight=False)
+                    cy += rh
+                    boundaries.append(cy)
             for i, r in enumerate(rows):
                 if cy >= y + h:
                     break
                 formatted = [fmt_cell(r, key_of(c, ci)) for ci, c in enumerate(cols_def)]
                 cells = [(t, str(c.get("align") or "left")) for (t, _), c in zip(formatted, cols_def, strict=True)]
                 abn = [a and highlight for _, a in formatted]
-                rh, wrapped = row_height(cells, cell_st, 3.0, [600 if a else None for a in abn])
+                rh, wrapped = row_height(cells, cell_st, 3.0, [600 if a else None for a in abn], single=nowrap)
                 if zebra is not None and i % 2 == 1:
                     self.fill_rect(x, cy, w, rh, zebra)
+                fx = x + num_w
+                for (text, _a), cw, c in zip(cells, widths, cols_def, strict=False):
+                    fill = parse_color(c.get("fillIfSet")) if c.get("fillIfSet") else None
+                    if fill is not None and text.strip():
+                        self.fill_rect(fx, cy, cw, rh, fill)
+                    fx += cw
                 self.draw_row(x, cy, rh, num_w, widths, str(i + 1) if show_num else None, cells, wrapped, cell_st, 3.0, abn, highlight=highlight)
                 cy += rh
                 boundaries.append(cy)
@@ -603,13 +664,46 @@ class _Renderer:
                 cx = x + num_w if show_num else x
                 if show_num:
                     xs.append(cx)
+                span_starts: set[int] = set()
                 for cw in widths[:-1]:
                     cx += cw
                     xs.append(cx)
-                for bx in xs:  # inner vertical rules
-                    self.vline(bx, y, bottom, bw, bcolor)
+                if group_row is not None:
+                    # inside a spanning header cell there is no vertical rule; the line under the group
+                    # cell only runs across the spanned columns
+                    starts = {g[1] for g in groups}
+                    inner_x = x + num_w
+                    for k, cw in enumerate(widths):
+                        if k > 0 and k not in starts:
+                            span_starts.add(k)
+                        inner_x += cw
+                    gx = x + num_w
+                    for g, cw in zip(groups, [sum(widths[g[1] : g[1] + g[2]]) for g in groups], strict=False):
+                        if g[0]:
+                            self.hline(gx, gx + cw, group_row[1], bw, bcolor)
+                        gx += cw
+                for k, bx in enumerate(xs):  # inner vertical rules
+                    col_index = k - (1 if show_num else 0) + 1
+                    top = group_row[1] if (group_row is not None and col_index in span_starts) else y
+                    self.vline(bx, top, bottom, bw, bcolor)
                 # outer rectangle inset so the full stroke stays inside the element box
                 self.stroke_rect(x, y, w, bottom - y, bcolor, bw)
+
+    def draw_cells(
+        self,
+        cx: float,
+        cy: float,
+        rh: float,
+        widths: list[float],
+        cells: list[tuple[str, str]],
+        wrapped: list[list[tuple[str, bool]]],
+        st: dict[str, Any],
+        abnormal: list[bool],
+        *,
+        highlight: bool,
+    ) -> None:
+        """Cells only (no № column) starting at `cx` — used for the two-row (grouped) header."""
+        self.draw_row(cx, cy, rh, 0.0, widths, None, cells, wrapped, st, 4.0, abnormal, highlight=highlight)
 
     def draw_row(
         self,
