@@ -30,6 +30,21 @@ FONT_DIR = Path(__file__).parent / "fonts"
 PX_TO_PT = 0.75
 PAPER_PX: dict[str, tuple[float, float]] = {"A4": (794, 1123), "A5": (559, 794), "Letter": (816, 1056)}
 ABN = "#c2413f"
+def _visible_rows(rows: list[Any], cols: list[dict[str, Any]], el: dict[str, Any], cell_text: Any) -> list[Any]:
+    """`hideEmptyRows` + `maxRows` — same rule as the frontend `visibleTableRows`: value columns are the
+    ones flagged `valueColumn`, else every column but the first; a row survives if any value cell is non-empty."""
+    out = rows
+    if el.get("hideEmptyRows") and cols:
+        flagged = [c for c in cols if c.get("valueColumn")]
+        value_cols = flagged or cols[1:]
+        if value_cols:
+            out = [r for r in out if any(str(cell_text(r, c) or "").strip() for c in value_cols)]
+    max_rows = el.get("maxRows")
+    if isinstance(max_rows, int | float) and max_rows > 0:
+        out = out[: int(max_rows)]
+    return out
+
+
 ROW_NUMBER_W = 28.0
 DEFAULT_STYLE: dict[str, Any] = {
     "fontFamily": "sans",
@@ -501,7 +516,12 @@ class _Renderer:
         if fkey:
             rows = ex.table_rows(self.ctx, fkey)
         else:
-            rows = [{(c.get("bind") or str(i)): (r[i] if i < len(r) else "") for i, c in enumerate(cols_def)} for r in (el.get("staticRows") or []) if isinstance(r, list)]
+            # static tables: every cell is template text — placeholders resolve against the document context
+            rows = [
+                {(c.get("bind") or str(i)): ex.interpolate(str(r[i]) if i < len(r) and r[i] is not None else "", self.ctx) for i, c in enumerate(cols_def)}
+                for r in (el.get("staticRows") or [])
+                if isinstance(r, list)
+            ]
         head_st = _style(el.get("headerStyle"))
         cell_st = _style(el.get("cellStyle"))
         row_h_min = _num(el.get("rowHeight"), 22)
@@ -548,6 +568,12 @@ class _Renderer:
                 best = max(best, len(lines) * lh + 2 * pad_v)
             return best, wrapped
 
+        # static tables may leave `bind` empty — cells are then addressed by column index (same as the frontend)
+        def key_of(c: dict[str, Any], i: int) -> str:
+            return str(c.get("bind") or "") if fkey else str(c.get("bind") or i)
+
+        rows = _visible_rows(rows, cols_def, el, lambda r, c: fmt_cell(r, key_of(c, cols_def.index(c)))[0])
+
         with self.clip(x, y, w, h):
             cy = y
             boundaries: list[float] = [y]
@@ -560,7 +586,7 @@ class _Renderer:
             for i, r in enumerate(rows):
                 if cy >= y + h:
                     break
-                formatted = [fmt_cell(r, str(c.get("bind") or "")) for c in cols_def]
+                formatted = [fmt_cell(r, key_of(c, ci)) for ci, c in enumerate(cols_def)]
                 cells = [(t, str(c.get("align") or "left")) for (t, _), c in zip(formatted, cols_def, strict=True)]
                 abn = [a and highlight for _, a in formatted]
                 rh, wrapped = row_height(cells, cell_st, 3.0, [600 if a else None for a in abn])

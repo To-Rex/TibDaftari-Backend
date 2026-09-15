@@ -105,6 +105,7 @@ horizontal: from (x,y) to (x+w,y), thickness strokeWidth growing DOWN from y (h 
 src = el.src or asset(el.assetId).url. fit: contain (aspect, centred, letterbox) | cover (aspect, centred, cropped — clip) | fill (stretch). Missing src → box with 1px dashed #999 border and centred text "image" 10px #999. Data URIs (png/jpg/svg) and stored asset files must be supported; SVG via fpdf2 svg support, raster fallback ok.
 
 ### 3.8 table
+**Additions (2026-09):** static-table cells ARE interpolated (`{patient.fullName}` etc.) in both renderers; `el.hideEmptyRows` drops rows whose value columns (`column.valueColumn`, else every column but the first) are all empty; `el.maxRows` truncates the rows. Editor raw mode shows static rows as typed.
 rows = fieldKey ? tableRows(ctx, fieldKey) : staticRows mapped to dict {col.bind or str(i): r[i] or ''}. cols = TableField.columns of schema field `fieldKey` if it is a table field else [].
 Column `bind` = plain key lookup `row[bind]` (never interpolated). For 'items' the keys are i/code/name/status/<field keys> (already strings). Static tables: positional rows keyed by bind (bind '' → empty cell; `{row.x}`-style bind is NOT interpolated).
 fmtCell(row, bind): v None/'' → ('', False); col select → (label or str(v), option.flag in abnormal/critical); multiselect list → (labels joined ', ', False); boolean → (trueLabel or '✓' / falseLabel or '—', False); number & numeric → (str(v) [decimals ignored], abnormal by references[0] min/max only); else (', '.join(v) if list else str(v), False).
