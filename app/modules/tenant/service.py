@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Mapping
 from typing import Any
 
 import httpx
@@ -59,9 +60,11 @@ async def invalidate_company_cache(company_id: uuid.UUID | str) -> None:
 # ----------------------------------------------------------------------------- mapping
 
 
-def company_out(company: Company, branch_count: int, employee_count: int) -> CompanyOut:
-    """Company DTO — secrets are exposed only as masks; raw `settings` never leaves the backend."""
+def company_out(company: Company, branch_count: int, employee_count: int, names: Mapping[str, str] | None = None) -> CompanyOut:
+    """Company DTO — secrets are exposed only as masks; raw `settings` never leaves the backend.
+    `names` (`{id: name}` from `repo.geo_names`) resolves the location ids for display."""
     settings_ = company.settings or {}
+    n = names or {}
     return CompanyOut(
         id=str(company.id),
         name=company.name,
@@ -71,6 +74,12 @@ def company_out(company: Company, branch_count: int, employee_count: int) -> Com
         phone=company.phone,
         email=company.email,
         address=company.address,
+        country_id=str(company.country_id) if company.country_id else None,
+        region_id=str(company.region_id) if company.region_id else None,
+        district_id=str(company.district_id) if company.district_id else None,
+        country_name=n.get(str(company.country_id)) if company.country_id else None,
+        region_name=n.get(str(company.region_id)) if company.region_id else None,
+        district_name=n.get(str(company.district_id)) if company.district_id else None,
         locale=company.locale,  # type: ignore[arg-type]
         is_active=company.is_active,
         sms=CompanySmsOut(
@@ -119,7 +128,7 @@ async def get_company_or_404(session: AsyncSession, company_id: uuid.UUID | str)
 
 async def _company_dto(session: AsyncSession, company: Company) -> CompanyOut:
     bc, ec = await repo.company_counts(session, company.id)
-    return company_out(company, bc, ec)
+    return company_out(company, bc, ec, await repo.geo_names(session, [company]))
 
 
 # ----------------------------------------------------------------------------- companies
@@ -128,7 +137,8 @@ async def _company_dto(session: AsyncSession, company: Company) -> CompanyOut:
 async def list_companies(session: AsyncSession, q: PageQuery) -> Page[CompanyOut]:
     """Platform list (superadmin) with computed branch/employee counts."""
     rows, total = await repo.list_companies(session, q)
-    return page_of([company_out(c, bc, ec) for c, bc, ec in rows], q, total)
+    names = await repo.geo_names(session, [c for c, _, _ in rows])
+    return page_of([company_out(c, bc, ec, names) for c, bc, ec in rows], q, total)
 
 
 async def get_company_dto(session: AsyncSession, company_id: uuid.UUID) -> CompanyOut:
@@ -169,6 +179,42 @@ def _apply_sms_templates(company: Company, templates: SmsTemplates) -> None:
     company.settings = current  # reassign → JSONB change is tracked
 
 
+def _uuid_or_422(value: Any, label: str) -> uuid.UUID | None:
+    if value in (None, ""):
+        return None
+    try:
+        return uuid.UUID(str(value))
+    except ValueError as exc:
+        raise ValidationError(f"{label} topilmadi") from exc
+
+
+async def _apply_geo(session: AsyncSession, company: Company, data: Mapping[str, Any]) -> None:
+    """country → region → district: each must exist and nest correctly. A region implies its country and a
+    district its region (so the UI may send the deepest level only); a conflicting parent is rejected."""
+    if not any(k in data for k in ("country_id", "region_id", "district_id")):
+        return
+    country_id = _uuid_or_422(data["country_id"], "Davlat") if "country_id" in data else company.country_id
+    region_id = _uuid_or_422(data["region_id"], "Viloyat") if "region_id" in data else company.region_id
+    district_id = _uuid_or_422(data["district_id"], "Tuman") if "district_id" in data else company.district_id
+    if district_id is not None:
+        district = await repo.get_district(session, district_id)
+        if district is None:
+            raise ValidationError("Tuman topilmadi")
+        if region_id is not None and region_id != district.region_id:
+            raise ValidationError("Tuman tanlangan viloyatga tegishli emas")
+        region_id = district.region_id
+    if region_id is not None:
+        region = await repo.get_region(session, region_id)
+        if region is None:
+            raise ValidationError("Viloyat topilmadi")
+        if country_id is not None and country_id != region.country_id:
+            raise ValidationError("Viloyat tanlangan davlatga tegishli emas")
+        country_id = region.country_id
+    if country_id is not None and await repo.get_country(session, country_id) is None:
+        raise ValidationError("Davlat topilmadi")
+    company.country_id, company.region_id, company.district_id = country_id, region_id, district_id
+
+
 def _company_snapshot(company: Company) -> dict[str, Any]:
     return {
         "name": company.name,
@@ -176,6 +222,9 @@ def _company_snapshot(company: Company) -> dict[str, Any]:
         "slug": company.slug,
         "phone": company.phone,
         "email": company.email,
+        "countryId": str(company.country_id) if company.country_id else None,
+        "regionId": str(company.region_id) if company.region_id else None,
+        "districtId": str(company.district_id) if company.district_id else None,
         "locale": company.locale,
         "isActive": company.is_active,
         "smsProvider": company.sms_provider,
@@ -201,6 +250,7 @@ async def create_company(session: AsyncSession, body: CompanyCreateIn, staff: St
         settings={},
         created_by=staff.id,
     )
+    await _apply_geo(session, company, body.model_dump(exclude_unset=True))
     if body.sms:
         _apply_sms(company, body.sms)
     if body.sms_templates:
@@ -213,7 +263,7 @@ async def create_company(session: AsyncSession, body: CompanyCreateIn, staff: St
         session.add(Role(company_id=company.id, key=spec["key"], name=spec["name"], permissions=list(spec["permissions"]), is_system=bool(spec["is_system"]), created_by=staff.id))
     await session.flush()
     await audit(session, actor_type="staff", actor_id=staff.id, company_id=company.id, action="create", entity="company", entity_id=company.id, after=_company_snapshot(company), ip=meta.ip, request_id=meta.request_id)
-    return company_out(company, 0, 0)
+    return company_out(company, 0, 0, await repo.geo_names(session, [company]))
 
 
 async def update_company(session: AsyncSession, company_id: uuid.UUID, body: CompanyUpdateIn, staff: StaffPrincipal, meta: RequestMeta) -> CompanyOut:
@@ -235,6 +285,7 @@ async def update_company(session: AsyncSession, company_id: uuid.UUID, body: Com
     for field in ("legal_name", "logo_url", "phone", "email", "address"):
         if field in data:
             setattr(company, field, data[field] or None)
+    await _apply_geo(session, company, data)
     if body.sms is not None:
         _apply_sms(company, body.sms)
     if body.sms_templates is not None:

@@ -56,6 +56,13 @@ class CompanyOut(CamelModel):
     phone: str | None = None
     email: str | None = None
     address: str | None = None
+    # location (country → region → district); names resolved for display
+    country_id: str | None = None
+    region_id: str | None = None
+    district_id: str | None = None
+    country_name: str | None = None
+    region_name: str | None = None
+    district_name: str | None = None
     locale: Locale
     is_active: bool
     sms: CompanySmsOut
@@ -75,6 +82,9 @@ class CompanyCreateIn(CamelModel):
     phone: str | None = Field(default=None, max_length=40)
     email: str | None = Field(default=None, max_length=200)
     address: str | None = None
+    country_id: str | None = None
+    region_id: str | None = None
+    district_id: str | None = None
     locale: Locale = "uz"
     is_active: bool = True
     sms: CompanySmsIn | None = None
@@ -91,6 +101,9 @@ class CompanyUpdateIn(CamelModel):
     phone: str | None = Field(default=None, max_length=40)
     email: str | None = Field(default=None, max_length=200)
     address: str | None = None
+    country_id: str | None = None
+    region_id: str | None = None
+    district_id: str | None = None
     locale: Locale | None = None
     is_active: bool | None = None
     sms: CompanySmsIn | None = None

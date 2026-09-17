@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     max_request_body_bytes: int = 15 * 1024 * 1024  # assets / imports (base64 images)
     trust_proxy_headers: bool = True
 
+    # ---- reference data ----------------------------------------------------
+    # Country whose regions `/regions` returns when no `countryId` is given (patients' forms)
+    default_country_code: str = "UZ"
+
     # ---- integrations ------------------------------------------------------
     xabarchi_base_url: str = "https://manager-xabarchi-backend-bula2s-f6aaa1-13-140-185-49.sslip.io"
     xabarchi_timeout_seconds: float = 15

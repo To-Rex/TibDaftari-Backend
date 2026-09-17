@@ -1,0 +1,1756 @@
+{
+ "countries": [
+  {
+   "code": "UZ",
+   "name": "O‘zbekiston",
+   "nameRu": "Узбекистан",
+   "nameEn": "Uzbekistan",
+   "phoneCode": "+998",
+   "order": 1
+  },
+  {
+   "code": "KZ",
+   "name": "Qozog‘iston",
+   "nameRu": "Казахстан",
+   "nameEn": "Kazakhstan",
+   "phoneCode": "+7",
+   "order": 2,
+   "regions": [
+    {
+     "code": "kz-ast",
+     "name": "Astana shahri",
+     "order": 1
+    },
+    {
+     "code": "kz-ala",
+     "name": "Almati shahri",
+     "order": 2
+    },
+    {
+     "code": "kz-shy",
+     "name": "Shimkent shahri",
+     "order": 3
+    },
+    {
+     "code": "kz-aba",
+     "name": "Abay viloyati",
+     "order": 4
+    },
+    {
+     "code": "kz-akm",
+     "name": "Aqmola viloyati",
+     "order": 5
+    },
+    {
+     "code": "kz-akt",
+     "name": "Aqto‘be viloyati",
+     "order": 6
+    },
+    {
+     "code": "kz-alm",
+     "name": "Almati viloyati",
+     "order": 7
+    },
+    {
+     "code": "kz-aty",
+     "name": "Atirau viloyati",
+     "order": 8
+    },
+    {
+     "code": "kz-vos",
+     "name": "Sharqiy Qozog‘iston viloyati",
+     "order": 9
+    },
+    {
+     "code": "kz-zha",
+     "name": "Jambil viloyati",
+     "order": 10
+    },
+    {
+     "code": "kz-zhe",
+     "name": "Jetisuv viloyati",
+     "order": 11
+    },
+    {
+     "code": "kz-kar",
+     "name": "Qarag‘anda viloyati",
+     "order": 12
+    },
+    {
+     "code": "kz-kus",
+     "name": "Qo‘stanay viloyati",
+     "order": 13
+    },
+    {
+     "code": "kz-kzy",
+     "name": "Qizilo‘rda viloyati",
+     "order": 14
+    },
+    {
+     "code": "kz-man",
+     "name": "Mang‘istau viloyati",
+     "order": 15
+    },
+    {
+     "code": "kz-sev",
+     "name": "Shimoliy Qozog‘iston viloyati",
+     "order": 16
+    },
+    {
+     "code": "kz-pav",
+     "name": "Pavlodar viloyati",
+     "order": 17
+    },
+    {
+     "code": "kz-tur",
+     "name": "Turkiston viloyati",
+     "order": 18
+    },
+    {
+     "code": "kz-uly",
+     "name": "Ulitau viloyati",
+     "order": 19
+    },
+    {
+     "code": "kz-zap",
+     "name": "G‘arbiy Qozog‘iston viloyati",
+     "order": 20
+    }
+   ]
+  },
+  {
+   "code": "KG",
+   "name": "Qirg‘iziston",
+   "nameRu": "Кыргызстан",
+   "nameEn": "Kyrgyzstan",
+   "phoneCode": "+996",
+   "order": 3,
+   "regions": [
+    {
+     "code": "kg-gb",
+     "name": "Bishkek shahri",
+     "order": 1
+    },
+    {
+     "code": "kg-go",
+     "name": "O‘sh shahri",
+     "order": 2
+    },
+    {
+     "code": "kg-b",
+     "name": "Botken viloyati",
+     "order": 3
+    },
+    {
+     "code": "kg-c",
+     "name": "Chuy viloyati",
+     "order": 4
+    },
+    {
+     "code": "kg-j",
+     "name": "Jalolobod viloyati",
+     "order": 5
+    },
+    {
+     "code": "kg-n",
+     "name": "Norin viloyati",
+     "order": 6
+    },
+    {
+     "code": "kg-o",
+     "name": "O‘sh viloyati",
+     "order": 7
+    },
+    {
+     "code": "kg-t",
+     "name": "Talas viloyati",
+     "order": 8
+    },
+    {
+     "code": "kg-y",
+     "name": "Issiqko‘l viloyati",
+     "order": 9
+    }
+   ]
+  },
+  {
+   "code": "TJ",
+   "name": "Tojikiston",
+   "nameRu": "Таджикистан",
+   "nameEn": "Tajikistan",
+   "phoneCode": "+992",
+   "order": 4,
+   "regions": [
+    {
+     "code": "tj-du",
+     "name": "Dushanbe shahri",
+     "order": 1
+    },
+    {
+     "code": "tj-su",
+     "name": "Sug‘d viloyati",
+     "order": 2
+    },
+    {
+     "code": "tj-kt",
+     "name": "Xatlon viloyati",
+     "order": 3
+    },
+    {
+     "code": "tj-gb",
+     "name": "Tog‘li Badaxshon muxtor viloyati",
+     "order": 4
+    },
+    {
+     "code": "tj-rr",
+     "name": "Respublika bo‘ysunuvidagi tumanlar",
+     "order": 5
+    }
+   ]
+  },
+  {
+   "code": "TM",
+   "name": "Turkmaniston",
+   "nameRu": "Туркменистан",
+   "nameEn": "Turkmenistan",
+   "phoneCode": "+993",
+   "order": 5,
+   "regions": [
+    {
+     "code": "tm-s",
+     "name": "Ashxobod shahri",
+     "order": 1
+    },
+    {
+     "code": "tm-a",
+     "name": "Ahal viloyati",
+     "order": 2
+    },
+    {
+     "code": "tm-b",
+     "name": "Balkan viloyati",
+     "order": 3
+    },
+    {
+     "code": "tm-d",
+     "name": "Dashog‘uz viloyati",
+     "order": 4
+    },
+    {
+     "code": "tm-l",
+     "name": "Lebap viloyati",
+     "order": 5
+    },
+    {
+     "code": "tm-m",
+     "name": "Mari viloyati",
+     "order": 6
+    }
+   ]
+  },
+  {
+   "code": "RU",
+   "name": "Rossiya",
+   "nameRu": "Россия",
+   "nameEn": "Russia",
+   "phoneCode": "+7",
+   "order": 6
+  },
+  {
+   "code": "AZ",
+   "name": "Ozarbayjon",
+   "nameRu": "Азербайджан",
+   "nameEn": "Azerbaijan",
+   "phoneCode": "+994",
+   "order": 7
+  },
+  {
+   "code": "AM",
+   "name": "Armaniston",
+   "nameRu": "Армения",
+   "nameEn": "Armenia",
+   "phoneCode": "+374",
+   "order": 8
+  },
+  {
+   "code": "BY",
+   "name": "Belarus",
+   "nameRu": "Беларусь",
+   "nameEn": "Belarus",
+   "phoneCode": "+375",
+   "order": 9
+  },
+  {
+   "code": "GE",
+   "name": "Gruziya",
+   "nameRu": "Грузия",
+   "nameEn": "Georgia",
+   "phoneCode": "+995",
+   "order": 10
+  },
+  {
+   "code": "MD",
+   "name": "Moldova",
+   "nameRu": "Молдова",
+   "nameEn": "Moldova",
+   "phoneCode": "+373",
+   "order": 11
+  },
+  {
+   "code": "UA",
+   "name": "Ukraina",
+   "nameRu": "Украина",
+   "nameEn": "Ukraine",
+   "phoneCode": "+380",
+   "order": 12
+  },
+  {
+   "code": "AF",
+   "name": "Afg‘oniston",
+   "nameRu": "Афганистан",
+   "nameEn": "Afghanistan",
+   "phoneCode": "+93",
+   "order": 13
+  },
+  {
+   "code": "TR",
+   "name": "Turkiya",
+   "nameRu": "Турция",
+   "nameEn": "Türkiye",
+   "phoneCode": "+90",
+   "order": 14
+  },
+  {
+   "code": "CN",
+   "name": "Xitoy",
+   "nameRu": "Китай",
+   "nameEn": "China",
+   "phoneCode": "+86",
+   "order": 15
+  },
+  {
+   "code": "IR",
+   "name": "Eron",
+   "nameRu": "Иран",
+   "nameEn": "Iran",
+   "phoneCode": "+98",
+   "order": 16
+  },
+  {
+   "code": "PK",
+   "name": "Pokiston",
+   "nameRu": "Пакистан",
+   "nameEn": "Pakistan",
+   "phoneCode": "+92",
+   "order": 17
+  },
+  {
+   "code": "IN",
+   "name": "Hindiston",
+   "nameRu": "Индия",
+   "nameEn": "India",
+   "phoneCode": "+91",
+   "order": 18
+  },
+  {
+   "code": "KR",
+   "name": "Janubiy Koreya",
+   "nameRu": "Южная Корея",
+   "nameEn": "South Korea",
+   "phoneCode": "+82",
+   "order": 19
+  },
+  {
+   "code": "JP",
+   "name": "Yaponiya",
+   "nameRu": "Япония",
+   "nameEn": "Japan",
+   "phoneCode": "+81",
+   "order": 20
+  },
+  {
+   "code": "AE",
+   "name": "Birlashgan Arab Amirliklari",
+   "nameRu": "ОАЭ",
+   "nameEn": "United Arab Emirates",
+   "phoneCode": "+971",
+   "order": 21
+  },
+  {
+   "code": "SA",
+   "name": "Saudiya Arabistoni",
+   "nameRu": "Саудовская Аравия",
+   "nameEn": "Saudi Arabia",
+   "phoneCode": "+966",
+   "order": 22
+  },
+  {
+   "code": "US",
+   "name": "AQSH",
+   "nameRu": "США",
+   "nameEn": "United States",
+   "phoneCode": "+1",
+   "order": 23
+  },
+  {
+   "code": "GB",
+   "name": "Buyuk Britaniya",
+   "nameRu": "Великобритания",
+   "nameEn": "United Kingdom",
+   "phoneCode": "+44",
+   "order": 24
+  },
+  {
+   "code": "DE",
+   "name": "Germaniya",
+   "nameRu": "Германия",
+   "nameEn": "Germany",
+   "phoneCode": "+49",
+   "order": 25
+  },
+  {
+   "code": "FR",
+   "name": "Fransiya",
+   "nameRu": "Франция",
+   "nameEn": "France",
+   "phoneCode": "+33",
+   "order": 26
+  },
+  {
+   "code": "IT",
+   "name": "Italiya",
+   "nameRu": "Италия",
+   "nameEn": "Italy",
+   "phoneCode": "+39",
+   "order": 27
+  },
+  {
+   "code": "ES",
+   "name": "Ispaniya",
+   "nameRu": "Испания",
+   "nameEn": "Spain",
+   "phoneCode": "+34",
+   "order": 28
+  },
+  {
+   "code": "AL",
+   "name": "Albaniya",
+   "nameRu": "Албания",
+   "nameEn": "Albania",
+   "phoneCode": "+355",
+   "order": 29
+  },
+  {
+   "code": "DZ",
+   "name": "Jazoir",
+   "nameRu": "Алжир",
+   "nameEn": "Algeria",
+   "phoneCode": "+213",
+   "order": 30
+  },
+  {
+   "code": "AD",
+   "name": "Andorra",
+   "nameRu": "Андорра",
+   "nameEn": "Andorra",
+   "phoneCode": "+376",
+   "order": 31
+  },
+  {
+   "code": "AO",
+   "name": "Angola",
+   "nameRu": "Ангола",
+   "nameEn": "Angola",
+   "phoneCode": "+244",
+   "order": 32
+  },
+  {
+   "code": "AG",
+   "name": "Antigua va Barbuda",
+   "nameRu": "Антигуа и Барбуда",
+   "nameEn": "Antigua and Barbuda",
+   "phoneCode": "+1",
+   "order": 33
+  },
+  {
+   "code": "AR",
+   "name": "Argentina",
+   "nameRu": "Аргентина",
+   "nameEn": "Argentina",
+   "phoneCode": "+54",
+   "order": 34
+  },
+  {
+   "code": "AU",
+   "name": "Avstraliya",
+   "nameRu": "Австралия",
+   "nameEn": "Australia",
+   "phoneCode": "+61",
+   "order": 35
+  },
+  {
+   "code": "AT",
+   "name": "Avstriya",
+   "nameRu": "Австрия",
+   "nameEn": "Austria",
+   "phoneCode": "+43",
+   "order": 36
+  },
+  {
+   "code": "BS",
+   "name": "Bagama orollari",
+   "nameRu": "Багамы",
+   "nameEn": "Bahamas",
+   "phoneCode": "+1",
+   "order": 37
+  },
+  {
+   "code": "BH",
+   "name": "Bahrayn",
+   "nameRu": "Бахрейн",
+   "nameEn": "Bahrain",
+   "phoneCode": "+973",
+   "order": 38
+  },
+  {
+   "code": "BD",
+   "name": "Bangladesh",
+   "nameRu": "Бангладеш",
+   "nameEn": "Bangladesh",
+   "phoneCode": "+880",
+   "order": 39
+  },
+  {
+   "code": "BB",
+   "name": "Barbados",
+   "nameRu": "Барбадос",
+   "nameEn": "Barbados",
+   "phoneCode": "+1",
+   "order": 40
+  },
+  {
+   "code": "BE",
+   "name": "Belgiya",
+   "nameRu": "Бельгия",
+   "nameEn": "Belgium",
+   "phoneCode": "+32",
+   "order": 41
+  },
+  {
+   "code": "BZ",
+   "name": "Beliz",
+   "nameRu": "Белиз",
+   "nameEn": "Belize",
+   "phoneCode": "+501",
+   "order": 42
+  },
+  {
+   "code": "BJ",
+   "name": "Benin",
+   "nameRu": "Бенин",
+   "nameEn": "Benin",
+   "phoneCode": "+229",
+   "order": 43
+  },
+  {
+   "code": "BT",
+   "name": "Butan",
+   "nameRu": "Бутан",
+   "nameEn": "Bhutan",
+   "phoneCode": "+975",
+   "order": 44
+  },
+  {
+   "code": "BO",
+   "name": "Boliviya",
+   "nameRu": "Боливия",
+   "nameEn": "Bolivia",
+   "phoneCode": "+591",
+   "order": 45
+  },
+  {
+   "code": "BA",
+   "name": "Bosniya va Gertsegovina",
+   "nameRu": "Босния и Герцеговина",
+   "nameEn": "Bosnia and Herzegovina",
+   "phoneCode": "+387",
+   "order": 46
+  },
+  {
+   "code": "BW",
+   "name": "Botsvana",
+   "nameRu": "Ботсвана",
+   "nameEn": "Botswana",
+   "phoneCode": "+267",
+   "order": 47
+  },
+  {
+   "code": "BR",
+   "name": "Braziliya",
+   "nameRu": "Бразилия",
+   "nameEn": "Brazil",
+   "phoneCode": "+55",
+   "order": 48
+  },
+  {
+   "code": "BN",
+   "name": "Bruney",
+   "nameRu": "Бруней",
+   "nameEn": "Brunei",
+   "phoneCode": "+673",
+   "order": 49
+  },
+  {
+   "code": "BG",
+   "name": "Bolgariya",
+   "nameRu": "Болгария",
+   "nameEn": "Bulgaria",
+   "phoneCode": "+359",
+   "order": 50
+  },
+  {
+   "code": "BF",
+   "name": "Burkina-Faso",
+   "nameRu": "Буркина-Фасо",
+   "nameEn": "Burkina Faso",
+   "phoneCode": "+226",
+   "order": 51
+  },
+  {
+   "code": "BI",
+   "name": "Burundi",
+   "nameRu": "Бурунди",
+   "nameEn": "Burundi",
+   "phoneCode": "+257",
+   "order": 52
+  },
+  {
+   "code": "CV",
+   "name": "Kabo-Verde",
+   "nameRu": "Кабо-Верде",
+   "nameEn": "Cabo Verde",
+   "phoneCode": "+238",
+   "order": 53
+  },
+  {
+   "code": "KH",
+   "name": "Kambodja",
+   "nameRu": "Камбоджа",
+   "nameEn": "Cambodia",
+   "phoneCode": "+855",
+   "order": 54
+  },
+  {
+   "code": "CM",
+   "name": "Kamerun",
+   "nameRu": "Камерун",
+   "nameEn": "Cameroon",
+   "phoneCode": "+237",
+   "order": 55
+  },
+  {
+   "code": "CA",
+   "name": "Kanada",
+   "nameRu": "Канада",
+   "nameEn": "Canada",
+   "phoneCode": "+1",
+   "order": 56
+  },
+  {
+   "code": "CF",
+   "name": "Markaziy Afrika Respublikasi",
+   "nameRu": "ЦАР",
+   "nameEn": "Central African Republic",
+   "phoneCode": "+236",
+   "order": 57
+  },
+  {
+   "code": "TD",
+   "name": "Chad",
+   "nameRu": "Чад",
+   "nameEn": "Chad",
+   "phoneCode": "+235",
+   "order": 58
+  },
+  {
+   "code": "CL",
+   "name": "Chili",
+   "nameRu": "Чили",
+   "nameEn": "Chile",
+   "phoneCode": "+56",
+   "order": 59
+  },
+  {
+   "code": "CO",
+   "name": "Kolumbiya",
+   "nameRu": "Колумбия",
+   "nameEn": "Colombia",
+   "phoneCode": "+57",
+   "order": 60
+  },
+  {
+   "code": "KM",
+   "name": "Komor orollari",
+   "nameRu": "Коморы",
+   "nameEn": "Comoros",
+   "phoneCode": "+269",
+   "order": 61
+  },
+  {
+   "code": "CG",
+   "name": "Kongo Respublikasi",
+   "nameRu": "Республика Конго",
+   "nameEn": "Congo",
+   "phoneCode": "+242",
+   "order": 62
+  },
+  {
+   "code": "CD",
+   "name": "Kongo Demokratik Respublikasi",
+   "nameRu": "ДР Конго",
+   "nameEn": "DR Congo",
+   "phoneCode": "+243",
+   "order": 63
+  },
+  {
+   "code": "CR",
+   "name": "Kosta-Rika",
+   "nameRu": "Коста-Рика",
+   "nameEn": "Costa Rica",
+   "phoneCode": "+506",
+   "order": 64
+  },
+  {
+   "code": "CI",
+   "name": "Kot-d’Ivuar",
+   "nameRu": "Кот-д’Ивуар",
+   "nameEn": "Côte d’Ivoire",
+   "phoneCode": "+225",
+   "order": 65
+  },
+  {
+   "code": "HR",
+   "name": "Xorvatiya",
+   "nameRu": "Хорватия",
+   "nameEn": "Croatia",
+   "phoneCode": "+385",
+   "order": 66
+  },
+  {
+   "code": "CU",
+   "name": "Kuba",
+   "nameRu": "Куба",
+   "nameEn": "Cuba",
+   "phoneCode": "+53",
+   "order": 67
+  },
+  {
+   "code": "CY",
+   "name": "Kipr",
+   "nameRu": "Кипр",
+   "nameEn": "Cyprus",
+   "phoneCode": "+357",
+   "order": 68
+  },
+  {
+   "code": "CZ",
+   "name": "Chexiya",
+   "nameRu": "Чехия",
+   "nameEn": "Czechia",
+   "phoneCode": "+420",
+   "order": 69
+  },
+  {
+   "code": "DK",
+   "name": "Daniya",
+   "nameRu": "Дания",
+   "nameEn": "Denmark",
+   "phoneCode": "+45",
+   "order": 70
+  },
+  {
+   "code": "DJ",
+   "name": "Jibuti",
+   "nameRu": "Джибути",
+   "nameEn": "Djibouti",
+   "phoneCode": "+253",
+   "order": 71
+  },
+  {
+   "code": "DM",
+   "name": "Dominika",
+   "nameRu": "Доминика",
+   "nameEn": "Dominica",
+   "phoneCode": "+1",
+   "order": 72
+  },
+  {
+   "code": "DO",
+   "name": "Dominikan Respublikasi",
+   "nameRu": "Доминиканская Республика",
+   "nameEn": "Dominican Republic",
+   "phoneCode": "+1",
+   "order": 73
+  },
+  {
+   "code": "EC",
+   "name": "Ekvador",
+   "nameRu": "Эквадор",
+   "nameEn": "Ecuador",
+   "phoneCode": "+593",
+   "order": 74
+  },
+  {
+   "code": "EG",
+   "name": "Misr",
+   "nameRu": "Египет",
+   "nameEn": "Egypt",
+   "phoneCode": "+20",
+   "order": 75
+  },
+  {
+   "code": "SV",
+   "name": "Salvador",
+   "nameRu": "Сальвадор",
+   "nameEn": "El Salvador",
+   "phoneCode": "+503",
+   "order": 76
+  },
+  {
+   "code": "GQ",
+   "name": "Ekvatorial Gvineya",
+   "nameRu": "Экваториальная Гвинея",
+   "nameEn": "Equatorial Guinea",
+   "phoneCode": "+240",
+   "order": 77
+  },
+  {
+   "code": "ER",
+   "name": "Eritreya",
+   "nameRu": "Эритрея",
+   "nameEn": "Eritrea",
+   "phoneCode": "+291",
+   "order": 78
+  },
+  {
+   "code": "EE",
+   "name": "Estoniya",
+   "nameRu": "Эстония",
+   "nameEn": "Estonia",
+   "phoneCode": "+372",
+   "order": 79
+  },
+  {
+   "code": "SZ",
+   "name": "Esvatini",
+   "nameRu": "Эсватини",
+   "nameEn": "Eswatini",
+   "phoneCode": "+268",
+   "order": 80
+  },
+  {
+   "code": "ET",
+   "name": "Efiopiya",
+   "nameRu": "Эфиопия",
+   "nameEn": "Ethiopia",
+   "phoneCode": "+251",
+   "order": 81
+  },
+  {
+   "code": "FJ",
+   "name": "Fiji",
+   "nameRu": "Фиджи",
+   "nameEn": "Fiji",
+   "phoneCode": "+679",
+   "order": 82
+  },
+  {
+   "code": "FI",
+   "name": "Finlandiya",
+   "nameRu": "Финляндия",
+   "nameEn": "Finland",
+   "phoneCode": "+358",
+   "order": 83
+  },
+  {
+   "code": "GA",
+   "name": "Gabon",
+   "nameRu": "Габон",
+   "nameEn": "Gabon",
+   "phoneCode": "+241",
+   "order": 84
+  },
+  {
+   "code": "GM",
+   "name": "Gambiya",
+   "nameRu": "Гамбия",
+   "nameEn": "Gambia",
+   "phoneCode": "+220",
+   "order": 85
+  },
+  {
+   "code": "GH",
+   "name": "Gana",
+   "nameRu": "Гана",
+   "nameEn": "Ghana",
+   "phoneCode": "+233",
+   "order": 86
+  },
+  {
+   "code": "GR",
+   "name": "Gretsiya",
+   "nameRu": "Греция",
+   "nameEn": "Greece",
+   "phoneCode": "+30",
+   "order": 87
+  },
+  {
+   "code": "GD",
+   "name": "Grenada",
+   "nameRu": "Гренада",
+   "nameEn": "Grenada",
+   "phoneCode": "+1",
+   "order": 88
+  },
+  {
+   "code": "GT",
+   "name": "Gvatemala",
+   "nameRu": "Гватемала",
+   "nameEn": "Guatemala",
+   "phoneCode": "+502",
+   "order": 89
+  },
+  {
+   "code": "GN",
+   "name": "Gvineya",
+   "nameRu": "Гвинея",
+   "nameEn": "Guinea",
+   "phoneCode": "+224",
+   "order": 90
+  },
+  {
+   "code": "GW",
+   "name": "Gvineya-Bisau",
+   "nameRu": "Гвинея-Бисау",
+   "nameEn": "Guinea-Bissau",
+   "phoneCode": "+245",
+   "order": 91
+  },
+  {
+   "code": "GY",
+   "name": "Gayana",
+   "nameRu": "Гайана",
+   "nameEn": "Guyana",
+   "phoneCode": "+592",
+   "order": 92
+  },
+  {
+   "code": "HT",
+   "name": "Gaiti",
+   "nameRu": "Гаити",
+   "nameEn": "Haiti",
+   "phoneCode": "+509",
+   "order": 93
+  },
+  {
+   "code": "HN",
+   "name": "Gonduras",
+   "nameRu": "Гондурас",
+   "nameEn": "Honduras",
+   "phoneCode": "+504",
+   "order": 94
+  },
+  {
+   "code": "HU",
+   "name": "Vengriya",
+   "nameRu": "Венгрия",
+   "nameEn": "Hungary",
+   "phoneCode": "+36",
+   "order": 95
+  },
+  {
+   "code": "IS",
+   "name": "Islandiya",
+   "nameRu": "Исландия",
+   "nameEn": "Iceland",
+   "phoneCode": "+354",
+   "order": 96
+  },
+  {
+   "code": "ID",
+   "name": "Indoneziya",
+   "nameRu": "Индонезия",
+   "nameEn": "Indonesia",
+   "phoneCode": "+62",
+   "order": 97
+  },
+  {
+   "code": "IQ",
+   "name": "Iroq",
+   "nameRu": "Ирак",
+   "nameEn": "Iraq",
+   "phoneCode": "+964",
+   "order": 98
+  },
+  {
+   "code": "IE",
+   "name": "Irlandiya",
+   "nameRu": "Ирландия",
+   "nameEn": "Ireland",
+   "phoneCode": "+353",
+   "order": 99
+  },
+  {
+   "code": "IL",
+   "name": "Isroil",
+   "nameRu": "Израиль",
+   "nameEn": "Israel",
+   "phoneCode": "+972",
+   "order": 100
+  },
+  {
+   "code": "JM",
+   "name": "Yamayka",
+   "nameRu": "Ямайка",
+   "nameEn": "Jamaica",
+   "phoneCode": "+1",
+   "order": 101
+  },
+  {
+   "code": "JO",
+   "name": "Iordaniya",
+   "nameRu": "Иордания",
+   "nameEn": "Jordan",
+   "phoneCode": "+962",
+   "order": 102
+  },
+  {
+   "code": "KE",
+   "name": "Keniya",
+   "nameRu": "Кения",
+   "nameEn": "Kenya",
+   "phoneCode": "+254",
+   "order": 103
+  },
+  {
+   "code": "KI",
+   "name": "Kiribati",
+   "nameRu": "Кирибати",
+   "nameEn": "Kiribati",
+   "phoneCode": "+686",
+   "order": 104
+  },
+  {
+   "code": "KP",
+   "name": "Shimoliy Koreya",
+   "nameRu": "КНДР",
+   "nameEn": "North Korea",
+   "phoneCode": "+850",
+   "order": 105
+  },
+  {
+   "code": "KW",
+   "name": "Quvayt",
+   "nameRu": "Кувейт",
+   "nameEn": "Kuwait",
+   "phoneCode": "+965",
+   "order": 106
+  },
+  {
+   "code": "LA",
+   "name": "Laos",
+   "nameRu": "Лаос",
+   "nameEn": "Laos",
+   "phoneCode": "+856",
+   "order": 107
+  },
+  {
+   "code": "LV",
+   "name": "Latviya",
+   "nameRu": "Латвия",
+   "nameEn": "Latvia",
+   "phoneCode": "+371",
+   "order": 108
+  },
+  {
+   "code": "LB",
+   "name": "Livan",
+   "nameRu": "Ливан",
+   "nameEn": "Lebanon",
+   "phoneCode": "+961",
+   "order": 109
+  },
+  {
+   "code": "LS",
+   "name": "Lesoto",
+   "nameRu": "Лесото",
+   "nameEn": "Lesotho",
+   "phoneCode": "+266",
+   "order": 110
+  },
+  {
+   "code": "LR",
+   "name": "Liberiya",
+   "nameRu": "Либерия",
+   "nameEn": "Liberia",
+   "phoneCode": "+231",
+   "order": 111
+  },
+  {
+   "code": "LY",
+   "name": "Liviya",
+   "nameRu": "Ливия",
+   "nameEn": "Libya",
+   "phoneCode": "+218",
+   "order": 112
+  },
+  {
+   "code": "LI",
+   "name": "Lixtenshteyn",
+   "nameRu": "Лихтенштейн",
+   "nameEn": "Liechtenstein",
+   "phoneCode": "+423",
+   "order": 113
+  },
+  {
+   "code": "LT",
+   "name": "Litva",
+   "nameRu": "Литва",
+   "nameEn": "Lithuania",
+   "phoneCode": "+370",
+   "order": 114
+  },
+  {
+   "code": "LU",
+   "name": "Lyuksemburg",
+   "nameRu": "Люксембург",
+   "nameEn": "Luxembourg",
+   "phoneCode": "+352",
+   "order": 115
+  },
+  {
+   "code": "MG",
+   "name": "Madagaskar",
+   "nameRu": "Мадагаскар",
+   "nameEn": "Madagascar",
+   "phoneCode": "+261",
+   "order": 116
+  },
+  {
+   "code": "MW",
+   "name": "Malavi",
+   "nameRu": "Малави",
+   "nameEn": "Malawi",
+   "phoneCode": "+265",
+   "order": 117
+  },
+  {
+   "code": "MY",
+   "name": "Malayziya",
+   "nameRu": "Малайзия",
+   "nameEn": "Malaysia",
+   "phoneCode": "+60",
+   "order": 118
+  },
+  {
+   "code": "MV",
+   "name": "Maldiv orollari",
+   "nameRu": "Мальдивы",
+   "nameEn": "Maldives",
+   "phoneCode": "+960",
+   "order": 119
+  },
+  {
+   "code": "ML",
+   "name": "Mali",
+   "nameRu": "Мали",
+   "nameEn": "Mali",
+   "phoneCode": "+223",
+   "order": 120
+  },
+  {
+   "code": "MT",
+   "name": "Malta",
+   "nameRu": "Мальта",
+   "nameEn": "Malta",
+   "phoneCode": "+356",
+   "order": 121
+  },
+  {
+   "code": "MH",
+   "name": "Marshall orollari",
+   "nameRu": "Маршалловы Острова",
+   "nameEn": "Marshall Islands",
+   "phoneCode": "+692",
+   "order": 122
+  },
+  {
+   "code": "MR",
+   "name": "Mavritaniya",
+   "nameRu": "Мавритания",
+   "nameEn": "Mauritania",
+   "phoneCode": "+222",
+   "order": 123
+  },
+  {
+   "code": "MU",
+   "name": "Mavrikiy",
+   "nameRu": "Маврикий",
+   "nameEn": "Mauritius",
+   "phoneCode": "+230",
+   "order": 124
+  },
+  {
+   "code": "MX",
+   "name": "Meksika",
+   "nameRu": "Мексика",
+   "nameEn": "Mexico",
+   "phoneCode": "+52",
+   "order": 125
+  },
+  {
+   "code": "FM",
+   "name": "Mikroneziya",
+   "nameRu": "Микронезия",
+   "nameEn": "Micronesia",
+   "phoneCode": "+691",
+   "order": 126
+  },
+  {
+   "code": "MC",
+   "name": "Monako",
+   "nameRu": "Монако",
+   "nameEn": "Monaco",
+   "phoneCode": "+377",
+   "order": 127
+  },
+  {
+   "code": "MN",
+   "name": "Mo‘g‘uliston",
+   "nameRu": "Монголия",
+   "nameEn": "Mongolia",
+   "phoneCode": "+976",
+   "order": 128
+  },
+  {
+   "code": "ME",
+   "name": "Chernogoriya",
+   "nameRu": "Черногория",
+   "nameEn": "Montenegro",
+   "phoneCode": "+382",
+   "order": 129
+  },
+  {
+   "code": "MA",
+   "name": "Marokash",
+   "nameRu": "Марокко",
+   "nameEn": "Morocco",
+   "phoneCode": "+212",
+   "order": 130
+  },
+  {
+   "code": "MZ",
+   "name": "Mozambik",
+   "nameRu": "Мозамбик",
+   "nameEn": "Mozambique",
+   "phoneCode": "+258",
+   "order": 131
+  },
+  {
+   "code": "MM",
+   "name": "Myanma",
+   "nameRu": "Мьянма",
+   "nameEn": "Myanmar",
+   "phoneCode": "+95",
+   "order": 132
+  },
+  {
+   "code": "NA",
+   "name": "Namibiya",
+   "nameRu": "Намибия",
+   "nameEn": "Namibia",
+   "phoneCode": "+264",
+   "order": 133
+  },
+  {
+   "code": "NR",
+   "name": "Nauru",
+   "nameRu": "Науру",
+   "nameEn": "Nauru",
+   "phoneCode": "+674",
+   "order": 134
+  },
+  {
+   "code": "NP",
+   "name": "Nepal",
+   "nameRu": "Непал",
+   "nameEn": "Nepal",
+   "phoneCode": "+977",
+   "order": 135
+  },
+  {
+   "code": "NL",
+   "name": "Niderlandiya",
+   "nameRu": "Нидерланды",
+   "nameEn": "Netherlands",
+   "phoneCode": "+31",
+   "order": 136
+  },
+  {
+   "code": "NZ",
+   "name": "Yangi Zelandiya",
+   "nameRu": "Новая Зеландия",
+   "nameEn": "New Zealand",
+   "phoneCode": "+64",
+   "order": 137
+  },
+  {
+   "code": "NI",
+   "name": "Nikaragua",
+   "nameRu": "Никарагуа",
+   "nameEn": "Nicaragua",
+   "phoneCode": "+505",
+   "order": 138
+  },
+  {
+   "code": "NE",
+   "name": "Niger",
+   "nameRu": "Нигер",
+   "nameEn": "Niger",
+   "phoneCode": "+227",
+   "order": 139
+  },
+  {
+   "code": "NG",
+   "name": "Nigeriya",
+   "nameRu": "Нигерия",
+   "nameEn": "Nigeria",
+   "phoneCode": "+234",
+   "order": 140
+  },
+  {
+   "code": "MK",
+   "name": "Shimoliy Makedoniya",
+   "nameRu": "Северная Македония",
+   "nameEn": "North Macedonia",
+   "phoneCode": "+389",
+   "order": 141
+  },
+  {
+   "code": "NO",
+   "name": "Norvegiya",
+   "nameRu": "Норвегия",
+   "nameEn": "Norway",
+   "phoneCode": "+47",
+   "order": 142
+  },
+  {
+   "code": "OM",
+   "name": "Ummon",
+   "nameRu": "Оман",
+   "nameEn": "Oman",
+   "phoneCode": "+968",
+   "order": 143
+  },
+  {
+   "code": "PW",
+   "name": "Palau",
+   "nameRu": "Палау",
+   "nameEn": "Palau",
+   "phoneCode": "+680",
+   "order": 144
+  },
+  {
+   "code": "PA",
+   "name": "Panama",
+   "nameRu": "Панама",
+   "nameEn": "Panama",
+   "phoneCode": "+507",
+   "order": 145
+  },
+  {
+   "code": "PG",
+   "name": "Papua-Yangi Gvineya",
+   "nameRu": "Папуа — Новая Гвинея",
+   "nameEn": "Papua New Guinea",
+   "phoneCode": "+675",
+   "order": 146
+  },
+  {
+   "code": "PY",
+   "name": "Paragvay",
+   "nameRu": "Парагвай",
+   "nameEn": "Paraguay",
+   "phoneCode": "+595",
+   "order": 147
+  },
+  {
+   "code": "PE",
+   "name": "Peru",
+   "nameRu": "Перу",
+   "nameEn": "Peru",
+   "phoneCode": "+51",
+   "order": 148
+  },
+  {
+   "code": "PH",
+   "name": "Filippin",
+   "nameRu": "Филиппины",
+   "nameEn": "Philippines",
+   "phoneCode": "+63",
+   "order": 149
+  },
+  {
+   "code": "PL",
+   "name": "Polsha",
+   "nameRu": "Польша",
+   "nameEn": "Poland",
+   "phoneCode": "+48",
+   "order": 150
+  },
+  {
+   "code": "PT",
+   "name": "Portugaliya",
+   "nameRu": "Португалия",
+   "nameEn": "Portugal",
+   "phoneCode": "+351",
+   "order": 151
+  },
+  {
+   "code": "QA",
+   "name": "Qatar",
+   "nameRu": "Катар",
+   "nameEn": "Qatar",
+   "phoneCode": "+974",
+   "order": 152
+  },
+  {
+   "code": "RO",
+   "name": "Ruminiya",
+   "nameRu": "Румыния",
+   "nameEn": "Romania",
+   "phoneCode": "+40",
+   "order": 153
+  },
+  {
+   "code": "RW",
+   "name": "Ruanda",
+   "nameRu": "Руанда",
+   "nameEn": "Rwanda",
+   "phoneCode": "+250",
+   "order": 154
+  },
+  {
+   "code": "KN",
+   "name": "Sent-Kits va Nevis",
+   "nameRu": "Сент-Китс и Невис",
+   "nameEn": "Saint Kitts and Nevis",
+   "phoneCode": "+1",
+   "order": 155
+  },
+  {
+   "code": "LC",
+   "name": "Sent-Lyusiya",
+   "nameRu": "Сент-Люсия",
+   "nameEn": "Saint Lucia",
+   "phoneCode": "+1",
+   "order": 156
+  },
+  {
+   "code": "VC",
+   "name": "Sent-Vinsent va Grenadinlar",
+   "nameRu": "Сент-Винсент и Гренадины",
+   "nameEn": "Saint Vincent and the Grenadines",
+   "phoneCode": "+1",
+   "order": 157
+  },
+  {
+   "code": "WS",
+   "name": "Samoa",
+   "nameRu": "Самоа",
+   "nameEn": "Samoa",
+   "phoneCode": "+685",
+   "order": 158
+  },
+  {
+   "code": "SM",
+   "name": "San-Marino",
+   "nameRu": "Сан-Марино",
+   "nameEn": "San Marino",
+   "phoneCode": "+378",
+   "order": 159
+  },
+  {
+   "code": "ST",
+   "name": "San-Tome va Prinsipi",
+   "nameRu": "Сан-Томе и Принсипи",
+   "nameEn": "Sao Tome and Principe",
+   "phoneCode": "+239",
+   "order": 160
+  },
+  {
+   "code": "SN",
+   "name": "Senegal",
+   "nameRu": "Сенегал",
+   "nameEn": "Senegal",
+   "phoneCode": "+221",
+   "order": 161
+  },
+  {
+   "code": "RS",
+   "name": "Serbiya",
+   "nameRu": "Сербия",
+   "nameEn": "Serbia",
+   "phoneCode": "+381",
+   "order": 162
+  },
+  {
+   "code": "SC",
+   "name": "Seyshel orollari",
+   "nameRu": "Сейшелы",
+   "nameEn": "Seychelles",
+   "phoneCode": "+248",
+   "order": 163
+  },
+  {
+   "code": "SL",
+   "name": "Syerra-Leone",
+   "nameRu": "Сьерра-Леоне",
+   "nameEn": "Sierra Leone",
+   "phoneCode": "+232",
+   "order": 164
+  },
+  {
+   "code": "SG",
+   "name": "Singapur",
+   "nameRu": "Сингапур",
+   "nameEn": "Singapore",
+   "phoneCode": "+65",
+   "order": 165
+  },
+  {
+   "code": "SK",
+   "name": "Slovakiya",
+   "nameRu": "Словакия",
+   "nameEn": "Slovakia",
+   "phoneCode": "+421",
+   "order": 166
+  },
+  {
+   "code": "SI",
+   "name": "Sloveniya",
+   "nameRu": "Словения",
+   "nameEn": "Slovenia",
+   "phoneCode": "+386",
+   "order": 167
+  },
+  {
+   "code": "SB",
+   "name": "Solomon orollari",
+   "nameRu": "Соломоновы Острова",
+   "nameEn": "Solomon Islands",
+   "phoneCode": "+677",
+   "order": 168
+  },
+  {
+   "code": "SO",
+   "name": "Somali",
+   "nameRu": "Сомали",
+   "nameEn": "Somalia",
+   "phoneCode": "+252",
+   "order": 169
+  },
+  {
+   "code": "ZA",
+   "name": "Janubiy Afrika Respublikasi",
+   "nameRu": "ЮАР",
+   "nameEn": "South Africa",
+   "phoneCode": "+27",
+   "order": 170
+  },
+  {
+   "code": "SS",
+   "name": "Janubiy Sudan",
+   "nameRu": "Южный Судан",
+   "nameEn": "South Sudan",
+   "phoneCode": "+211",
+   "order": 171
+  },
+  {
+   "code": "LK",
+   "name": "Shri-Lanka",
+   "nameRu": "Шри-Ланка",
+   "nameEn": "Sri Lanka",
+   "phoneCode": "+94",
+   "order": 172
+  },
+  {
+   "code": "SD",
+   "name": "Sudan",
+   "nameRu": "Судан",
+   "nameEn": "Sudan",
+   "phoneCode": "+249",
+   "order": 173
+  },
+  {
+   "code": "SR",
+   "name": "Surinam",
+   "nameRu": "Суринам",
+   "nameEn": "Suriname",
+   "phoneCode": "+597",
+   "order": 174
+  },
+  {
+   "code": "SE",
+   "name": "Shvetsiya",
+   "nameRu": "Швеция",
+   "nameEn": "Sweden",
+   "phoneCode": "+46",
+   "order": 175
+  },
+  {
+   "code": "CH",
+   "name": "Shveytsariya",
+   "nameRu": "Швейцария",
+   "nameEn": "Switzerland",
+   "phoneCode": "+41",
+   "order": 176
+  },
+  {
+   "code": "SY",
+   "name": "Suriya",
+   "nameRu": "Сирия",
+   "nameEn": "Syria",
+   "phoneCode": "+963",
+   "order": 177
+  },
+  {
+   "code": "TZ",
+   "name": "Tanzaniya",
+   "nameRu": "Танзания",
+   "nameEn": "Tanzania",
+   "phoneCode": "+255",
+   "order": 178
+  },
+  {
+   "code": "TH",
+   "name": "Tailand",
+   "nameRu": "Таиланд",
+   "nameEn": "Thailand",
+   "phoneCode": "+66",
+   "order": 179
+  },
+  {
+   "code": "TL",
+   "name": "Sharqiy Timor",
+   "nameRu": "Восточный Тимор",
+   "nameEn": "Timor-Leste",
+   "phoneCode": "+670",
+   "order": 180
+  },
+  {
+   "code": "TG",
+   "name": "Togo",
+   "nameRu": "Того",
+   "nameEn": "Togo",
+   "phoneCode": "+228",
+   "order": 181
+  },
+  {
+   "code": "TO",
+   "name": "Tonga",
+   "nameRu": "Тонга",
+   "nameEn": "Tonga",
+   "phoneCode": "+676",
+   "order": 182
+  },
+  {
+   "code": "TT",
+   "name": "Trinidad va Tobago",
+   "nameRu": "Тринидад и Тобаго",
+   "nameEn": "Trinidad and Tobago",
+   "phoneCode": "+1",
+   "order": 183
+  },
+  {
+   "code": "TN",
+   "name": "Tunis",
+   "nameRu": "Тунис",
+   "nameEn": "Tunisia",
+   "phoneCode": "+216",
+   "order": 184
+  },
+  {
+   "code": "TV",
+   "name": "Tuvalu",
+   "nameRu": "Тувалу",
+   "nameEn": "Tuvalu",
+   "phoneCode": "+688",
+   "order": 185
+  },
+  {
+   "code": "UG",
+   "name": "Uganda",
+   "nameRu": "Уганда",
+   "nameEn": "Uganda",
+   "phoneCode": "+256",
+   "order": 186
+  },
+  {
+   "code": "UY",
+   "name": "Urugvay",
+   "nameRu": "Уругвай",
+   "nameEn": "Uruguay",
+   "phoneCode": "+598",
+   "order": 187
+  },
+  {
+   "code": "VU",
+   "name": "Vanuatu",
+   "nameRu": "Вануату",
+   "nameEn": "Vanuatu",
+   "phoneCode": "+678",
+   "order": 188
+  },
+  {
+   "code": "VE",
+   "name": "Venesuela",
+   "nameRu": "Венесуэла",
+   "nameEn": "Venezuela",
+   "phoneCode": "+58",
+   "order": 189
+  },
+  {
+   "code": "VN",
+   "name": "Vyetnam",
+   "nameRu": "Вьетнам",
+   "nameEn": "Vietnam",
+   "phoneCode": "+84",
+   "order": 190
+  },
+  {
+   "code": "YE",
+   "name": "Yaman",
+   "nameRu": "Йемен",
+   "nameEn": "Yemen",
+   "phoneCode": "+967",
+   "order": 191
+  },
+  {
+   "code": "ZM",
+   "name": "Zambiya",
+   "nameRu": "Замбия",
+   "nameEn": "Zambia",
+   "phoneCode": "+260",
+   "order": 192
+  },
+  {
+   "code": "ZW",
+   "name": "Zimbabve",
+   "nameRu": "Зимбабве",
+   "nameEn": "Zimbabwe",
+   "phoneCode": "+263",
+   "order": 193
+  }
+ ]
+}

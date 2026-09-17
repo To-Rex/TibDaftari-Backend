@@ -11,6 +11,7 @@ from app.api.deps import DbSession, Meta, Staff
 from app.core.schemas import Page, PageQuery
 from app.modules.patients import service
 from app.modules.patients.schemas import (
+    CountryOut,
     DistrictOut,
     PatientDuplicatesIn,
     PatientOut,
@@ -84,9 +85,14 @@ async def update_patient(
     return await service.update_patient(session, patient_id, staff, body, meta)
 
 
-@router.get("/regions", response_model=list[RegionOut], summary="Regions of Uzbekistan (public reference data)")
-async def list_regions(session: DbSession) -> list[dict[str, Any]]:
-    return await service.list_regions(session)
+@router.get("/countries", response_model=list[CountryOut], summary="Countries (public reference data)")
+async def list_countries(session: DbSession) -> list[dict[str, Any]]:
+    return await service.list_countries(session)
+
+
+@router.get("/regions", response_model=list[RegionOut], summary="Regions of a country — default: Uzbekistan (public reference data)")
+async def list_regions(session: DbSession, country_id: Annotated[uuid.UUID | None, Query(alias="countryId")] = None) -> list[dict[str, Any]]:
+    return await service.list_regions(session, country_id)
 
 
 @router.get(

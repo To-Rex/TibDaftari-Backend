@@ -1,4 +1,4 @@
-"""Patients: list/search/duplicates/create/update + geo reference data (regions/districts).
+"""Patients: list/search/duplicates/create/update + geo reference data (countries/regions/districts).
 
 Rules (DOMAIN_RULES section 4): phone normalised to `998XXXXXXXXX`; identity uniqueness per company
 (passport case-insensitive, then PINFL, then phone only when neither passport nor PINFL is given);
@@ -16,14 +16,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import RequestMeta, StaffPrincipal
 from app.core.audit import audit
+from app.core.config import settings
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.pagination import page_of, paginate_query, sort_clause
 from app.core.schemas import Page, PageQuery
 from app.core.textutil import digits, is_valid_uz_phone, norm_phone
-from app.infrastructure.db.models import District, Patient, Region
+from app.infrastructure.db.models import Country, District, Patient, Region
 from app.infrastructure.redis import cache
 from app.modules.patients import repository as repo
 from app.modules.patients.schemas import (
+    CountryOut,
     DistrictOut,
     PatientAddress,
     PatientDuplicatesIn,
@@ -36,7 +38,9 @@ from app.modules.patients.schemas import (
 )
 
 REF_TTL_SECONDS = 3600
-_REGIONS_KEY = "ref:regions"
+_COUNTRIES_KEY = "ref:countries"
+_DEFAULT_COUNTRY_KEY = "ref:country:default"
+_REGIONS_KEY = "ref:regions:{scope}"
 _DISTRICTS_KEY = "ref:districts:{scope}"
 
 _DUP_BY_INDEX = {
@@ -329,21 +333,46 @@ async def update_patient(
 # ----------------------------------------------------------------------------- reference data
 
 
+def _country_out(c: Country) -> dict[str, Any]:
+    return CountryOut(id=str(c.id), code=c.code, name=c.name, name_ru=c.name_ru, name_en=c.name_en, phone_code=c.phone_code).model_dump(by_alias=True)
+
+
 def _region_out(r: Region) -> dict[str, Any]:
-    return RegionOut(id=str(r.id), name=r.name).model_dump(by_alias=True)
+    return RegionOut(id=str(r.id), country_id=str(r.country_id), name=r.name).model_dump(by_alias=True)
 
 
 def _district_out(d: District) -> dict[str, Any]:
     return DistrictOut(id=str(d.id), region_id=str(d.region_id), name=d.name).model_dump(by_alias=True)
 
 
-async def list_regions(session: AsyncSession) -> list[dict[str, Any]]:
-    """All regions (public reference data, cached 1h)."""
+async def list_countries(session: AsyncSession) -> list[dict[str, Any]]:
+    """All countries (public reference data, cached 1h)."""
 
     async def load() -> list[dict[str, Any]]:
-        return [_region_out(r) for r in await repo.list_regions(session)]
+        return [_country_out(c) for c in await repo.list_countries(session)]
 
-    return await cache.cached(_REGIONS_KEY, REF_TTL_SECONDS, load)
+    return await cache.cached(_COUNTRIES_KEY, REF_TTL_SECONDS, load)
+
+
+async def default_country_id(session: AsyncSession) -> uuid.UUID | None:
+    """Id of `settings.default_country_code` (UZ) — the country `/regions` serves when none is asked for."""
+
+    async def load() -> dict[str, Any]:
+        c = await repo.country_by_code(session, settings.default_country_code)
+        return {"id": str(c.id) if c else None}
+
+    hit = await cache.cached(_DEFAULT_COUNTRY_KEY, REF_TTL_SECONDS, load)
+    return uuid.UUID(hit["id"]) if hit.get("id") else None
+
+
+async def list_regions(session: AsyncSession, country_id: uuid.UUID | None = None) -> list[dict[str, Any]]:
+    """Regions of a country (default: the platform's default country), public, cached 1h."""
+    scope = country_id or await default_country_id(session)
+
+    async def load() -> list[dict[str, Any]]:
+        return [_region_out(r) for r in await repo.list_regions(session, scope)]
+
+    return await cache.cached(_REGIONS_KEY.format(scope=scope or "all"), REF_TTL_SECONDS, load)
 
 
 async def list_districts(session: AsyncSession, region_id: uuid.UUID | None) -> list[dict[str, Any]]:
@@ -356,6 +385,8 @@ async def list_districts(session: AsyncSession, region_id: uuid.UUID | None) -> 
 
 
 async def invalidate_reference_cache() -> None:
-    """Drop cached regions/districts — call after seeding or editing reference data."""
-    await cache.delete(_REGIONS_KEY)
+    """Drop cached countries/regions/districts — call after seeding or editing reference data."""
+    await cache.delete(_COUNTRIES_KEY)
+    await cache.delete(_DEFAULT_COUNTRY_KEY)
+    await cache.delete_prefix(_REGIONS_KEY.format(scope=""))
     await cache.delete_prefix(_DISTRICTS_KEY.format(scope=""))

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.textutil import digits, fold
 from app.infrastructure.db.base import alive
-from app.infrastructure.db.models import District, Patient, Region
+from app.infrastructure.db.models import Country, District, Patient, Region
 
 SORTABLE: dict[str, Any] = {
     "createdAt": Patient.created_at,
@@ -110,9 +110,21 @@ async def search(session: AsyncSession, company_id: uuid.UUID, query: str, limit
     return list((await session.execute(stmt)).scalars().all())
 
 
-async def list_regions(session: AsyncSession) -> list[Region]:
-    """All regions ordered by `order`, name."""
-    return list((await session.execute(select(Region).order_by(Region.order, Region.name))).scalars().all())
+async def list_countries(session: AsyncSession) -> list[Country]:
+    """All countries ordered by `order`, name."""
+    return list((await session.execute(select(Country).order_by(Country.order, Country.name))).scalars().all())
+
+
+async def country_by_code(session: AsyncSession, code: str) -> Country | None:
+    return (await session.execute(select(Country).where(Country.code == code.upper()))).scalar_one_or_none()
+
+
+async def list_regions(session: AsyncSession, country_id: uuid.UUID | None) -> list[Region]:
+    """Regions (optionally of one country) ordered by `order`, name."""
+    stmt = select(Region)
+    if country_id is not None:
+        stmt = stmt.where(Region.country_id == country_id)
+    return list((await session.execute(stmt.order_by(Region.order, Region.name))).scalars().all())
 
 
 async def list_districts(session: AsyncSession, region_id: uuid.UUID | None) -> list[District]:

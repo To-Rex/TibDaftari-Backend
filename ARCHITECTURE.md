@@ -63,7 +63,7 @@ tenant:    GET/POST /companies  GET/PUT /companies/{id}  GET/POST /companies/{id
 staff:     GET/POST /companies/{cid}/employees  GET/PUT /employees/{id}  PUT /employees/{id}/overrides
            GET/POST /companies/{cid}/roles  PUT/DELETE /roles/{id}
 patients:  GET/POST /companies/{cid}/patients  GET /companies/{cid}/patients/search  POST /companies/{cid}/patients/duplicates
-           GET/PUT /patients/{id}  GET /regions  GET /districts?regionId
+           GET/PUT /patients/{id}  GET /countries  GET /regions?countryId  GET /districts?regionId
 catalog:   GET/POST /companies/{cid}/categories  PUT/DELETE /categories/{id}
            GET/POST /companies/{cid}/service-types  GET/PUT/DELETE /service-types/{id}
            GET/POST /companies/{cid}/schemas  GET/PUT /schemas/{id}  POST /schemas/{id}/publish

@@ -133,6 +133,36 @@ def test_create_company_superadmin(ctx: dict) -> None:
     assert c.post("/api/v1/companies", json={"name": "T-tenant-C3"}, headers=h(ctx, "admin-a")).status_code == 403
 
 
+def test_company_location(ctx: dict) -> None:
+    """country → region → district must nest; a district implies its region and country; names come back resolved."""
+    c: TestClient = ctx["client"]
+    cid = ctx["ids"]["a"]
+    countries = c.get("/api/v1/countries").json()
+    uz = next(x for x in countries if x["code"] == "UZ")
+    kz = next(x for x in countries if x["code"] == "KZ")
+    uz_regions = c.get("/api/v1/regions", params={"countryId": uz["id"]}).json()
+    region = next(r for r in uz_regions if not r["name"].startswith("T-"))
+    district = c.get("/api/v1/districts", params={"regionId": region["id"]}).json()[0]
+    r = c.put(f"/api/v1/companies/{cid}", json={"districtId": district["id"]}, headers=h(ctx, "admin-a"))
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert (d["countryId"], d["regionId"], d["districtId"]) == (uz["id"], region["id"], district["id"])
+    assert d["countryName"] == uz["name"] and d["regionName"] == region["name"] and d["districtName"] == district["name"]
+    # mismatched parent → 422
+    r = c.put(f"/api/v1/companies/{cid}", json={"countryId": kz["id"], "regionId": region["id"]}, headers=h(ctx, "admin-a"))
+    assert r.status_code == 422, r.text
+    # clearing the district keeps region/country; clearing the country clears everything below it
+    d = c.put(f"/api/v1/companies/{cid}", json={"districtId": None}, headers=h(ctx, "admin-a")).json()
+    assert d["districtId"] is None and d["regionId"] == region["id"]
+    d = c.put(f"/api/v1/companies/{cid}", json={"countryId": None, "regionId": None}, headers=h(ctx, "admin-a")).json()
+    assert d["countryId"] is None and d["regionId"] is None
+    # the platform list carries the names too
+    kz_region = c.get("/api/v1/regions", params={"countryId": kz["id"]}).json()[0]
+    c.put(f"/api/v1/companies/{cid}", json={"regionId": kz_region["id"]}, headers=h(ctx, "admin-a"))
+    row = next(x for x in c.get("/api/v1/companies", params={"search": f"T-tenant-A-{SFX}", "pageSize": 5}, headers=h(ctx, "super")).json()["items"] if x["id"] == cid)
+    assert row["countryName"] == kz["name"] and row["regionName"] == kz_region["name"]
+
+
 def test_branches_crud(ctx: dict) -> None:
     c: TestClient = ctx["client"]
     cid = ctx["ids"]["a"]
@@ -167,7 +197,7 @@ def test_sms_test(ctx: dict, monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(tenant_service.xabarchi, "send_sms", fake_send)
     r = c.post(f"/api/v1/companies/{cid}/sms/test", json={"to": "+998 90 765-43-21"}, headers=h(ctx, "admin-a"))
-    assert r.status_code == 200 and r.json() == {"ok": True, "providerMessageId": "777"}
+    assert r.status_code == 200 and r.json() == {"ok": True, "providerMessageId": "777", "to": "998907654321"}
     assert seen == {"key": "xab_live_testkey1234", "to": ["998907654321"], "priority": "transactional"}
     r = c.post(f"/api/v1/companies/{cid}/sms/test", json={}, headers=h(ctx, "admin-a"))
     assert r.status_code == 200 and seen["to"] == ["998901112233"]  # default recipient: company phone

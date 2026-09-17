@@ -12,7 +12,7 @@ from app.core.pagination import paginate_query, sort_clause
 from app.core.schemas import PageQuery
 from app.core.textutil import fold
 from app.infrastructure.db.base import alive
-from app.infrastructure.db.models import Branch, Company, Employee
+from app.infrastructure.db.models import Branch, Company, Country, District, Employee, Region
 
 
 def _branch_count() -> Select:
@@ -49,6 +49,30 @@ async def list_companies(session: AsyncSession, q: PageQuery) -> tuple[list[tupl
     )
     rows, total = await paginate_query(session, stmt, q, order_by=[order, Company.id.asc()], scalars=False)
     return [(row[0], int(row[1]), int(row[2])) for row in rows], total
+
+
+async def geo_names(session: AsyncSession, companies: Sequence[Company]) -> dict[str, str]:
+    """`{id: name}` for every country/region/district referenced by `companies` (three small IN queries)."""
+    out: dict[str, str] = {}
+    for model, attr in ((Country, "country_id"), (Region, "region_id"), (District, "district_id")):
+        ids = {getattr(c, attr) for c in companies if getattr(c, attr) is not None}
+        if not ids:
+            continue
+        for row_id, name in (await session.execute(select(model.id, model.name).where(model.id.in_(ids)))).all():
+            out[str(row_id)] = name
+    return out
+
+
+async def get_country(session: AsyncSession, country_id: uuid.UUID) -> Country | None:
+    return await session.get(Country, country_id)
+
+
+async def get_region(session: AsyncSession, region_id: uuid.UUID) -> Region | None:
+    return await session.get(Region, region_id)
+
+
+async def get_district(session: AsyncSession, district_id: uuid.UUID) -> District | None:
+    return await session.get(District, district_id)
 
 
 async def get_company(session: AsyncSession, company_id: uuid.UUID) -> Company | None:

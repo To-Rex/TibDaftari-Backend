@@ -23,6 +23,10 @@ class Company(PKMixin, AuditMixin, SoftDeleteMixin, Base):
     phone: Mapped[str | None] = mapped_column(String(40))
     email: Mapped[str | None] = mapped_column(String(200))
     address: Mapped[str | None] = mapped_column(Text)
+    # location: country → region (viloyat/city) → district; all optional, validated to nest correctly
+    country_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("countries.id"))
+    region_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("regions.id"))
+    district_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("districts.id"))
     locale: Mapped[str] = mapped_column(String(2), nullable=False, default="uz")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 

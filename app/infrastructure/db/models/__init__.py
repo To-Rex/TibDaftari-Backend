@@ -19,12 +19,12 @@ from app.infrastructure.db.models.order import (
     ResultDocument,
     empty_progress,
 )
-from app.infrastructure.db.models.patient import District, Patient, Region, TelegramChatPref, TelegramLink
+from app.infrastructure.db.models.patient import Country, District, Patient, Region, TelegramChatPref, TelegramLink
 from app.infrastructure.db.models.tenant import Branch, Company, Employee, OtpChallenge, Role, Session
 
 __all__ = [
     "ITEM_STATUSES", "ORDER_STATUSES", "PAYMENT_STATUSES",
-    "AttributeSchema", "AuditLog", "Branch", "Category", "Company", "District", "Employee",
+    "AttributeSchema", "AuditLog", "Branch", "Category", "Company", "Country", "District", "Employee",
     "Notification", "Order", "OrderItem", "OtpChallenge", "OutboxMessage", "Patient", "Payment",
     "Region", "ResultDocument", "ResultTemplate", "Role", "ServiceType", "Session", "StoredFile",
     "TelegramChatPref", "TelegramLink", "TemplateAsset", "empty_progress",

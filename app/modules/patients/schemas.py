@@ -1,4 +1,4 @@
-"""Patient DTOs — mirror of Clinic-Web `src/domain/patient.ts` (Patient, PatientUpsertInput, Region, District)."""
+"""Patient DTOs — mirror of Clinic-Web `src/domain/patient.ts` (Patient, PatientUpsertInput, Country, Region, District)."""
 
 from __future__ import annotations
 
@@ -96,8 +96,18 @@ class PatientDuplicatesIn(CamelModel):
     pinfl: str | None = Field(default=None, max_length=20)
 
 
+class CountryOut(CamelModel):
+    id: str
+    code: str
+    name: str
+    name_ru: str | None = None
+    name_en: str | None = None
+    phone_code: str | None = None
+
+
 class RegionOut(CamelModel):
     id: str
+    country_id: str
     name: str
 
 

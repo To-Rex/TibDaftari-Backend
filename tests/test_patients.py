@@ -11,11 +11,12 @@ from typing import Any
 import pytest
 from app.core.config import settings
 from app.core.security import hash_password
-from app.infrastructure.db.models import Company, District, Employee, Patient, Region, Role
+from app.infrastructure.db.models import Company, Country, District, Employee, Patient, Region, Role
 from app.infrastructure.db.session import dispose_engine, session_scope
 from app.infrastructure.redis.client import close_redis
 from app.modules.patients.service import invalidate_reference_cache
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 RUN = uuid.uuid4().hex[:8]
 API = "/api/v1"
@@ -39,7 +40,8 @@ def _fixture_rows() -> dict[str, Any]:
             pw = hash_password("secret123")
             emp_a = Employee(company_id=co_a.id, full_name="T-patients A", login=f"t-patients-a-{RUN}", password_hash=pw, role_id=role_a.id)
             emp_b = Employee(company_id=co_b.id, full_name="T-patients B", login=f"t-patients-b-{RUN}", password_hash=pw, role_id=role_b.id)
-            region = Region(name=f"T-patients viloyat {RUN}", order=999)
+            uz_id = (await s.execute(select(Country.id).where(Country.code == "UZ"))).scalar_one()
+            region = Region(country_id=uz_id, name=f"T-patients viloyat {RUN}", order=999)
             s.add_all([emp_a, emp_b, region])
             await s.flush()
             d1 = District(region_id=region.id, name=f"T-patients tuman 1 {RUN}", order=1)
@@ -53,6 +55,7 @@ def _fixture_rows() -> dict[str, Any]:
                 "co_b": str(co_b.id),
                 "login_a": emp_a.login,
                 "login_b": emp_b.login,
+                "country": str(uz_id),
                 "region": str(region.id),
                 "d1": str(d1.id),
                 "d2": str(d2.id),
@@ -128,8 +131,15 @@ def _cleanup_reference_rows(region_id: str) -> None:
 
 def test_regions_and_districts_are_public(env: dict[str, Any]) -> None:
     c: TestClient = env["client"]
-    regions = c.get(f"{API}/regions").json()
-    assert {"id": env["region"], "name": f"T-patients viloyat {RUN}"} in regions
+    countries = c.get(f"{API}/countries").json()
+    uz = next(x for x in countries if x["code"] == "UZ")
+    assert uz["id"] == env["country"] and set(uz) == {"id", "code", "name", "nameRu", "nameEn", "phoneCode"}
+    regions = c.get(f"{API}/regions").json()  # no countryId → the default country (UZ)
+    assert {"id": env["region"], "countryId": env["country"], "name": f"T-patients viloyat {RUN}"} in regions
+    assert regions == c.get(f"{API}/regions", params={"countryId": env["country"]}).json()
+    kz = next(x for x in countries if x["code"] == "KZ")
+    kz_regions = c.get(f"{API}/regions", params={"countryId": kz["id"]}).json()
+    assert kz_regions and all(r["countryId"] == kz["id"] for r in kz_regions)
     districts = c.get(f"{API}/districts", params={"regionId": env["region"]}).json()
     assert [d["id"] for d in districts] == [env["d1"], env["d2"]]
     assert set(districts[0]) == {"id", "regionId", "name"}

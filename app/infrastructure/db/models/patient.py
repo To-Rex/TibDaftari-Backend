@@ -1,4 +1,4 @@
-"""Patients + geo reference (regions/districts) + Telegram links."""
+"""Patients + geo reference (countries/regions/districts) + Telegram links."""
 
 from __future__ import annotations
 
@@ -12,9 +12,25 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.infrastructure.db.base import AuditMixin, Base, PKMixin, SoftDeleteMixin, TenantMixin
 
 
+class Country(PKMixin, Base):
+    """ISO 3166-1 country; `name` is the Uzbek name, `name_ru`/`name_en` the localised ones."""
+
+    __tablename__ = "countries"
+
+    code: Mapped[str] = mapped_column(String(2), nullable=False, unique=True)  # ISO 3166-1 alpha-2
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    name_ru: Mapped[str | None] = mapped_column(String(120))
+    name_en: Mapped[str | None] = mapped_column(String(120))
+    phone_code: Mapped[str | None] = mapped_column(String(8))
+    order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
 class Region(PKMixin, Base):
+    """First-level division (viloyat / oblast / city of republican status) of a country."""
+
     __tablename__ = "regions"
 
+    country_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("countries.id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     code: Mapped[str | None] = mapped_column(String(20))
     order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

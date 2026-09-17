@@ -2,7 +2,7 @@
 
 Commands
 --------
-* ``seed-reference``      upsert Uzbekistan regions/districts from ``seed/reference/uz-regions.json``
+* ``seed-reference``      upsert countries (``seed/reference/countries.json``) and Uzbekistan regions/districts (``uz-regions.json``)
 * ``seed-demo``           load the demo dataset (``seed/demo/core.json``; ``--with-transactions`` adds
                           ``seed/demo/transactions.json``) into the real tables with fresh UUIDs
 * ``create-superadmin``   platform superadmin role + employee (creates the company when needed)
@@ -34,6 +34,7 @@ from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit
+from app.core.config import settings
 from app.core.ids import uuid7
 from app.core.permissions import COMPANY_ADMIN_PERMISSIONS, PERMISSIONS, SUPERADMIN_ROLE_KEY
 from app.core.security import hash_password
@@ -45,6 +46,7 @@ from app.infrastructure.db.models import (
     Branch,
     Category,
     Company,
+    Country,
     District,
     Employee,
     Notification,
@@ -66,6 +68,7 @@ from app.modules.files.service import decode_data_url, store_bytes
 ROOT = Path(__file__).resolve().parent.parent
 SEED_DIR = ROOT / "seed"
 REFERENCE_FILE = SEED_DIR / "reference" / "uz-regions.json"
+COUNTRIES_FILE = SEED_DIR / "reference" / "countries.json"
 DEMO_CORE_FILE = SEED_DIR / "demo" / "core.json"
 DEMO_TX_FILE = SEED_DIR / "demo" / "transactions.json"
 ASSETS_DIR = SEED_DIR / "assets"
@@ -206,19 +209,38 @@ def _asset_bytes(url: str) -> tuple[bytes, str, str | None]:
 # --------------------------------------------------------------------------- seed-reference
 
 
-async def seed_reference(session: AsyncSession) -> tuple[int, int]:
-    """Upsert regions (by code) and districts (by region + name). Returns (regions, districts)."""
+async def seed_reference(session: AsyncSession) -> tuple[int, int, int]:
+    """Upsert countries (by ISO code), regions (by code; Uzbekistan's from uz-regions.json, the neighbours'
+    from countries.json) and Uzbekistan districts (by region + name). Returns (countries, regions, districts)."""
+    cdata = _load_json(COUNTRIES_FILE)
+    countries_by_code: dict[str, Country] = {c.code: c for c in (await session.execute(select(Country))).scalars()}
+    for i, item in enumerate(cdata["countries"]):
+        row = countries_by_code.get(item["code"])
+        if row is None:
+            row = Country(code=item["code"], name=item["name"], name_ru=item.get("nameRu"), name_en=item.get("nameEn"), phone_code=item.get("phoneCode"), order=int(item.get("order", i + 1)))
+            session.add(row)
+            countries_by_code[item["code"]] = row
+        else:
+            row.name, row.name_ru, row.name_en, row.phone_code = item["name"], item.get("nameRu"), item.get("nameEn"), item.get("phoneCode")
+            row.order = int(item.get("order", i + 1))
+    await session.flush()
+    uz = countries_by_code[settings.default_country_code]
+
     data = _load_json(REFERENCE_FILE)
     regions_by_code: dict[str, Region] = {
         r.code: r for r in (await session.execute(select(Region).where(Region.code.is_not(None)))).scalars()
     }
-    for item in data["regions"]:
+    region_items = [(uz, item) for item in data["regions"]] + [
+        (countries_by_code[c["code"]], item) for c in cdata["countries"] for item in c.get("regions", [])
+    ]
+    for country, item in region_items:
         row = regions_by_code.get(item["code"])
         if row is None:
-            row = Region(code=item["code"], name=item["name"], order=int(item.get("order", 0)))
+            row = Region(country_id=country.id, code=item["code"], name=item["name"], order=int(item.get("order", 0)))
             session.add(row)
             regions_by_code[item["code"]] = row
         else:
+            row.country_id = country.id
             row.name = item["name"]
             row.order = int(item.get("order", 0))
     await session.flush()
@@ -240,7 +262,7 @@ async def seed_reference(session: AsyncSession) -> tuple[int, int]:
             row.name = item["name"]
             row.order = int(item.get("order", 0))
     await session.flush()
-    return len(data["regions"]), len(data["districts"])
+    return len(cdata["countries"]), len(region_items), len(data["districts"])
 
 
 # --------------------------------------------------------------------------- seed-demo
@@ -849,7 +871,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m app.cli", description="TibDaftari operations CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("seed-reference", help="upsert regions/districts of Uzbekistan")
+    sub.add_parser("seed-reference", help="upsert countries + regions/districts")
 
     demo = sub.add_parser("seed-demo", help="load the demo dataset (companies, catalog, templates, staff)")
     demo.add_argument("--with-transactions", action="store_true", help="also load patients/orders/items/payments/documents/outbox")
@@ -874,8 +896,8 @@ async def _run(args: argparse.Namespace) -> None:
     try:
         if args.command == "seed-reference":
             async with session_scope() as session:
-                regions, districts = await seed_reference(session)
-            print(f"reference: {regions} regions, {districts} districts upserted")
+                countries, regions, districts = await seed_reference(session)
+            print(f"reference: {countries} countries, {regions} regions, {districts} districts upserted")
         elif args.command == "seed-demo":
             counts = await seed_demo(with_transactions=args.with_transactions)
             print("done: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
