@@ -116,6 +116,12 @@ class BranchOut(CamelModel):
     name: str
     code: str
     address: str | None = None
+    country_id: str | None = None
+    region_id: str | None = None
+    district_id: str | None = None
+    country_name: str | None = None
+    region_name: str | None = None
+    district_name: str | None = None
     phone: str | None = None
     timezone: str
     is_active: bool
@@ -128,6 +134,9 @@ class BranchCreateIn(CamelModel):
     name: str = Field(min_length=1, max_length=200)
     code: str = Field(min_length=1, max_length=12)
     address: str | None = None
+    country_id: str | None = None
+    region_id: str | None = None
+    district_id: str | None = None
     phone: str | None = Field(default=None, max_length=40)
     timezone: str = Field(default="Asia/Tashkent", max_length=64)
     is_active: bool = True
@@ -137,6 +146,9 @@ class BranchUpdateIn(CamelModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     code: str | None = Field(default=None, min_length=1, max_length=12)
     address: str | None = None
+    country_id: str | None = None
+    region_id: str | None = None
+    district_id: str | None = None
     phone: str | None = Field(default=None, max_length=40)
     timezone: str | None = Field(default=None, max_length=64)
     is_active: bool | None = None

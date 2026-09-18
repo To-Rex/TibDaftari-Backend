@@ -51,11 +51,11 @@ async def list_companies(session: AsyncSession, q: PageQuery) -> tuple[list[tupl
     return [(row[0], int(row[1]), int(row[2])) for row in rows], total
 
 
-async def geo_names(session: AsyncSession, companies: Sequence[Company]) -> dict[str, str]:
-    """`{id: name}` for every country/region/district referenced by `companies` (three small IN queries)."""
+async def geo_names(session: AsyncSession, rows: Sequence[Company | Branch]) -> dict[str, str]:
+    """`{id: name}` for every country/region/district referenced by `rows` (three small IN queries)."""
     out: dict[str, str] = {}
     for model, attr in ((Country, "country_id"), (Region, "region_id"), (District, "district_id")):
-        ids = {getattr(c, attr) for c in companies if getattr(c, attr) is not None}
+        ids = {getattr(c, attr) for c in rows if getattr(c, attr) is not None}
         if not ids:
             continue
         for row_id, name in (await session.execute(select(model.id, model.name).where(model.id.in_(ids)))).all():

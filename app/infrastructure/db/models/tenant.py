@@ -53,6 +53,10 @@ class Branch(PKMixin, AuditMixin, SoftDeleteMixin, TenantMixin, Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     code: Mapped[str] = mapped_column(String(12), nullable=False)  # used in cheque numbers e.g. UR-000123
     address: Mapped[str | None] = mapped_column(Text)
+    # location: country → region → district (same rules as Company)
+    country_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("countries.id"))
+    region_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("regions.id"))
+    district_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("districts.id"))
     phone: Mapped[str | None] = mapped_column(String(40))
     timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Asia/Tashkent")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

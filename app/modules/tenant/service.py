@@ -97,14 +97,21 @@ def company_out(company: Company, branch_count: int, employee_count: int, names:
     )
 
 
-def branch_out(branch: Branch) -> BranchOut:
-    """Branch ORM row → DTO."""
+def branch_out(branch: Branch, names: Mapping[str, str] | None = None) -> BranchOut:
+    """Branch ORM row → DTO; `names` (`repo.geo_names`) resolves the location ids for display."""
+    n = names or {}
     return BranchOut(
         id=str(branch.id),
         company_id=str(branch.company_id),
         name=branch.name,
         code=branch.code,
         address=branch.address,
+        country_id=str(branch.country_id) if branch.country_id else None,
+        region_id=str(branch.region_id) if branch.region_id else None,
+        district_id=str(branch.district_id) if branch.district_id else None,
+        country_name=n.get(str(branch.country_id)) if branch.country_id else None,
+        region_name=n.get(str(branch.region_id)) if branch.region_id else None,
+        district_name=n.get(str(branch.district_id)) if branch.district_id else None,
         phone=branch.phone,
         timezone=branch.timezone,
         is_active=branch.is_active,
@@ -188,7 +195,7 @@ def _uuid_or_422(value: Any, label: str) -> uuid.UUID | None:
         raise ValidationError(f"{label} topilmadi") from exc
 
 
-async def _apply_geo(session: AsyncSession, company: Company, data: Mapping[str, Any]) -> None:
+async def _apply_geo(session: AsyncSession, company: Company | Branch, data: Mapping[str, Any]) -> None:
     """country → region → district: each must exist and nest correctly. A region implies its country and a
     district its region (so the UI may send the deepest level only); a conflicting parent is rejected."""
     if not any(k in data for k in ("country_id", "region_id", "district_id")):
@@ -382,7 +389,9 @@ async def set_telegram(session: AsyncSession, company_id: uuid.UUID, body: Teleg
 async def list_branches(session: AsyncSession, company_id: uuid.UUID) -> list[BranchOut]:
     """All alive branches of a company (creation order)."""
     await get_company_or_404(session, company_id)
-    return [branch_out(b) for b in await repo.list_branches(session, company_id)]
+    branches = await repo.list_branches(session, company_id)
+    names = await repo.geo_names(session, branches)
+    return [branch_out(b, names) for b in branches]
 
 
 async def get_branch_or_404(session: AsyncSession, branch_id: uuid.UUID, company_id: uuid.UUID | None) -> Branch:
@@ -394,7 +403,17 @@ async def get_branch_or_404(session: AsyncSession, branch_id: uuid.UUID, company
 
 
 def _branch_snapshot(b: Branch) -> dict[str, Any]:
-    return {"name": b.name, "code": b.code, "address": b.address, "phone": b.phone, "timezone": b.timezone, "isActive": b.is_active}
+    return {
+        "name": b.name,
+        "code": b.code,
+        "address": b.address,
+        "countryId": str(b.country_id) if b.country_id else None,
+        "regionId": str(b.region_id) if b.region_id else None,
+        "districtId": str(b.district_id) if b.district_id else None,
+        "phone": b.phone,
+        "timezone": b.timezone,
+        "isActive": b.is_active,
+    }
 
 
 async def create_branch(session: AsyncSession, company_id: uuid.UUID, body: BranchCreateIn, staff: StaffPrincipal, meta: RequestMeta) -> BranchOut:
@@ -414,11 +433,12 @@ async def create_branch(session: AsyncSession, company_id: uuid.UUID, body: Bran
         order_seq=0,
         created_by=staff.id,
     )
+    await _apply_geo(session, branch, body.model_dump(exclude_unset=True))
     session.add(branch)
     await session.flush()
     await audit(session, actor_type="staff", actor_id=staff.id, company_id=company.id, action="create", entity="branch", entity_id=branch.id, after=_branch_snapshot(branch), ip=meta.ip, request_id=meta.request_id)
     await invalidate_company_cache(company.id)
-    return branch_out(branch)
+    return branch_out(branch, await repo.geo_names(session, [branch]))
 
 
 async def update_branch(session: AsyncSession, branch_id: uuid.UUID, body: BranchUpdateIn, staff: StaffPrincipal, meta: RequestMeta) -> BranchOut:
@@ -440,8 +460,9 @@ async def update_branch(session: AsyncSession, branch_id: uuid.UUID, body: Branc
     for field in ("address", "phone"):
         if field in data:
             setattr(branch, field, data[field] or None)
+    await _apply_geo(session, branch, data)
     await session.flush()
     await session.refresh(branch, ["updated_at"])
     await audit(session, actor_type="staff", actor_id=staff.id, company_id=branch.company_id, action="update", entity="branch", entity_id=branch.id, before=before, after=_branch_snapshot(branch), ip=meta.ip, request_id=meta.request_id)
     await invalidate_company_cache(branch.company_id)
-    return branch_out(branch)
+    return branch_out(branch, await repo.geo_names(session, [branch]))

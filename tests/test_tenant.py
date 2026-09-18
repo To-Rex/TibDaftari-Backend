@@ -183,6 +183,28 @@ def test_branches_crud(ctx: dict) -> None:
     assert c.get(f"/api/v1/companies/{cid}", headers=h(ctx, "admin-a")).json()["branchCount"] == 1
 
 
+def test_branch_location(ctx: dict) -> None:
+    """Branches carry the same country → region → district triple as companies, with resolved names."""
+    c: TestClient = ctx["client"]
+    cid = ctx["ids"]["a"]
+    countries = c.get("/api/v1/countries").json()
+    uz = next(x for x in countries if x["code"] == "UZ")
+    kz = next(x for x in countries if x["code"] == "KZ")
+    region = next(r for r in c.get("/api/v1/regions", params={"countryId": uz["id"]}).json() if not r["name"].startswith("T-"))
+    district = c.get("/api/v1/districts", params={"regionId": region["id"]}).json()[0]
+    r = c.post(f"/api/v1/companies/{cid}/branches", json={"name": "Geo", "code": "GE", "districtId": district["id"]}, headers=h(ctx, "admin-a"))
+    assert r.status_code == 201, r.text
+    b = r.json()
+    assert (b["countryId"], b["regionId"], b["districtId"]) == (uz["id"], region["id"], district["id"])
+    assert b["countryName"] == uz["name"] and b["regionName"] == region["name"] and b["districtName"] == district["name"]
+    assert c.put(f"/api/v1/branches/{b['id']}", json={"countryId": kz["id"]}, headers=h(ctx, "admin-a")).status_code == 422
+    kz_region = c.get("/api/v1/regions", params={"countryId": kz["id"]}).json()[0]
+    r = c.put(f"/api/v1/branches/{b['id']}", json={"countryId": kz["id"], "regionId": kz_region["id"], "districtId": None}, headers=h(ctx, "admin-a"))
+    assert r.status_code == 200 and r.json()["regionName"] == kz_region["name"] and r.json()["districtId"] is None
+    listed = next(x for x in c.get(f"/api/v1/companies/{cid}/branches", headers=h(ctx, "admin-a")).json() if x["id"] == b["id"])
+    assert listed["countryName"] == kz["name"] and listed["regionName"] == kz_region["name"]
+
+
 def test_sms_test(ctx: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     c: TestClient = ctx["client"]
     cid = ctx["ids"]["a"]
