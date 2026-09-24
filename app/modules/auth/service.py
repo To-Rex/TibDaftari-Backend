@@ -69,6 +69,7 @@ def staff_session_out(p: StaffPrincipal, token: str, exp: datetime, branch_id: u
         employee_id=str(p.employee.id),
         company_id=str(p.employee.company_id),
         branch_id=str(branch_id) if branch_id else None,
+        branch_ids=[str(b) for b in (p.employee.branch_ids or [])],
         is_super_admin=p.is_super_admin,
         role_key=p.role_key,
         full_name=p.employee.full_name,

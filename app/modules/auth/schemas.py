@@ -20,6 +20,8 @@ class StaffSessionOut(CamelModel):
     employee_id: str
     company_id: str
     branch_id: str | None
+    # branches the employee is assigned to — the UI pins non-admins to these (admins may switch to any)
+    branch_ids: list[str] = []
     is_super_admin: bool
     role_key: str
     full_name: str
