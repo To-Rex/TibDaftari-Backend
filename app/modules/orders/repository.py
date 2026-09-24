@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import ColumnElement, Row, Select, String, false, func, or_, select, update
+from sqlalchemy import ColumnElement, Row, Select, String, case, false, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.pagination import paginate_query, sort_clause
@@ -366,10 +366,17 @@ def _branch_ok(branch_id: uuid.UUID):
     return ResultTemplate.branch_ids.any(branch_id) | (func.cardinality(ResultTemplate.branch_ids) == 0)
 
 
+def _branch_specificity() -> ColumnElement[int]:
+    """Order key: bound to fewer branches = more specific; company-wide (no binding) last."""
+    n = func.cardinality(ResultTemplate.branch_ids)
+    return case((n == 0, 1_000_000), else_=n)
+
+
 async def find_active_template(
     session: AsyncSession, company_id: uuid.UUID, service_type_id: uuid.UUID, category_id: uuid.UUID, branch_id: uuid.UUID
 ) -> ResultTemplate | None:
-    """First active template of the branch bound to the service type or its category (oldest first)."""
+    """Active template of the branch bound to the service type or its category — the most branch-specific
+    one first, then the oldest."""
     stmt = (
         select(ResultTemplate)
         .where(
@@ -379,14 +386,14 @@ async def find_active_template(
             or_(ResultTemplate.service_type_ids.any(service_type_id), ResultTemplate.category_ids.any(category_id)),
             _branch_ok(branch_id),
         )
-        .order_by(ResultTemplate.created_at, ResultTemplate.id)
+        .order_by(_branch_specificity(), ResultTemplate.created_at, ResultTemplate.id)
         .limit(1)
     )
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def find_generic_template(session: AsyncSession, company_id: uuid.UUID, branch_id: uuid.UUID) -> ResultTemplate | None:
-    """First active template of the branch with no service-type bindings (catch-all)."""
+    """Active catch-all template of the branch (no service-type bindings) — most branch-specific first."""
     stmt = (
         select(ResultTemplate)
         .where(
@@ -396,7 +403,7 @@ async def find_generic_template(session: AsyncSession, company_id: uuid.UUID, br
             func.cardinality(ResultTemplate.service_type_ids) == 0,
             _branch_ok(branch_id),
         )
-        .order_by(ResultTemplate.created_at, ResultTemplate.id)
+        .order_by(_branch_specificity(), ResultTemplate.created_at, ResultTemplate.id)
         .limit(1)
     )
     return (await session.execute(stmt)).scalar_one_or_none()

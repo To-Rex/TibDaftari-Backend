@@ -105,6 +105,14 @@ class _TemplateWrite(CamelModel):
         return validate_doc(v) if v is not None else None
 
 
+class TemplateDuplicateIn(CamelModel):
+    """Optional overrides for a copy: its name (default "<name> (nusxa)") and the branches it belongs to
+    (default: the source's) — a branch imports another branch's template as its own copy this way."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    branch_ids: list[str] | None = Field(default=None, max_length=100)
+
+
 class TemplateCreateIn(_TemplateWrite):
     status: TemplateStatus | None = None
 

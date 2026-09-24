@@ -302,6 +302,13 @@ def test_templates_api_lifecycle(ctx: dict) -> None:
     assert r.status_code == 201, r.text
     dup = r.json()
     assert dup["name"] == "T-templates Bound (nusxa)" and dup["status"] == "draft" and dup["version"] == 1 and dup["usage"] == 0 and dup["serviceTypeIds"] == [st_id] and dup["doc"] == doc
+    # a branch imports another branch's template: same doc/bindings, its own name and branch
+    bid = str(uuid.uuid4())
+    r = c.post(f"/api/v1/templates/{bound['id']}/duplicate", json={"name": "T-templates Filial nusxasi", "branchIds": [bid]}, headers=h(ctx, "admin-a"))
+    assert r.status_code == 201, r.text
+    imported = r.json()
+    assert imported["name"] == "T-templates Filial nusxasi" and imported["branchIds"] == [bid] and imported["doc"] == doc and imported["status"] == "draft"
+    assert c.delete(f"/api/v1/templates/{imported['id']}", headers=h(ctx, "admin-a")).status_code == 204
     # delete: active → 409; draft ok (soft) and gone
     r = c.delete(f"/api/v1/templates/{bound['id']}", headers=h(ctx, "admin-a"))
     assert r.status_code == 409 and r.json()["error"]["code"] == "active" and r.json()["error"]["message"] == "Faol shablonni o‘chirib bo‘lmaydi — avval arxivlang"

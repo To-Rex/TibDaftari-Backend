@@ -57,6 +57,7 @@ from app.modules.templates.schemas import (
     TemplateAssetIn,
     TemplateAssetOut,
     TemplateCreateIn,
+    TemplateDuplicateIn,
     TemplateOut,
     TemplateQuery,
     TemplateUpdateIn,
@@ -325,18 +326,19 @@ async def set_status(session: AsyncSession, template_id: uuid.UUID, status: str,
     return template_out(row)
 
 
-async def duplicate_template(session: AsyncSession, template_id: uuid.UUID, staff: StaffPrincipal, meta: RequestMeta) -> TemplateOut:
-    """Copy as draft v1 usage 0 named "<name> (nusxa)" with bindings and doc copied."""
+async def duplicate_template(session: AsyncSession, template_id: uuid.UUID, staff: StaffPrincipal, meta: RequestMeta, body: TemplateDuplicateIn | None = None) -> TemplateOut:
+    """Copy as draft v1 usage 0 named "<name> (nusxa)" with bindings and doc copied; `body` may rename the
+    copy and bind it to other branches (a branch importing another branch's template)."""
     src = await get_template_or_404(session, template_id, _scope_of(staff))
     row = ResultTemplate(
         company_id=src.company_id,
-        name=f"{src.name} (nusxa)",
+        name=(body.name.strip() if body and body.name else f"{src.name} (nusxa)"),
         description=src.description,
         status="draft",
         version=1,
         service_type_ids=list(src.service_type_ids or []),
         category_ids=list(src.category_ids or []),
-        branch_ids=list(src.branch_ids or []),
+        branch_ids=_uuid_list(body.branch_ids) if body and body.branch_ids is not None else list(src.branch_ids or []),
         scope=src.scope,
         language=src.language,
         doc=dict(src.doc or empty_doc()),

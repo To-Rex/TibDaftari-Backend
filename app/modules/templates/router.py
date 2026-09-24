@@ -13,6 +13,7 @@ from app.modules.templates.schemas import (
     TemplateAssetIn,
     TemplateAssetOut,
     TemplateCreateIn,
+    TemplateDuplicateIn,
     TemplateOut,
     TemplatePreviewIn,
     TemplateQuery,
@@ -55,10 +56,10 @@ async def set_status(template_id: uuid.UUID, body: TemplateStatusIn, staff: Staf
     return await service.set_status(session, template_id, body.status, staff, meta)
 
 
-@router.post("/templates/{template_id}/duplicate", response_model=TemplateOut, status_code=201, summary="Duplicate a template as a draft copy")
-async def duplicate_template(template_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta) -> TemplateOut:
+@router.post("/templates/{template_id}/duplicate", response_model=TemplateOut, status_code=201, summary="Duplicate a template as a draft copy (optionally renamed / re-bound to branches)")
+async def duplicate_template(template_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta, body: Annotated[TemplateDuplicateIn | None, Body()] = None) -> TemplateOut:
     staff.require(TEMPLATE_WRITE)
-    return await service.duplicate_template(session, template_id, staff, meta)
+    return await service.duplicate_template(session, template_id, staff, meta, body)
 
 
 @router.delete("/templates/{template_id}", status_code=204, summary="Soft-delete a template (not while active)")
