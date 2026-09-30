@@ -153,8 +153,9 @@ class _Renderer:
         pdf.c_margin = 0
         pdf.set_compression(True)
         pdf.set_title("Natija")
-        pdf.add_page()
         self.pdf = pdf
+        self._dry = False  # measuring pass (grow tables): geometry only, nothing is drawn, no page yet
+        self._grow_h: dict[int, float] = {}
         self._fonts: set[str] = set()
         self._font_add("fallbacksans", "")
         self._font_add("fallbackserif", "")
@@ -164,6 +165,9 @@ class _Renderer:
     def clip(self, x: float, y: float, w: float, h: float) -> Iterator[None]:
         """Rectangular clip. Wrapped in `local_context` so fpdf's tracked graphics state (font, colours,
         line width…) is restored together with the PDF `Q` — a bare `rect_clip` would desynchronise them."""
+        if self._dry:
+            yield
+            return
         with self.pdf.local_context(), self.pdf.rect_clip(x, y, max(0.0, w), max(0.0, h)):
             yield
 
@@ -288,6 +292,8 @@ class _Renderer:
     # ------------------------------------------------------------------ shapes
 
     def fill_rect(self, x: float, y: float, w: float, h: float, color: RGB | None, radius: float = 0.0) -> None:
+        if self._dry:
+            return
         if color is None or w <= 0 or h <= 0:
             return
         self.pdf.set_fill_color(*color)
@@ -298,6 +304,8 @@ class _Renderer:
 
     def stroke_rect(self, x: float, y: float, w: float, h: float, color: RGB, sw: float, radius: float = 0.0, ellipse: bool = False) -> None:
         """Border drawn inside the box (inset by sw/2)."""
+        if self._dry:
+            return
         if sw <= 0:
             return
         pdf = self.pdf
@@ -312,6 +320,8 @@ class _Renderer:
             pdf.rect(ix, iy, iw, ih, style="D")
 
     def hline(self, x1: float, x2: float, y: float, sw: float, color: RGB, dashed: bool = False) -> None:
+        if self._dry:
+            return
         pdf = self.pdf
         pdf.set_draw_color(*color)
         pdf.set_line_width(sw)
@@ -322,6 +332,8 @@ class _Renderer:
             pdf.set_dash_pattern()
 
     def vline(self, x: float, y1: float, y2: float, sw: float, color: RGB, dashed: bool = False) -> None:
+        if self._dry:
+            return
         pdf = self.pdf
         pdf.set_draw_color(*color)
         pdf.set_line_width(sw)
@@ -334,17 +346,25 @@ class _Renderer:
     # ------------------------------------------------------------------ elements
 
     def render(self) -> bytes:
+        els = [el for el in (self.doc.get("elements") or []) if isinstance(el, dict) and not el.get("hidden")]
+        shifts = self._grow_shifts(els)
+        if str(self.doc.get("paper") or "").startswith("Receipt"):
+            # a receipt strip is as long as its content — the printer cuts after the last line
+            bottom = max([0.0] + [_num(el.get("y")) + shifts[id(el)] + self._grow_h.get(id(el), _num(el.get("h"))) for el in els])
+            self.page_h = max(self.page_h, bottom + _num(self.doc.get("margin")))
+        self.pdf.add_page(format=(self.page_w, self.page_h))
         bg = parse_color(self.doc.get("background")) or (255, 255, 255)
         self.fill_rect(0, 0, self.page_w, self.page_h, bg)
-        for el in self.doc.get("elements") or []:
-            if not isinstance(el, dict) or el.get("hidden"):
-                continue
+        for el in els:
+            dy = shifts[id(el)]
             clones: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
             rep = el.get("repeat")
             if isinstance(rep, dict) and rep.get("fieldKey"):
                 step = _num(rep.get("step"))
                 for i, row in enumerate(ex.table_rows(self.ctx, str(rep["fieldKey"]))):
-                    clones.append(({**el, "y": _num(el.get("y")) + i * step}, {**row, "__i": i + 1}))
+                    clones.append(({**el, "y": _num(el.get("y")) + dy + i * step}, {**row, "__i": i + 1}))
+            elif dy:
+                clones.append(({**el, "y": _num(el.get("y")) + dy}, None))
             else:
                 clones.append((el, None))
             for clone, row in clones:
@@ -355,6 +375,35 @@ class _Renderer:
                 except Exception:  # one broken element must not kill the document
                     log.exception("template element %s (%s) failed to render", clone.get("id"), clone.get("type"))
         return bytes(self.pdf.output())
+
+    def _grow_shifts(self, els: list[dict[str, Any]]) -> dict[int, float]:
+        """Tables with `grow` take the height of their rows: every element whose top is at or below such a
+        table's designed bottom edge moves by the difference (down for more rows, up for fewer; a table hidden
+        by showIf counts as height 0). Heights come from a dry pass of el_table (nothing is drawn)."""
+        shifts = {id(el): 0.0 for el in els}
+        self._grow_h = {}
+        for g in els:
+            if g.get("type") != "table" or not g.get("grow"):
+                continue
+            x, y, w, h = _num(g.get("x")), _num(g.get("y")), _num(g.get("w")), _num(g.get("h"))
+            actual = 0.0
+            if ex.show_if(g.get("showIf"), self.ctx, None):
+                self._dry = True
+                try:
+                    actual = max(0.0, self.el_table(g, x, y, w, h) - y)
+                except Exception:
+                    log.exception("template table %s could not be measured", g.get("id"))
+                    continue
+                finally:
+                    self._dry = False
+            self._grow_h[id(g)] = actual
+            delta = actual - h
+            if not delta:
+                continue
+            for el in els:
+                if el is not g and _num(el.get("y")) >= y + h:
+                    shifts[id(el)] += delta
+        return shifts
 
     def element(self, el: dict[str, Any], row: dict[str, Any] | None) -> None:
         pdf = self.pdf
@@ -521,7 +570,8 @@ class _Renderer:
 
     # ------------------------------------------------------------------ table
 
-    def el_table(self, el: dict[str, Any], x: float, y: float, w: float, h: float) -> None:
+    def el_table(self, el: dict[str, Any], x: float, y: float, w: float, h: float) -> float:
+        """Draws the table; returns the y of its last drawn row boundary (its real bottom)."""
         cols_def = [c for c in (el.get("columns") or []) if isinstance(c, dict)]
         fkey = str(el.get("fieldKey") or "")
         fdef = ex.field_def(self.ctx.get("schema"), fkey) if fkey else None
@@ -539,6 +589,7 @@ class _Renderer:
         cell_st = _style(el.get("cellStyle"))
         row_h_min = _num(el.get("rowHeight"), 22)
         nowrap = bool(el.get("nowrap"))
+        grow = bool(el.get("grow"))  # every row is drawn, the box height is only the designer's estimate
         bw = _num(el.get("borderWidth"), 1)
         bcolor = parse_color(el.get("borderColor")) or (195, 206, 201)
         zebra = parse_color(el.get("zebra"))
@@ -597,7 +648,7 @@ class _Renderer:
 
         rows = _visible_rows(rows, cols_def, el, lambda r, c: fmt_cell(r, key_of(c, cols_def.index(c)))[0])
 
-        with self.clip(x, y, w, h):
+        with self.clip(x, y, w, max(h, self.page_h - y) if grow else h):
             cy = y
             boundaries: list[float] = [y]
             group_row: tuple[float, float] | None = None  # (top, bottom) of the spanning header row
@@ -640,7 +691,7 @@ class _Renderer:
                     cy += rh
                     boundaries.append(cy)
             for i, r in enumerate(rows):
-                if cy >= y + h:
+                if not grow and cy >= y + h:
                     break
                 formatted = [fmt_cell(r, key_of(c, ci)) for ci, c in enumerate(cols_def)]
                 cells = [(t, str(c.get("align") or "left")) for (t, _), c in zip(formatted, cols_def, strict=True)]
@@ -689,6 +740,7 @@ class _Renderer:
                     self.vline(bx, top, bottom, bw, bcolor)
                 # outer rectangle inset so the full stroke stays inside the element box
                 self.stroke_rect(x, y, w, bottom - y, bcolor, bw)
+        return boundaries[-1]
 
     def draw_cells(
         self,
@@ -723,6 +775,8 @@ class _Renderer:
         highlight: bool,
     ) -> None:
         """One table row: optional centred row number + cells (vertically middle, 6px side padding)."""
+        if self._dry:
+            return
         pad_h = 6.0
         cx = x
         if number is not None:

@@ -25,6 +25,7 @@ from app.core.textutil import is_valid_uz_phone, norm_phone, slugify
 from app.infrastructure.db.models import Branch, Company, Role
 from app.infrastructure.redis import cache
 from app.modules.messaging import xabarchi
+from app.modules.templates.service import ensure_default_receipt
 from app.modules.tenant import repository as repo
 from app.modules.tenant.schemas import (
     BranchCreateIn,
@@ -438,6 +439,8 @@ async def create_branch(session: AsyncSession, company_id: uuid.UUID, body: Bran
     await session.flush()
     await audit(session, actor_type="staff", actor_id=staff.id, company_id=company.id, action="create", entity="branch", entity_id=branch.id, after=_branch_snapshot(branch), ip=meta.ip, request_id=meta.request_id)
     await invalidate_company_cache(company.id)
+    # the company's first branch brings the standard cheque along — a draft receipt template to edit and activate
+    await ensure_default_receipt(session, company.id, [branch.id], str(company.locale or "uz"), staff.id)
     return branch_out(branch, await repo.geo_names(session, [branch]))
 
 

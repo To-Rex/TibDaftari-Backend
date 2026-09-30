@@ -28,7 +28,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import RequestMeta, StaffPrincipal
@@ -51,9 +51,11 @@ from app.infrastructure.db.models import (
 from app.infrastructure.redis import cache
 from app.modules.files import service as files
 from app.modules.templates import repository as repo
+from app.modules.templates.defaults import DEFAULT_RECEIPT_NAME, default_receipt_doc
 from app.modules.templates.renderer import build_render_context, render
 from app.modules.templates.renderer.context import to_render_item
 from app.modules.templates.schemas import (
+    DefaultReceiptIn,
     TemplateAssetIn,
     TemplateAssetOut,
     TemplateCreateIn,
@@ -278,6 +280,46 @@ async def create_template(session: AsyncSession, company_id: uuid.UUID, body: Te
     await audit(session, actor_type="staff", actor_id=staff.id, company_id=company_id, action="template.create", entity="result_template", entity_id=row.id, after=_snapshot_of(row), ip=meta.ip, request_id=meta.request_id)
     await invalidate_template_cache(company_id)
     return template_out(row)
+
+
+async def create_default_receipt(session: AsyncSession, company_id: uuid.UUID, body: DefaultReceiptIn, staff: StaffPrincipal, meta: RequestMeta) -> TemplateOut:
+    """The standard cheque as a new draft receipt template of the company (the "Standart chek" start option)."""
+    company = await session.get(Company, company_id)
+    lang = body.language or (str(company.locale) if company and company.locale in DEFAULT_RECEIPT_NAME else "uz")
+    create = TemplateCreateIn.model_validate({"name": body.name or DEFAULT_RECEIPT_NAME[lang], "scope": "receipt", "branchIds": body.branch_ids or [], "language": lang, "doc": default_receipt_doc(body.paper, lang)})
+    return await create_template(session, company_id, create, staff, meta)
+
+
+async def has_receipt_template(session: AsyncSession, company_id: uuid.UUID) -> bool:
+    """Whether the company has any (alive) receipt template, active or not."""
+    stmt = select(func.count()).select_from(ResultTemplate).where(ResultTemplate.company_id == company_id, ResultTemplate.deleted_at.is_(None), ResultTemplate.scope == "receipt")
+    return bool((await session.execute(stmt)).scalar_one())
+
+
+async def ensure_default_receipt(session: AsyncSession, company_id: uuid.UUID, branch_ids: list[uuid.UUID], language: str | None, created_by: uuid.UUID | None) -> ResultTemplate | None:
+    """Seed the standard cheque (a draft bound to `branch_ids`) for a company without any receipt template —
+    a company gets it together with its first branch. Returns the new row, or None when one already exists."""
+    if await has_receipt_template(session, company_id):
+        return None
+    lang = language if language in DEFAULT_RECEIPT_NAME else "uz"
+    row = ResultTemplate(
+        company_id=company_id,
+        name=DEFAULT_RECEIPT_NAME[lang],
+        status="draft",
+        version=1,
+        service_type_ids=[],
+        category_ids=[],
+        branch_ids=list(branch_ids),
+        scope="receipt",
+        language=lang,
+        doc=default_receipt_doc("Receipt80", lang),
+        usage=0,
+        created_by=created_by,
+    )
+    session.add(row)
+    await session.flush()
+    await invalidate_template_cache(company_id)
+    return row
 
 
 async def update_template(session: AsyncSession, template_id: uuid.UUID, body: TemplateUpdateIn, staff: StaffPrincipal, meta: RequestMeta) -> TemplateOut:

@@ -159,7 +159,7 @@ def build_render_context(
             "address": address,
             "passportNumber": p.get("passportNumber") or "",
         },
-        "order": _order_block(order or {}),
+        "order": _order_block(order or {}, bool(payments)),
         "item": {
             "serviceName": it.get("serviceName") or "",
             "approvedAt": _fmt_datetime(it.get("approvedAt")) if it.get("approvedAt") else "",
@@ -196,7 +196,7 @@ def build_render_context(
     return ctx
 
 
-def _order_block(order: dict[str, Any]) -> dict[str, Any]:
+def _order_block(order: dict[str, Any], has_payments: bool = False) -> dict[str, Any]:
     """`order.*` placeholders: number/date for every document, money fields when the order carries them (receipts)."""
     block: dict[str, Any] = {"number": order.get("number") or "", "date": _fmt_date(order.get("createdAt"))}
     if order.get("createdAt"):
@@ -215,6 +215,10 @@ def _order_block(order: dict[str, Any]) -> dict[str, Any]:
                 "itemCount": str(order.get("itemCount") or 0),
                 "note": order.get("note") or "",
                 "status": order.get("status") or "",
+                # presence flags for showIf: the discount line, the balance line, the payments table
+                "hasDiscount": "1" if float(order.get("discountPercent") or 0) > 0 or float(order.get("discountAmount") or 0) > 0 else "",
+                "hasRemaining": "1" if total - paid > 0 else "",
+                "hasPayments": "1" if has_payments else "",
             }
         )
     return block

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Body, Query, Response
 from app.api.deps import DbSession, Meta, Staff
 from app.modules.templates import service
 from app.modules.templates.schemas import (
+    DefaultReceiptIn,
     TemplateAssetIn,
     TemplateAssetOut,
     TemplateCreateIn,
@@ -37,6 +38,12 @@ async def list_templates(company_id: uuid.UUID, q: Annotated[TemplateQuery, Quer
 async def create_template(company_id: uuid.UUID, body: TemplateCreateIn, staff: Staff, session: DbSession, meta: Meta) -> TemplateOut:
     staff.require(TEMPLATE_WRITE).scope(company_id)
     return await service.create_template(session, company_id, body, staff, meta)
+
+
+@router.post("/companies/{company_id}/templates/default-receipt", response_model=TemplateOut, status_code=201, summary="Create the standard cheque as a new draft receipt template")
+async def create_default_receipt(company_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta, body: DefaultReceiptIn | None = None) -> TemplateOut:
+    staff.require(TEMPLATE_WRITE).scope(company_id)
+    return await service.create_default_receipt(session, company_id, body or DefaultReceiptIn(), staff, meta)
 
 
 @router.get("/templates/{template_id}", response_model=TemplateOut, summary="Template details (full doc)")

@@ -113,6 +113,16 @@ class TemplateDuplicateIn(CamelModel):
     branch_ids: list[str] | None = Field(default=None, max_length=100)
 
 
+class DefaultReceiptIn(CamelModel):
+    """The standard cheque as a new draft receipt template: optional name (default "Standart chek" in the
+    company's language), branches (default none = every branch), paper and label language."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    branch_ids: list[str] | None = Field(default=None, max_length=100)
+    paper: Literal["Receipt80", "Receipt58"] = "Receipt80"
+    language: TemplateLanguage | None = None
+
+
 class TemplateCreateIn(_TemplateWrite):
     status: TemplateStatus | None = None
 

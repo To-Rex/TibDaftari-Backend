@@ -405,3 +405,31 @@ def test_snapshot_and_internal_api(ctx: dict) -> None:
     assert c.post(f"/api/v1/templates/{tid}/status", json={"status": "archived"}, headers=h(ctx, "admin-a")).status_code == 200
     active_ids, _, _ = c.portal.call(_snapshot_roundtrip, cid, tid)
     assert tid not in active_ids
+
+
+def test_default_receipt_template(ctx: dict) -> None:
+    """The standard cheque: created on demand (draft, receipt scope, grow tables) and seeded with a company's first branch."""
+    c: TestClient = ctx["client"]
+    cid = ctx["ids"]["a"]
+    r = c.post(f"/api/v1/companies/{cid}/templates/default-receipt", json={"language": "ru", "paper": "Receipt58"}, headers=h(ctx, "admin-a"))
+    assert r.status_code == 201, r.text
+    t = r.json()
+    assert t["scope"] == "receipt" and t["status"] == "draft" and t["name"] == "Стандартный чек" and t["doc"]["paper"] == "Receipt58"
+    tables = [e for e in t["doc"]["elements"] if e["type"] == "table"]
+    assert [e["id"] for e in tables] == ["items", "payments"] and all(e["grow"] for e in tables)
+    r = c.post(f"/api/v1/templates/{t['id']}/preview.pdf", headers=h(ctx, "admin-a"))
+    assert r.status_code == 200 and r.content[:4] == b"%PDF"
+    assert c.post(f"/api/v1/companies/{cid}/templates/default-receipt", headers=h(ctx, "admin-b")).status_code in (403, 404)
+    assert c.delete(f"/api/v1/templates/{t['id']}", headers=h(ctx, "admin-a")).status_code == 204
+    # a new company gets the standard cheque together with its first branch (bound to that branch)
+    r = c.post("/api/v1/companies", json={"name": f"T-templates-default-{SFX}"}, headers=h(ctx, "super"))
+    assert r.status_code == 201, r.text
+    new_cid = r.json()["id"]
+    assert c.get(f"/api/v1/companies/{new_cid}/templates", headers=h(ctx, "super")).json() == []
+    r = c.post(f"/api/v1/companies/{new_cid}/branches", json={"name": "Markaz", "code": "M1"}, headers=h(ctx, "super"))
+    assert r.status_code == 201, r.text
+    bid = r.json()["id"]
+    lst = c.get(f"/api/v1/companies/{new_cid}/templates", headers=h(ctx, "super")).json()
+    assert len(lst) == 1 and lst[0]["scope"] == "receipt" and lst[0]["status"] == "draft" and lst[0]["branchIds"] == [bid] and lst[0]["name"] == "Standart chek"
+    r = c.post(f"/api/v1/companies/{new_cid}/branches", json={"name": "Ikkinchi", "code": "M2"}, headers=h(ctx, "super"))
+    assert r.status_code == 201 and len(c.get(f"/api/v1/companies/{new_cid}/templates", headers=h(ctx, "super")).json()) == 1
