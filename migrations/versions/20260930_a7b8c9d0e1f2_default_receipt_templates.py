@@ -8,8 +8,6 @@ Create Date: 2026-09-30
 """
 from __future__ import annotations
 
-import json
-
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
@@ -55,7 +53,7 @@ def upgrade() -> None:
     )
     for cid, locale, branch_ids in rows:
         lang = locale if locale in DEFAULT_RECEIPT_NAME else "uz"
-        bind.execute(insert, {"id": uuid7(), "cid": cid, "name": DEFAULT_RECEIPT_NAME[lang], "branch_ids": list(branch_ids), "lang": lang, "doc": json.dumps(default_receipt_doc("Receipt80", lang))})
+        bind.execute(insert, {"id": uuid7(), "cid": cid, "name": DEFAULT_RECEIPT_NAME[lang], "branch_ids": list(branch_ids), "lang": lang, "doc": default_receipt_doc("Receipt80", lang)})
 
 
 def downgrade() -> None:
