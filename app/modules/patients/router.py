@@ -27,6 +27,7 @@ class PatientListQuery(PageQuery):
     """PageQuery + `tag` (exact match)."""
 
     tag: str | None = None
+    branch_id: str | None = None
 
 
 @router.get(
@@ -36,7 +37,7 @@ async def list_patients(
     company_id: uuid.UUID, q: Annotated[PatientListQuery, Query()], staff: Staff, session: DbSession
 ) -> Page[PatientOut]:
     staff.require("reception.patient.read").scope(company_id)
-    return await service.list_patients(session, company_id, q, q.tag)
+    return await service.list_patients(session, company_id, q, q.tag, staff.branch_scope(q.branch_id))
 
 
 @router.get(
@@ -48,9 +49,10 @@ async def search_patients(
     session: DbSession,
     q: Annotated[str, Query(max_length=120)] = "",
     limit: Annotated[int, Query(ge=1, le=100)] = 12,
+    branch_id: Annotated[str | None, Query(alias="branchId")] = None,
 ) -> list[PatientOut]:
     staff.require("reception.patient.read").scope(company_id)
-    return await service.search_patients(session, company_id, q, limit)
+    return await service.search_patients(session, company_id, q, limit, staff.branch_scope(branch_id))
 
 
 @router.post(
@@ -60,7 +62,7 @@ async def find_duplicates(
     company_id: uuid.UUID, body: PatientDuplicatesIn, staff: Staff, session: DbSession
 ) -> list[PatientOut]:
     staff.require("reception.patient.read").scope(company_id)
-    return await service.find_duplicates(session, company_id, body)
+    return await service.find_duplicates(session, company_id, body, staff.branch_scope())
 
 
 @router.post("/companies/{company_id}/patients", response_model=PatientOut, status_code=201, summary="Create patient")
@@ -72,9 +74,9 @@ async def create_patient(
 
 
 @router.get("/patients/{patient_id}", response_model=PatientOut, summary="Get patient (company-scoped)")
-async def get_patient(patient_id: uuid.UUID, staff: Staff, session: DbSession) -> PatientOut:
+async def get_patient(patient_id: uuid.UUID, staff: Staff, session: DbSession, branch_id: Annotated[str | None, Query(alias="branchId")] = None) -> PatientOut:
     staff.require("reception.patient.read")
-    return service.patient_out(await service.get_patient_or_404(session, patient_id, service.scope_company(staff)))
+    return await service.get_patient_dto(session, patient_id, staff, branch_id)
 
 
 @router.put("/patients/{patient_id}", response_model=PatientOut, summary="Update patient (partial)")

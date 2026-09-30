@@ -9,6 +9,7 @@ and `patient_out`.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy.exc import IntegrityError
@@ -53,11 +54,15 @@ _DUP_BY_INDEX = {
 # ----------------------------------------------------------------------------- projections
 
 
-def patient_out(p: Patient) -> PatientOut:
-    """ORM row → frontend `Patient` shape (address/stats/portal always objects)."""
+def patient_out(p: Patient, stats: tuple[int, datetime | None, int] | None = None) -> PatientOut:
+    """ORM row → frontend `Patient` shape (address/stats/portal always objects).
+
+    `stats` = (orders, last visit, total spent) counted inside the caller's branch scope; default: company-wide."""
+    orders, last_visit, spent = stats if stats is not None else (p.stats_orders, p.stats_last_visit_at, p.stats_total_spent)
     return PatientOut(
         id=str(p.id),
         company_id=str(p.company_id),
+        branch_id=str(p.branch_id) if p.branch_id else None,
         full_name=p.full_name,
         phone=p.phone,
         phone_extra=p.phone_extra,
@@ -75,9 +80,7 @@ def patient_out(p: Patient) -> PatientOut:
         contract_number=p.contract_number,
         note=p.note,
         tags=list(p.tags or []),
-        stats=PatientStatsOut(
-            orders=p.stats_orders, last_visit_at=p.stats_last_visit_at, total_spent=p.stats_total_spent
-        ),
+        stats=PatientStatsOut(orders=orders, last_visit_at=last_visit, total_spent=spent),
         portal=PatientPortalOut(linked=p.portal_linked, telegram_chat_id=p.telegram_chat_id),
         created_at=p.created_at,
         updated_at=p.updated_at,
@@ -129,11 +132,29 @@ async def get_patient_or_404(
     return p
 
 
+async def _outs(session: AsyncSession, company_id: uuid.UUID, rows: list[Patient], branches: list[uuid.UUID] | None) -> list[PatientOut]:
+    """DTOs with the visit statistics of the branch scope (company-wide when unrestricted)."""
+    if branches is None:
+        return [patient_out(p) for p in rows]
+    stats = await repo.branch_stats(session, company_id, [p.id for p in rows], branches)
+    return [patient_out(p, stats.get(p.id, (0, None, 0))) for p in rows]
+
+
+async def get_patient_dto(session: AsyncSession, patient_id: uuid.UUID, staff: StaffPrincipal, branch_id: str | None = None) -> PatientOut:
+    """One patient (identity is company-wide) with the statistics of the caller's branch scope."""
+    p = await get_patient_or_404(session, patient_id, scope_company(staff))
+    return (await _outs(session, p.company_id, [p], staff.branch_scope(branch_id)))[0]
+
+
 async def list_patients(
-    session: AsyncSession, company_id: uuid.UUID, q: PageQuery, tag: str | None
+    session: AsyncSession, company_id: uuid.UUID, q: PageQuery, tag: str | None, branches: list[uuid.UUID] | None = None
 ) -> Page[PatientOut]:
-    """Paged company patients; search predicate over name/phone/passport; optional exact tag; sortable whitelist."""
+    """Paged company patients; search predicate over name/phone/passport; optional exact tag; sortable whitelist.
+
+    `branches` (the caller's branch scope) keeps the list to the patients registered in / seen at those branches."""
     stmt = repo.base_select(company_id)
+    if branches is not None:
+        stmt = stmt.where(repo.in_branches(branches))
     pred = repo.search_predicate(q.search)
     if pred is not None:
         stmt = stmt.where(pred)
@@ -141,21 +162,22 @@ async def list_patients(
         stmt = stmt.where(Patient.tags.any(tag))
     order = [sort_clause(q.sort_by, q.sort_dir, repo.SORTABLE, "createdAt"), Patient.id.desc()]
     rows, total = await paginate_query(session, stmt, q, order_by=order)
-    return page_of([patient_out(p) for p in rows], q, total)
+    return page_of(await _outs(session, company_id, list(rows), branches), q, total)
 
 
-async def search_patients(session: AsyncSession, company_id: uuid.UUID, query: str, limit: int) -> list[PatientOut]:
-    """Quick-pick list (empty query → most recent visitors)."""
-    return [patient_out(p) for p in await repo.search(session, company_id, query, limit)]
+async def search_patients(session: AsyncSession, company_id: uuid.UUID, query: str, limit: int, branches: list[uuid.UUID] | None = None) -> list[PatientOut]:
+    """Quick-pick list (empty query → most recent visitors). Identity is company-wide — a patient of another
+    branch must be found here instead of being registered twice — but the statistics are the branch scope's."""
+    return await _outs(session, company_id, await repo.search(session, company_id, query, limit, branches), branches)
 
 
-async def find_duplicates(session: AsyncSession, company_id: uuid.UUID, body: PatientDuplicatesIn) -> list[PatientOut]:
+async def find_duplicates(session: AsyncSession, company_id: uuid.UUID, body: PatientDuplicatesIn, branches: list[uuid.UUID] | None = None) -> list[PatientOut]:
     """Existing patients sharing phone / passport / PINFL with the draft (client filters itself out)."""
     phone = norm_phone(body.phone) if body.phone else None
     rows = await repo.find_duplicates(
         session, company_id, phone=phone or None, passport=_clean(body.passport_number), pinfl=_clean(body.pinfl)
     )
-    return [patient_out(p) for p in rows]
+    return await _outs(session, company_id, list(rows), branches)
 
 
 # ----------------------------------------------------------------------------- writes
@@ -225,6 +247,22 @@ async def _flush_identity(session: AsyncSession) -> None:
         raise
 
 
+async def _registration_branch(session: AsyncSession, company_id: uuid.UUID, staff: StaffPrincipal, requested: str | None) -> uuid.UUID | None:
+    """The branch a new patient is registered at: the requested one when it is a branch of the company inside
+    the employee's scope, else the employee's own (single / first assigned) branch."""
+    if requested:
+        try:
+            wanted = uuid.UUID(str(requested))
+        except ValueError:
+            wanted = None
+        if wanted and staff.allows_branch(wanted) and await repo.company_branch(session, wanted, company_id):
+            return wanted
+    if staff.branch_id:
+        return staff.branch_id
+    mine = list(staff.employee.branch_ids or [])
+    return mine[0] if mine and not staff.can_switch_branch else None
+
+
 async def create_patient(
     session: AsyncSession, company_id: uuid.UUID, staff: StaffPrincipal, body: PatientUpsertIn, meta: RequestMeta
 ) -> PatientOut:
@@ -236,6 +274,7 @@ async def create_patient(
     addr = body.address or PatientAddress()
     p = Patient(
         company_id=company_id,
+        branch_id=await _registration_branch(session, company_id, staff, body.branch_id),
         full_name=body.full_name,
         phone=phone,
         phone_extra=norm_phone(body.phone_extra) if _clean(body.phone_extra) else None,

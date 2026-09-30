@@ -98,6 +98,37 @@ class StaffPrincipal:
     def role_key(self) -> str:
         return self.role.key if self.role else "user"
 
+    @property
+    def can_switch_branch(self) -> bool:
+        """Superadmin and the admin role work across every branch of the company (same rule as the frontend)."""
+        return self.is_super_admin or self.role_key == "admin"
+
+    def branch_scope(self, requested: uuid.UUID | str | None = None) -> list[uuid.UUID] | None:
+        """Branches a read may cover; None = no restriction.
+
+        Switchers (superadmin / admin): the requested branch, or everything when none is requested.
+        Everyone else is confined to their assigned branches — the requested one when it is theirs,
+        otherwise all of theirs. An employee with no assigned branch keeps the company-wide view
+        (there is nothing to confine to; the admin dashboard flags such accounts)."""
+        wanted: uuid.UUID | None = None
+        malformed = False
+        if requested:
+            try:
+                wanted = requested if isinstance(requested, uuid.UUID) else uuid.UUID(str(requested))
+            except ValueError:
+                malformed = True
+        mine = list(self.employee.branch_ids or [])
+        if self.can_switch_branch or not mine:
+            if malformed:
+                return [uuid.UUID(int=0)]  # a malformed id matches nothing
+            return [wanted] if wanted else None
+        return [wanted] if wanted in mine else mine
+
+    def allows_branch(self, branch_id: uuid.UUID | None) -> bool:
+        """Whether a record of `branch_id` lies inside this employee's branch scope."""
+        scope = self.branch_scope()
+        return scope is None or branch_id in scope
+
     def has(self, *perms: str) -> bool:
         return self.is_super_admin or any(p in self._perm_set for p in perms)
 

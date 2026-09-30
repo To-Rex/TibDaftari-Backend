@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import ColumnElement, Select, String, false, func, or_, select
+from sqlalchemy import ColumnElement, Select, String, and_, exists, false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.textutil import digits, fold
 from app.infrastructure.db.base import alive
-from app.infrastructure.db.models import Country, District, Patient, Region
+from app.infrastructure.db.models import Branch, Country, District, Order, Patient, Region
 
 SORTABLE: dict[str, Any] = {
     "createdAt": Patient.created_at,
@@ -23,6 +24,30 @@ SORTABLE: dict[str, Any] = {
 def base_select(company_id: uuid.UUID) -> Select:
     """Alive patients of one company."""
     return select(Patient).where(Patient.company_id == company_id, alive(Patient))
+
+
+def in_branches(branches: list[uuid.UUID]) -> ColumnElement[bool]:
+    """A patient belongs to a branch when it was registered there or has an order there. Patients with no
+    branch and no orders at all (legacy imports) are nobody's and stay visible everywhere."""
+    has_order = exists().where(Order.patient_id == Patient.id, Order.company_id == Patient.company_id, alive(Order), Order.branch_id.in_(branches))
+    return or_(Patient.branch_id.in_(branches), has_order, and_(Patient.branch_id.is_(None), Patient.stats_orders == 0))
+
+
+async def branch_stats(session: AsyncSession, company_id: uuid.UUID, patient_ids: list[uuid.UUID], branches: list[uuid.UUID]) -> dict[uuid.UUID, tuple[int, datetime | None, int]]:
+    """patient → (orders, last visit, total paid) counted inside `branches` only (non-cancelled orders)."""
+    if not patient_ids:
+        return {}
+    stmt = (
+        select(Order.patient_id, func.count(), func.max(Order.created_at), func.coalesce(func.sum(Order.paid_amount), 0))
+        .where(Order.company_id == company_id, alive(Order), Order.status != "cancelled", Order.patient_id.in_(patient_ids), Order.branch_id.in_(branches))
+        .group_by(Order.patient_id)
+    )
+    return {pid: (int(n), last, int(spent)) for pid, n, last, spent in (await session.execute(stmt)).all()}
+
+
+async def company_branch(session: AsyncSession, branch_id: uuid.UUID, company_id: uuid.UUID) -> uuid.UUID | None:
+    """The id back when it is an alive branch of the company."""
+    return (await session.execute(select(Branch.id).where(Branch.id == branch_id, Branch.company_id == company_id, alive(Branch)))).scalar_one_or_none()
 
 
 def search_predicate(search: str | None) -> ColumnElement[bool] | None:
@@ -100,13 +125,22 @@ async def find_duplicates(
     return list((await session.execute(stmt)).scalars().all())
 
 
-async def search(session: AsyncSession, company_id: uuid.UUID, query: str, limit: int) -> list[Patient]:
-    """Quick-pick search: rank by last visit (nulls last), then newest."""
+async def search(session: AsyncSession, company_id: uuid.UUID, query: str, limit: int, branches: list[uuid.UUID] | None = None) -> list[Patient]:
+    """Quick-pick search: rank by last visit (nulls last), then newest.
+
+    With a branch scope: a typed query still searches the whole company (a patient of another branch must be
+    found, not registered twice) but lists the scope's own patients first; the empty query — "recent visitors" —
+    only ever lists the scope's own patients."""
     stmt = base_select(company_id)
     pred = search_predicate(query)
+    order = [Patient.stats_last_visit_at.desc().nulls_last(), Patient.created_at.desc()]
     if pred is not None:
         stmt = stmt.where(pred)
-    stmt = stmt.order_by(Patient.stats_last_visit_at.desc().nulls_last(), Patient.created_at.desc()).limit(limit)
+        if branches is not None:
+            order.insert(0, in_branches(branches).desc())
+    elif branches is not None:
+        stmt = stmt.where(in_branches(branches))
+    stmt = stmt.order_by(*order).limit(limit)
     return list((await session.execute(stmt)).scalars().all())
 
 

@@ -166,11 +166,14 @@ def _order_search(search: str | None) -> ColumnElement[bool] | None:
     return or_(*clauses) if clauses else false()
 
 
-async def list_orders(session: AsyncSession, company_id: uuid.UUID, q: OrderListQuery) -> tuple[list[Order], int]:
-    """Filtered + paged orders of one company (DOMAIN_RULES section 7 `list`)."""
+async def list_orders(session: AsyncSession, company_id: uuid.UUID, q: OrderListQuery, branches: list[uuid.UUID] | None = None) -> tuple[list[Order], int]:
+    """Filtered + paged orders of one company (DOMAIN_RULES section 7 `list`).
+
+    `branches` is the caller's branch scope (StaffPrincipal.branch_scope); without it `q.branch_id` applies as is."""
     stmt: Select = select(Order).where(Order.company_id == company_id, alive(Order))
-    if q.branch_id:
-        stmt = stmt.where(Order.branch_id == to_uuid(q.branch_id))
+    scope = branches if branches is not None else ([to_uuid(q.branch_id)] if q.branch_id else None)
+    if scope is not None:
+        stmt = stmt.where(Order.branch_id.in_(scope))
     if q.status:
         stmt = stmt.where(Order.status == q.status)
     if q.payment:
@@ -203,7 +206,7 @@ def _worklist_search(search: str | None) -> ColumnElement[bool] | None:
     return or_(*clauses)
 
 
-def _worklist_filters(stmt: Select, company_id: uuid.UUID, q: WorklistQuery, *, with_status: bool) -> Select:
+def _worklist_filters(stmt: Select, company_id: uuid.UUID, q: WorklistQuery, *, with_status: bool, branches: list[uuid.UUID] | None = None) -> Select:
     """Shared WHERE clause of the worklist (items with a schema on paid/partial orders)."""
     stmt = stmt.where(
         OrderItem.company_id == company_id,
@@ -212,8 +215,9 @@ def _worklist_filters(stmt: Select, company_id: uuid.UUID, q: WorklistQuery, *, 
         OrderItem.schema_id.is_not(None),
         Order.payment != "unpaid",
     )
-    if q.branch_id:
-        stmt = stmt.where(OrderItem.branch_id == to_uuid(q.branch_id))
+    scope = branches if branches is not None else ([to_uuid(q.branch_id)] if q.branch_id else None)
+    if scope is not None:
+        stmt = stmt.where(OrderItem.branch_id.in_(scope))
     if q.category_ids:
         stmt = stmt.where(OrderItem.category_id.in_(parse_uuids(q.category_ids) or [uuid.UUID(int=0)]))
     if with_status and q.status:
@@ -229,22 +233,22 @@ def _worklist_filters(stmt: Select, company_id: uuid.UUID, q: WorklistQuery, *, 
     return stmt
 
 
-async def worklist(session: AsyncSession, company_id: uuid.UUID, q: WorklistQuery) -> tuple[list[Row[Any]], int]:
+async def worklist(session: AsyncSession, company_id: uuid.UUID, q: WorklistQuery, branches: list[uuid.UUID] | None = None) -> tuple[list[Row[Any]], int]:
     """Items with a schema on paid/partial orders + order snapshots + live patient gender/birth date."""
     stmt: Select = (
         select(OrderItem, Order.number, Order.patient_name, Order.patient_phone, Patient.gender, Patient.birth_date)
         .join(Order, Order.id == OrderItem.order_id)
         .join(Patient, Patient.id == Order.patient_id, isouter=True)
     )
-    stmt = _worklist_filters(stmt, company_id, q, with_status=True)
+    stmt = _worklist_filters(stmt, company_id, q, with_status=True, branches=branches)
     order_by = [sort_clause(q.sort_by, q.sort_dir, WORKLIST_SORTABLE, "createdAt"), OrderItem.id.desc()]
     return await paginate_query(session, stmt, q, order_by=order_by, scalars=False)
 
 
-async def worklist_counts(session: AsyncSession, company_id: uuid.UUID, q: WorklistQuery) -> dict[str, int]:
+async def worklist_counts(session: AsyncSession, company_id: uuid.UUID, q: WorklistQuery, branches: list[uuid.UUID] | None = None) -> dict[str, int]:
     """Per-status counts for the same filters (one GROUP BY instead of one request per status tab)."""
     stmt: Select = select(OrderItem.status, func.count()).join(Order, Order.id == OrderItem.order_id)
-    stmt = _worklist_filters(stmt, company_id, q, with_status=False).group_by(OrderItem.status)
+    stmt = _worklist_filters(stmt, company_id, q, with_status=False, branches=branches).group_by(OrderItem.status)
     rows = (await session.execute(stmt)).all()
     return {str(status): int(n) for status, n in rows}
 
@@ -268,12 +272,18 @@ async def get_document_by_token(session: AsyncSession, token: str) -> ResultDocu
     return (await session.execute(stmt.limit(1))).scalar_one_or_none()
 
 
+async def order_branch_id(session: AsyncSession, order_id: uuid.UUID) -> uuid.UUID | None:
+    """Branch of an order (documents carry no branch of their own)."""
+    return (await session.execute(select(Order.branch_id).where(Order.id == order_id))).scalar_one_or_none()
+
+
 async def list_documents(
     session: AsyncSession,
     company_id: uuid.UUID,
     *,
     order_id: uuid.UUID | None,
     patient_id: uuid.UUID | None,
+    branches: list[uuid.UUID] | None = None,
     limit: int = 500,
 ) -> list[ResultDocument]:
     """Company documents filtered by order and/or patient, newest first."""
@@ -282,6 +292,9 @@ async def list_documents(
         stmt = stmt.where(ResultDocument.order_id == order_id)
     if patient_id is not None:
         stmt = stmt.where(ResultDocument.patient_id == patient_id)
+    if branches is not None:
+        # a document belongs to the branch of its order
+        stmt = stmt.where(ResultDocument.order_id.in_(select(Order.id).where(Order.company_id == company_id, Order.branch_id.in_(branches))))
     stmt = stmt.order_by(ResultDocument.created_at.desc(), ResultDocument.id.desc()).limit(limit)
     return list((await session.execute(stmt)).scalars().all())
 

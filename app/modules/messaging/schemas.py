@@ -21,6 +21,7 @@ class OutboxQuery(PageQuery):
 
     status: MessageStatus | None = None
     kind: MessageKind | None = None
+    branch_id: str | None = None
 
 
 class OutboxCountsOut(CamelModel):
@@ -66,6 +67,8 @@ class SendIn(CamelModel):
     text: str = Field(min_length=1, max_length=1000)
     kind: MessageKind = "broadcast"
     scheduled_at: datetime | None = None
+    # the branch the message is sent from (default: the employee's own branch)
+    branch_id: str | None = Field(default=None, max_length=64)
 
     @field_validator("scheduled_at")
     @classmethod

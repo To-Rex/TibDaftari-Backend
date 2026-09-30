@@ -13,6 +13,7 @@ from sqlalchemy.types import Date
 from app.core.timeutil import DEFAULT_TZ
 from app.infrastructure.db.base import alive
 from app.infrastructure.db.models import Branch, Category, Order, OrderItem, OutboxMessage, Patient, Payment
+from app.modules.patients.repository import in_branches as patient_in_branches
 
 _TZ = DEFAULT_TZ.key
 
@@ -23,7 +24,7 @@ def _local_day(col: Any) -> Any:
 
 
 async def dashboard_counters(
-    session: AsyncSession, company_id: uuid.UUID, branch_id: uuid.UUID | None, today_start: datetime, today_end: datetime
+    session: AsyncSession, company_id: uuid.UUID, branches: list[uuid.UUID] | None, today_start: datetime, today_end: datetime
 ) -> dict[str, int]:
     """todayOrders / todayRevenue / pendingLab / pendingApproval / patients / smsQueued in 4 small queries."""
     o = select(func.count()).where(
@@ -44,18 +45,15 @@ async def dashboard_counters(
         func.coalesce(func.sum(case((OrderItem.status.in_(("pending", "entered")), 1), else_=0)), 0).label("pending_lab"),
         func.coalesce(func.sum(case((OrderItem.status == "submitted", 1), else_=0)), 0).label("pending_approval"),
     ).where(OrderItem.company_id == company_id, alive(OrderItem), OrderItem.status.in_(("pending", "entered", "submitted")))
-    if branch_id:
-        o = o.where(Order.branch_id == branch_id)
-        p = p.where(Payment.branch_id == branch_id)
-        i = i.where(OrderItem.branch_id == branch_id)
-    misc = select(
-        select(func.count()).select_from(Patient).where(Patient.company_id == company_id, alive(Patient)).scalar_subquery().label("patients"),
-        select(func.count())
-        .select_from(OutboxMessage)
-        .where(OutboxMessage.company_id == company_id, alive(OutboxMessage), OutboxMessage.status.in_(("queued", "scheduled")))
-        .scalar_subquery()
-        .label("sms_queued"),
-    )
+    patients = select(func.count()).select_from(Patient).where(Patient.company_id == company_id, alive(Patient))
+    sms = select(func.count()).select_from(OutboxMessage).where(OutboxMessage.company_id == company_id, alive(OutboxMessage), OutboxMessage.status.in_(("queued", "scheduled")))
+    if branches is not None:
+        o = o.where(Order.branch_id.in_(branches))
+        p = p.where(Payment.branch_id.in_(branches))
+        i = i.where(OrderItem.branch_id.in_(branches))
+        patients = patients.where(patient_in_branches(branches))  # registered in / visited these branches
+        sms = sms.where(OutboxMessage.branch_id.in_(branches))
+    misc = select(patients.scalar_subquery().label("patients"), sms.scalar_subquery().label("sms_queued"))
     today_orders = (await session.execute(o)).scalar_one()
     today_revenue = (await session.execute(p)).scalar_one()
     items = (await session.execute(i)).one()
@@ -71,7 +69,7 @@ async def dashboard_counters(
 
 
 async def order_trend(
-    session: AsyncSession, company_id: uuid.UUID, branch_id: uuid.UUID | None, start: datetime, end: datetime
+    session: AsyncSession, company_id: uuid.UUID, branches: list[uuid.UUID] | None, start: datetime, end: datetime
 ) -> dict[str, tuple[int, int]]:
     """{local day → (orders, Σ paid_amount)} for non-cancelled orders created in [start, end)."""
     day = _local_day(Order.created_at)
@@ -80,14 +78,14 @@ async def order_trend(
         .where(Order.company_id == company_id, alive(Order), Order.status != "cancelled", Order.created_at >= start, Order.created_at < end)
         .group_by(day)
     )
-    if branch_id:
-        stmt = stmt.where(Order.branch_id == branch_id)
+    if branches is not None:
+        stmt = stmt.where(Order.branch_id.in_(branches))
     rows = (await session.execute(stmt)).all()
     return {r.day.isoformat(): (int(r.orders), int(r.revenue)) for r in rows}
 
 
 async def items_by_category(
-    session: AsyncSession, company_id: uuid.UUID, branch_id: uuid.UUID | None, start: datetime, end: datetime
+    session: AsyncSession, company_id: uuid.UUID, branches: list[uuid.UUID] | None, start: datetime, end: datetime
 ) -> list[Row[Any]]:
     """(category_id, name, count, revenue=Σ final_price) for non-cancelled items in range."""
     stmt = (
@@ -100,8 +98,8 @@ async def items_by_category(
         .where(OrderItem.company_id == company_id, alive(OrderItem), OrderItem.status != "cancelled", OrderItem.created_at >= start, OrderItem.created_at < end)
         .group_by(OrderItem.category_id)
     )
-    if branch_id:
-        stmt = stmt.where(OrderItem.branch_id == branch_id)
+    if branches is not None:
+        stmt = stmt.where(OrderItem.branch_id.in_(branches))
     return list((await session.execute(stmt)).all())
 
 
@@ -111,7 +109,7 @@ async def categories(session: AsyncSession, company_id: uuid.UUID) -> list[Categ
 
 
 async def breakdown(
-    session: AsyncSession, company_id: uuid.UUID, by: str, branch_id: uuid.UUID | None, start: datetime, end: datetime
+    session: AsyncSession, company_id: uuid.UUID, by: str, branches: list[uuid.UUID] | None, start: datetime, end: datetime
 ) -> list[Row[Any]]:
     """(name, count, revenue) grouped by category / service / branch / technician, revenue desc."""
     if by == "branch":
@@ -131,6 +129,6 @@ async def breakdown(
     )
     if by == "branch":
         stmt = stmt.outerjoin(Branch, Branch.id == OrderItem.branch_id)
-    if branch_id:
-        stmt = stmt.where(OrderItem.branch_id == branch_id)
+    if branches is not None:
+        stmt = stmt.where(OrderItem.branch_id.in_(branches))
     return list((await session.execute(stmt)).all())

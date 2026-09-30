@@ -210,10 +210,12 @@ def document_out(d: ResultDocument) -> ResultDocumentOut:
 # ----------------------------------------------------------------------------- look-ups
 
 
-async def get_order_or_404(session: AsyncSession, order_id: uuid.UUID, company_id: uuid.UUID | None, *, for_update: bool = False) -> Order:
-    """Company-scoped order or 404 'Chek topilmadi'; `for_update` locks the row (all order mutations)."""
+async def get_order_or_404(session: AsyncSession, order_id: uuid.UUID, company_id: uuid.UUID | None, *, for_update: bool = False, staff: StaffPrincipal | None = None) -> Order:
+    """Company-scoped order or 404 'Chek topilmadi'; `for_update` locks the row (all order mutations).
+
+    With `staff`, an order of a branch outside the employee's branch scope is a 404 too."""
     o = await repo.get_order(session, order_id, company_id, for_update=for_update)
-    if not o:
+    if not o or (staff is not None and not staff.allows_branch(o.branch_id)):
         raise NotFoundError(ORDER_NOT_FOUND)
     return o
 
@@ -225,29 +227,31 @@ async def _lock_order_of_item(session: AsyncSession, item: OrderItem) -> Order:
     return order
 
 
-async def get_item_or_404(session: AsyncSession, item_id: uuid.UUID, company_id: uuid.UUID | None) -> OrderItem:
-    """Company-scoped item or 404 'Tahlil topilmadi'."""
+async def get_item_or_404(session: AsyncSession, item_id: uuid.UUID, company_id: uuid.UUID | None, staff: StaffPrincipal | None = None) -> OrderItem:
+    """Company-scoped item or 404 'Tahlil topilmadi' (also for a branch outside `staff`'s scope)."""
     it = await repo.get_item(session, item_id, company_id)
-    if not it:
+    if not it or (staff is not None and not staff.allows_branch(it.branch_id)):
         raise NotFoundError(ITEM_NOT_FOUND)
     return it
 
 
 async def get_document_or_404(
-    session: AsyncSession, document_id: uuid.UUID, company_id: uuid.UUID | None
+    session: AsyncSession, document_id: uuid.UUID, company_id: uuid.UUID | None, staff: StaffPrincipal | None = None
 ) -> ResultDocument:
-    """Company-scoped document or 404 'Hujjat topilmadi'."""
+    """Company-scoped document or 404 'Hujjat topilmadi' (also when its order is outside `staff`'s branch scope)."""
     d = await repo.get_document(session, document_id, company_id)
     if not d:
+        raise NotFoundError(DOC_NOT_FOUND)
+    if staff is not None and staff.branch_scope() is not None and not staff.allows_branch(await repo.order_branch_id(session, d.order_id)):
         raise NotFoundError(DOC_NOT_FOUND)
     return d
 
 
 async def get_order_bundle(
-    session: AsyncSession, order_id: uuid.UUID, company_id: uuid.UUID | None = None
+    session: AsyncSession, order_id: uuid.UUID, company_id: uuid.UUID | None = None, staff: StaffPrincipal | None = None
 ) -> OrderBundleOut:
     """{order, items, payments} — the shape of `GET /orders/{id}` (also used by portal/telegram)."""
-    o = await get_order_or_404(session, order_id, company_id)
+    o = await get_order_or_404(session, order_id, company_id, staff=staff)
     items = await repo.items_of_order(session, o.id)
     payments = await repo.payments_of_order(session, o.id)
     return OrderBundleOut(
@@ -263,12 +267,12 @@ def _patient_ctx(p: Any) -> dict[str, Any]:
     return {"fullName": p.full_name, "phone": p.phone, "birthDate": p.birth_date, "gender": p.gender, "street": getattr(p, "street", None), "passportNumber": getattr(p, "passport_number", None)}
 
 
-async def render_receipt_pdf(session: AsyncSession, order_id: uuid.UUID, company_scope: uuid.UUID | None, template_id: uuid.UUID | None) -> tuple[bytes, str]:
+async def render_receipt_pdf(session: AsyncSession, order_id: uuid.UUID, company_scope: uuid.UUID | None, template_id: uuid.UUID | None, staff: StaffPrincipal | None = None) -> tuple[bytes, str]:
     """The cheque rendered with a receipt template (explicit `template_id`, else the branch's active one).
     404 `no_template` when the company has none — the client then prints its built-in cheque."""
     from app.modules.templates import service as templates_service
 
-    o = await get_order_or_404(session, order_id, company_scope)
+    o = await get_order_or_404(session, order_id, company_scope, staff=staff)
     tpl = await repo.get_template(session, template_id, o.company_id) if template_id else None
     if tpl is not None and (tpl.scope != "receipt" or (tpl.branch_ids and o.branch_id not in tpl.branch_ids)):
         tpl = None
@@ -357,9 +361,9 @@ async def recompute(session: AsyncSession, order: Order, now: datetime | None = 
 # ----------------------------------------------------------------------------- list / get
 
 
-async def list_orders(session: AsyncSession, company_id: uuid.UUID, q: OrderListQuery) -> Page[OrderOut]:
-    """Paged company orders."""
-    rows, total = await repo.list_orders(session, company_id, q)
+async def list_orders(session: AsyncSession, company_id: uuid.UUID, q: OrderListQuery, staff: StaffPrincipal | None = None) -> Page[OrderOut]:
+    """Paged company orders, confined to the caller's branch scope."""
+    rows, total = await repo.list_orders(session, company_id, q, staff.branch_scope(q.branch_id) if staff else None)
     return page_of([order_out(o) for o in rows], q, total)
 
 
@@ -426,6 +430,8 @@ async def create_order(
     branch = await repo.get_branch(session, branch_id, company_id) if branch_id else None
     if not patient or not branch:
         raise NotFoundError("Bemor yoki filial topilmadi")
+    if not staff.allows_branch(branch.id):
+        raise ForbiddenError("Bu filialda chek ochishga ruxsat yo‘q")
     number = await repo.allocate_order_number(session, branch.id, company_id)
     if number is None:
         raise NotFoundError("Bemor yoki filial topilmadi")
@@ -477,7 +483,7 @@ async def add_items(
     session: AsyncSession, order_id: uuid.UUID, staff: StaffPrincipal, body: AddItemsIn, meta: RequestMeta
 ) -> OrderItemsOut:
     """Append services to an open/in-progress cheque (closed -> 409)."""
-    order = await get_order_or_404(session, order_id, scope_company(staff), for_update=True)
+    order = await get_order_or_404(session, order_id, scope_company(staff), for_update=True, staff=staff)
     if order.status in ("cancelled", "completed"):
         raise ConflictError("Chek yopilgan", code="closed")
     now = utcnow()
@@ -502,7 +508,7 @@ async def remove_item(
     session: AsyncSession, order_id: uuid.UUID, item_id: uuid.UUID, staff: StaffPrincipal, meta: RequestMeta
 ) -> OrderItemsOut:
     """Soft-delete a pending item of an unpaid cheque."""
-    order = await get_order_or_404(session, order_id, scope_company(staff), for_update=True)
+    order = await get_order_or_404(session, order_id, scope_company(staff), for_update=True, staff=staff)
     item = await repo.get_item(session, item_id, order.company_id)
     if not item or item.order_id != order.id:
         raise NotFoundError(ITEM_NOT_FOUND)
@@ -563,7 +569,7 @@ async def pay(
     session: AsyncSession, order_id: uuid.UUID, staff: StaffPrincipal, body: PayIn, meta: RequestMeta
 ) -> OrderPaymentsOut:
     """Record a payment (partial allowed), keep patient totalSpent, optionally SMS + Telegram receipt."""
-    order = await get_order_or_404(session, order_id, scope_company(staff), for_update=True)
+    order = await get_order_or_404(session, order_id, scope_company(staff), for_update=True, staff=staff)
     if order.item_count == 0:
         raise ValidationError("Chekda xizmat yo‘q", code="empty")
     if order.payment == "paid":
@@ -636,7 +642,7 @@ async def refund(
         raise NotFoundError("To‘lov topilmadi")
     if payment.refunded_at is not None:
         raise StateError("To‘lov allaqachon qaytarilgan", code="state")
-    order = await get_order_or_404(session, payment.order_id, payment.company_id, for_update=True)
+    order = await get_order_or_404(session, payment.order_id, payment.company_id, for_update=True, staff=staff)
     await session.refresh(payment)
     if payment.refunded_at is not None:
         raise StateError("To‘lov allaqachon qaytarilgan", code="state")
@@ -667,7 +673,7 @@ async def cancel_order(
     session: AsyncSession, order_id: uuid.UUID, staff: StaffPrincipal, reason: str, meta: RequestMeta
 ) -> OrderOut:
     """Cancel an unpaid cheque: order + all items -> cancelled; `note` untouched, reason kept separately."""
-    order = await get_order_or_404(session, order_id, scope_company(staff), for_update=True)
+    order = await get_order_or_404(session, order_id, scope_company(staff), for_update=True, staff=staff)
     if order.payment != "unpaid":
         raise ConflictError("To‘langan chekni bekor qilish uchun avval qaytarish qiling", code="paid")
     now = utcnow()
@@ -743,7 +749,7 @@ async def worklist(session: AsyncSession, company_id: uuid.UUID, q: WorklistQuer
         if not effective:
             return page_of([], q, 0)
         q = q.model_copy(update={"category_ids": [str(x) for x in effective]})
-    rows, total = await repo.worklist(session, company_id, q)
+    rows, total = await repo.worklist(session, company_id, q, staff.branch_scope(q.branch_id) if staff else None)
     out = [
         WorklistItemOut(
             **_item_fields(item),
@@ -767,21 +773,21 @@ async def worklist_counts(session: AsyncSession, company_id: uuid.UUID, q: Workl
         if not effective:
             return WorklistCountsOut(all=0, pending=0, entered=0, submitted=0, approved=0, rejected=0, cancelled=0)
         q = q.model_copy(update={"category_ids": [str(x) for x in effective]})
-    counts = await repo.worklist_counts(session, company_id, q)
+    counts = await repo.worklist_counts(session, company_id, q, staff.branch_scope(q.branch_id) if staff else None)
     keys = ("pending", "entered", "submitted", "approved", "rejected", "cancelled")
     return WorklistCountsOut(all=sum(counts.get(k, 0) for k in keys), **{k: counts.get(k, 0) for k in keys})
 
 
 async def get_item_dto(session: AsyncSession, item_id: uuid.UUID, staff: StaffPrincipal) -> OrderItemOut:
     """Company-scoped item."""
-    return item_out(await get_item_or_404(session, item_id, scope_company(staff)))
+    return item_out(await get_item_or_404(session, item_id, scope_company(staff), staff))
 
 
 async def save_values(
     session: AsyncSession, item_id: uuid.UUID, staff: StaffPrincipal, body: SaveValuesIn, meta: RequestMeta
 ) -> OrderItemOut:
     """Replace result values wholesale; pending/rejected -> entered, entered/submitted keep their status."""
-    item = await get_item_or_404(session, item_id, scope_company(staff))
+    item = await get_item_or_404(session, item_id, scope_company(staff), staff)
     order = await _lock_order_of_item(session, item)
     ensure_category_access(item, await allowed_category_ids(session, staff, item.company_id))
     if item.status == "approved":
@@ -822,7 +828,7 @@ async def submit_item(
     session: AsyncSession, item_id: uuid.UUID, staff: StaffPrincipal, meta: RequestMeta
 ) -> OrderItemOut:
     """Toggle entered <-> submitted after validating required schema fields."""
-    item = await get_item_or_404(session, item_id, scope_company(staff))
+    item = await get_item_or_404(session, item_id, scope_company(staff), staff)
     order = await _lock_order_of_item(session, item)
     ensure_category_access(item, await allowed_category_ids(session, staff, item.company_id))
     if item.status not in ("entered", "submitted"):
@@ -864,7 +870,7 @@ async def reject_item(
     session: AsyncSession, item_id: uuid.UUID, staff: StaffPrincipal, reason: str, meta: RequestMeta
 ) -> OrderItemOut:
     """Doctor sends a submitted result back to the lab."""
-    item = await get_item_or_404(session, item_id, scope_company(staff))
+    item = await get_item_or_404(session, item_id, scope_company(staff), staff)
     order = await _lock_order_of_item(session, item)
     ensure_category_access(item, await allowed_category_ids(session, staff, item.company_id))
     if item.status != "submitted":
@@ -1048,7 +1054,7 @@ async def approve_item(
     session: AsyncSession, item_id: uuid.UUID, staff: StaffPrincipal, body: ApproveItemIn, meta: RequestMeta
 ) -> ApproveItemOut:
     """Doctor approves one submitted item -> item-scoped document + PDF + notifications."""
-    item = await get_item_or_404(session, item_id, scope_company(staff))
+    item = await get_item_or_404(session, item_id, scope_company(staff), staff)
     order = await _lock_order_of_item(session, item)
     ensure_category_access(item, await allowed_category_ids(session, staff, item.company_id))
     if item.status != "submitted":
@@ -1098,7 +1104,7 @@ async def order_scope_items(
     session: AsyncSession, order_id: uuid.UUID, template_id: uuid.UUID, staff: StaffPrincipal
 ) -> list[OrderItemOut]:
     """Non-cancelled items of the order an order-scope template would cover (any status)."""
-    order = await get_order_or_404(session, order_id, scope_company(staff))
+    order = await get_order_or_404(session, order_id, scope_company(staff), staff=staff)
     tpl = await repo.get_template(session, template_id, order.company_id)
     if not tpl:
         raise NotFoundError("Shablon topilmadi")
@@ -1110,7 +1116,7 @@ async def approve_order(
     session: AsyncSession, order_id: uuid.UUID, staff: StaffPrincipal, body: ApproveOrderIn, meta: RequestMeta
 ) -> ApproveOrderOut:
     """Approve every submitted covered item with ONE order-scope document (covered approved items share it)."""
-    order = await get_order_or_404(session, order_id, scope_company(staff), for_update=True)
+    order = await get_order_or_404(session, order_id, scope_company(staff), for_update=True, staff=staff)
     tpl_id = repo.to_uuid(body.template_id)
     tpl = await repo.get_template(session, tpl_id, order.company_id) if tpl_id else None
     if not tpl or tpl.status != "active":
@@ -1183,14 +1189,14 @@ async def approve_order(
 
 
 async def list_documents(
-    session: AsyncSession, company_id: uuid.UUID, *, order_id: str | None, patient_id: str | None
+    session: AsyncSession, company_id: uuid.UUID, *, order_id: str | None, patient_id: str | None, branches: list[uuid.UUID] | None = None
 ) -> list[ResultDocumentOut]:
     """Company documents by order and/or patient, newest first (malformed ids -> empty list)."""
     oid = repo.to_uuid(order_id) if order_id else None
     pid = repo.to_uuid(patient_id) if patient_id else None
     if (order_id and oid is None) or (patient_id and pid is None):
         return []
-    rows = await repo.list_documents(session, company_id, order_id=oid, patient_id=pid)
+    rows = await repo.list_documents(session, company_id, order_id=oid, patient_id=pid, branches=branches)
     return [document_out(d) for d in rows]
 
 

@@ -68,7 +68,7 @@ async def list_orders(
     company_id: uuid.UUID, q: Annotated[OrderListQuery, Query()], staff: Staff, session: DbSession
 ) -> Page[OrderOut]:
     staff.require(*ORDER_READ).scope(company_id)
-    return await service.list_orders(session, company_id, q)
+    return await service.list_orders(session, company_id, q, staff)
 
 
 @router.post(
@@ -87,13 +87,13 @@ async def create_order(
 @router.get("/orders/{order_id}", response_model=OrderBundleOut, summary="Order + items + payments")
 async def get_order(order_id: uuid.UUID, staff: Staff, session: DbSession) -> OrderBundleOut:
     staff.require(*ORDER_READ)
-    return await service.get_order_bundle(session, order_id, service.scope_company(staff))
+    return await service.get_order_bundle(session, order_id, service.scope_company(staff), staff)
 
 
 @router.get("/orders/{order_id}/receipt.pdf", summary="Cheque rendered with the branch's receipt template (404 no_template when none)", response_class=StarletteResponse, responses={200: {"content": {"application/pdf": {}}}})
 async def order_receipt_pdf(order_id: uuid.UUID, staff: Staff, session: DbSession, template_id: Annotated[uuid.UUID | None, Query(alias="templateId")] = None) -> StarletteResponse:
     staff.require(*ORDER_READ)
-    pdf, filename = await service.render_receipt_pdf(session, order_id, service.scope_company(staff), template_id)
+    pdf, filename = await service.render_receipt_pdf(session, order_id, service.scope_company(staff), template_id, staff)
     return _pdf_response(pdf, filename)
 
 
@@ -241,20 +241,21 @@ async def list_documents(
     session: DbSession,
     order_id: Annotated[str | None, Query(alias="orderId")] = None,
     patient_id: Annotated[str | None, Query(alias="patientId")] = None,
+    branch_id: Annotated[str | None, Query(alias="branchId")] = None,
 ) -> list[ResultDocumentOut]:
     staff.require(*DOC_READ).scope(company_id)
-    return await service.list_documents(session, company_id, order_id=order_id, patient_id=patient_id)
+    return await service.list_documents(session, company_id, order_id=order_id, patient_id=patient_id, branches=staff.branch_scope(branch_id))
 
 
 @router.get("/documents/{document_id}", response_model=ResultDocumentOut, summary="Get result document")
 async def get_document(document_id: uuid.UUID, staff: Staff, session: DbSession) -> ResultDocumentOut:
     staff.require(*DOC_READ)
-    return service.document_out(await service.get_document_or_404(session, document_id, service.scope_company(staff)))
+    return service.document_out(await service.get_document_or_404(session, document_id, service.scope_company(staff), staff))
 
 
 @router.get("/documents/{document_id}/pdf", summary="Result document PDF (rendered on demand when missing)")
 async def document_pdf(document_id: uuid.UUID, staff: Staff, session: DbSession) -> StarletteResponse:
-    doc = await service.get_document_or_404(session, document_id, service.scope_company(staff))
+    doc = await service.get_document_or_404(session, document_id, service.scope_company(staff), staff)
     pdf = await service.ensure_document_pdf(session, doc)
     return _pdf_response(pdf, service.pdf_filename(doc))
 

@@ -23,7 +23,7 @@ from app.core.pagination import page_of
 from app.core.schemas import Page
 from app.core.textutil import fmt_money_ru, is_valid_uz_phone, norm_phone
 from app.core.timeutil import to_iso
-from app.infrastructure.db.models import Company, Notification, OutboxMessage
+from app.infrastructure.db.models import Branch, Company, Notification, OutboxMessage
 from app.modules.messaging import repository as repo
 from app.modules.messaging.schemas import NotificationOut, OutboxCountsOut, OutboxMessageOut, OutboxQuery, SendIn
 
@@ -238,15 +238,15 @@ async def mark_document_delivery(session: AsyncSession, document_id: uuid.UUID, 
 # ----------------------------------------------------------------------------- staff API (router → service)
 
 
-async def list_outbox(session: AsyncSession, company_id: uuid.UUID, q: OutboxQuery) -> Page[OutboxMessageOut]:
+async def list_outbox(session: AsyncSession, company_id: uuid.UUID, q: OutboxQuery, staff: StaffPrincipal | None = None) -> Page[OutboxMessageOut]:
     """§8 `listOutbox`: status/kind exact, search on `to` digits or folded text, newest first."""
-    rows, total = await repo.list_outbox(session, company_id, q, status=q.status, kind=q.kind)
+    rows, total = await repo.list_outbox(session, company_id, q, status=q.status, kind=q.kind, branches=staff.branch_scope(q.branch_id) if staff else None)
     return page_of([OutboxMessageOut.model_validate(r) for r in rows], q, total)
 
 
-async def outbox_counts(session: AsyncSession, company_id: uuid.UUID, q: OutboxQuery) -> OutboxCountsOut:
+async def outbox_counts(session: AsyncSession, company_id: uuid.UUID, q: OutboxQuery, staff: StaffPrincipal | None = None) -> OutboxCountsOut:
     """Status-tab counters for the messages page (same kind/search filters as the list)."""
-    counts = await repo.outbox_counts(session, company_id, kind=q.kind, search=q.search)
+    counts = await repo.outbox_counts(session, company_id, kind=q.kind, search=q.search, branches=staff.branch_scope(q.branch_id) if staff else None)
     keys = ("scheduled", "queued", "sending", "sent", "delivered", "failed")
     return OutboxCountsOut(all=sum(counts.values()), **{k: counts.get(k, 0) for k in keys})
 
@@ -276,8 +276,20 @@ async def send(
     company = await session.get(Company, company_id)
     if not company or company.deleted_at is not None:
         raise NotFoundError("Kompaniya topilmadi")
+    # the sending branch: the requested one when it is the company's and inside the employee's scope, else their own
+    branch_id = staff.branch_id
+    if body.branch_id:
+        try:
+            wanted = uuid.UUID(body.branch_id)
+        except ValueError:
+            wanted = None
+        if wanted and staff.allows_branch(wanted) and (await session.execute(select(Branch.id).where(Branch.id == wanted, Branch.company_id == company_id, Branch.deleted_at.is_(None)))).scalar_one_or_none():
+            branch_id = wanted
+    if branch_id is None and not staff.can_switch_branch:
+        mine = list(staff.employee.branch_ids or [])
+        branch_id = mine[0] if mine else None
     created = [
-        build_message(company_id=company_id, channel="sms", kind=body.kind, to=phone, text=body.text, branch_id=staff.branch_id, scheduled_at=body.scheduled_at, created_by=staff.id)
+        build_message(company_id=company_id, channel="sms", kind=body.kind, to=phone, text=body.text, branch_id=branch_id, scheduled_at=body.scheduled_at, created_by=staff.id)
         for phone in valid
     ]
     session.add_all(created)

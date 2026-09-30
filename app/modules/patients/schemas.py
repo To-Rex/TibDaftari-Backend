@@ -32,6 +32,7 @@ class PatientPortalOut(CamelModel):
 class PatientOut(CamelModel):
     id: str
     company_id: str
+    branch_id: str | None = None
     full_name: str
     phone: str
     phone_extra: str | None = None
@@ -68,6 +69,8 @@ class PatientUpsertIn(CamelModel):
     contract_number: str | None = Field(default=None, max_length=60)
     note: str | None = Field(default=None, max_length=5000)
     tags: list[str] | None = None
+    # the branch registering the patient (default: the employee's own branch)
+    branch_id: str | None = Field(default=None, max_length=64)
 
 
 class PatientPatchIn(CamelModel):

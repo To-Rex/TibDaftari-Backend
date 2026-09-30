@@ -169,7 +169,7 @@ async def request_patient_otp(session: AsyncSession, phone_raw: str, meta: Reque
 
     company = await session.get(Company, patient.company_id)
     if company:
-        await messaging.enqueue_sms_if_configured(session, company, kind="otp", to=phone, text=messaging.otp_text(company, code), patient_id=patient.id)
+        await messaging.enqueue_sms_if_configured(session, company, kind="otp", to=phone, text=messaging.otp_text(company, code), patient_id=patient.id, branch_id=patient.branch_id)
     try:
         await get_redis().set(cooldown_key, "1", ex=settings.otp_resend_cooldown_seconds)
     except Exception:  # pragma: no cover

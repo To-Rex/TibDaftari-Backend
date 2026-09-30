@@ -25,13 +25,13 @@ router = APIRouter()
 @router.get("/companies/{company_id}/outbox", response_model=Page[OutboxMessageOut], summary="Outbox (SMS/Telegram) messages, newest first")
 async def list_outbox(company_id: uuid.UUID, q: Annotated[OutboxQuery, Query()], staff: Staff, session: DbSession) -> Page[OutboxMessageOut]:
     staff.require("messaging.send", "reports.operations.read").scope(company_id)
-    return await service.list_outbox(session, company_id, q)
+    return await service.list_outbox(session, company_id, q, staff)
 
 
 @router.get("/companies/{company_id}/outbox/counts", response_model=OutboxCountsOut, summary="Outbox counters per status (same filters as the list)")
 async def outbox_counts(company_id: uuid.UUID, q: Annotated[OutboxQuery, Query()], staff: Staff, session: DbSession) -> OutboxCountsOut:
     staff.require("messaging.send", "reports.operations.read").scope(company_id)
-    return await service.outbox_counts(session, company_id, q)
+    return await service.outbox_counts(session, company_id, q, staff)
 
 
 @router.post("/companies/{company_id}/messages/send", response_model=list[OutboxMessageOut], status_code=201, summary="Queue an SMS to one or many recipients")

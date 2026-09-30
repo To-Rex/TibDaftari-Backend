@@ -169,7 +169,7 @@ async def begin_login(session: AsyncSession, company: Company, chat_id: str, raw
     session.add(challenge)
     await session.flush()
     await messaging.enqueue_sms_if_configured(
-        session, company, kind="otp", to=phone, text=t(lang, "otp_sms", otp=code), patient_id=patient.id
+        session, company, kind="otp", to=phone, text=t(lang, "otp_sms", otp=code), patient_id=patient.id, branch_id=patient.branch_id
     )
     if settings.otp_dev_mode:
         log.info("telegram OTP for %s (company %s, chat %s): %s (dev mode)", phone, company.id, chat_id, code)

@@ -18,9 +18,11 @@ from app.infrastructure.db.models import Session as SessionModel
 QUEUE_STATUSES = ("queued", "scheduled")
 
 
-def outbox_select(company_id: uuid.UUID, *, status: str | None, kind: str | None, search: str | None) -> Select:
+def outbox_select(company_id: uuid.UUID, *, status: str | None, kind: str | None, search: str | None, branches: list[uuid.UUID] | None = None) -> Select:
     """Company-scoped outbox statement with the §8 filters (uses ix_outbox_company_status_created)."""
     stmt = select(OutboxMessage).where(OutboxMessage.company_id == company_id, alive(OutboxMessage))
+    if branches is not None:
+        stmt = stmt.where(OutboxMessage.branch_id.in_(branches))
     if status:
         # the UI never sees `sending`; it belongs to the `queued` bucket
         stmt = stmt.where(OutboxMessage.status.in_(("queued", "sending")) if status == "queued" else OutboxMessage.status == status)
@@ -37,15 +39,15 @@ def outbox_select(company_id: uuid.UUID, *, status: str | None, kind: str | None
     return stmt
 
 
-async def list_outbox(session: AsyncSession, company_id: uuid.UUID, q: PageQuery, *, status: str | None, kind: str | None) -> tuple[list[OutboxMessage], int]:
+async def list_outbox(session: AsyncSession, company_id: uuid.UUID, q: PageQuery, *, status: str | None, kind: str | None, branches: list[uuid.UUID] | None = None) -> tuple[list[OutboxMessage], int]:
     """Page of outbox rows, newest first (fixed sort)."""
-    stmt = outbox_select(company_id, status=status, kind=kind, search=q.search)
+    stmt = outbox_select(company_id, status=status, kind=kind, search=q.search, branches=branches)
     return await paginate_query(session, stmt, q, order_by=[OutboxMessage.created_at.desc(), OutboxMessage.id.desc()])
 
 
-async def outbox_counts(session: AsyncSession, company_id: uuid.UUID, *, kind: str | None, search: str | None) -> dict[str, int]:
+async def outbox_counts(session: AsyncSession, company_id: uuid.UUID, *, kind: str | None, search: str | None, branches: list[uuid.UUID] | None = None) -> dict[str, int]:
     """status → count for the outbox filters (one GROUP BY instead of one request per status tab)."""
-    base = outbox_select(company_id, status=None, kind=kind, search=search).with_only_columns(OutboxMessage.status, func.count()).order_by(None).group_by(OutboxMessage.status)
+    base = outbox_select(company_id, status=None, kind=kind, search=search, branches=branches).with_only_columns(OutboxMessage.status, func.count()).order_by(None).group_by(OutboxMessage.status)
     return {str(st): int(n) for st, n in (await session.execute(base)).all()}
 
 

@@ -7,6 +7,7 @@ from datetime import date, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import StaffPrincipal
 from app.core.exceptions import ValidationError
 from app.core.schemas import dump
 from app.core.timeutil import day_range, today_local
@@ -59,19 +60,19 @@ def top_level_lookup(cats: list[Category]) -> dict[uuid.UUID, Category]:
     return out
 
 
-async def _build_dashboard(session: AsyncSession, company_id: uuid.UUID, d_from: date, d_to: date, branch_id: uuid.UUID | None) -> DashboardSummaryOut:
+async def _build_dashboard(session: AsyncSession, company_id: uuid.UUID, d_from: date, d_to: date, branches: list[uuid.UUID] | None) -> DashboardSummaryOut:
     today = today_local()
     t_start, t_end = day_range(today, today)
     start, end = day_range(d_from, d_to)
-    counters = await repo.dashboard_counters(session, company_id, branch_id, t_start, t_end)
-    trend_map = await repo.order_trend(session, company_id, branch_id, start, end)
+    counters = await repo.dashboard_counters(session, company_id, branches, t_start, t_end)
+    trend_map = await repo.order_trend(session, company_id, branches, start, end)
     trend: list[TrendPoint] = []
     d = d_from
     while d <= d_to:
         orders, revenue = trend_map.get(d.isoformat(), (0, 0))
         trend.append(TrendPoint(date=d.isoformat(), orders=orders, revenue=revenue))
         d += timedelta(days=1)
-    rows = await repo.items_by_category(session, company_id, branch_id, start, end)
+    rows = await repo.items_by_category(session, company_id, branches, start, end)
     roots = top_level_lookup(await repo.categories(session, company_id)) if rows else {}
     agg: dict[uuid.UUID, CategorySlice] = {}
     for r in rows:
@@ -87,21 +88,28 @@ async def _build_dashboard(session: AsyncSession, company_id: uuid.UUID, d_from:
     return DashboardSummaryOut(**counters, trend=trend, by_category=by_category)
 
 
-async def dashboard(session: AsyncSession, company_id: uuid.UUID, q: RangeQuery) -> DashboardSummaryOut:
+def _branches(staff: StaffPrincipal | None, branch_id: uuid.UUID | None) -> list[uuid.UUID] | None:
+    """The caller's branch scope for a report: pinned employees are confined to their branches."""
+    return staff.branch_scope(branch_id) if staff else ([branch_id] if branch_id else None)
+
+
+async def dashboard(session: AsyncSession, company_id: uuid.UUID, q: RangeQuery, staff: StaffPrincipal | None = None) -> DashboardSummaryOut:
     """§9 `dashboard`: today's counters + dense daily trend + top-level category split (Redis 30s)."""
     d_from, d_to, branch_id = _parse_range(q)
-    key = f"co:{company_id}:reports:dashboard:{branch_id or 'all'}:{d_from}:{d_to}"
+    branches = _branches(staff, branch_id)
+    scope_key = ",".join(sorted(str(b) for b in branches)) if branches is not None else "all"
+    key = f"co:{company_id}:reports:dashboard:{scope_key}:{d_from}:{d_to}"
     hit = await cache.get_json(key)
     if hit is not None:
         return DashboardSummaryOut.model_validate(hit)
-    out = await _build_dashboard(session, company_id, d_from, d_to, branch_id)
+    out = await _build_dashboard(session, company_id, d_from, d_to, branches)
     await cache.set_json(key, dump(out), DASHBOARD_TTL_SECONDS)
     return out
 
 
-async def breakdown(session: AsyncSession, company_id: uuid.UUID, q: BreakdownQuery) -> list[BreakdownRowOut]:
+async def breakdown(session: AsyncSession, company_id: uuid.UUID, q: BreakdownQuery, staff: StaffPrincipal | None = None) -> list[BreakdownRowOut]:
     """§9 `breakdown`: non-cancelled items in range grouped by category/service/branch/employee, revenue desc."""
     d_from, d_to, branch_id = _parse_range(q)
     start, end = day_range(d_from, d_to)
-    rows = await repo.breakdown(session, company_id, q.by, branch_id, start, end)
+    rows = await repo.breakdown(session, company_id, q.by, _branches(staff, branch_id), start, end)
     return [BreakdownRowOut(name=r.name or "—", count=int(r.count), revenue=int(r.revenue)) for r in rows]

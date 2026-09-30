@@ -66,6 +66,8 @@ class Patient(PKMixin, AuditMixin, SoftDeleteMixin, TenantMixin, Base):
     contract_number: Mapped[str | None] = mapped_column(String(60))
     note: Mapped[str | None] = mapped_column(Text)
     tags: Mapped[list[str]] = mapped_column(ARRAY(String(40)), nullable=False, default=list)
+    # the branch that registered the patient — lists are branch-scoped, identity stays company-wide
+    branch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     # denormalised stats (maintained by the orders service)
     stats_orders: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     stats_last_visit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -75,6 +77,7 @@ class Patient(PKMixin, AuditMixin, SoftDeleteMixin, TenantMixin, Base):
     portal_last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
+        Index("ix_patients_company_branch", "company_id", "branch_id"),
         Index(
             "uq_patients_company_passport_alive",
             "company_id",
