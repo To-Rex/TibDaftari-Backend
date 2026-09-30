@@ -383,9 +383,21 @@ async def find_active_template(
             ResultTemplate.company_id == company_id,
             alive(ResultTemplate),
             ResultTemplate.status == "active",
+            ResultTemplate.scope != "receipt",
             or_(ResultTemplate.service_type_ids.any(service_type_id), ResultTemplate.category_ids.any(category_id)),
             _branch_ok(branch_id),
         )
+        .order_by(_branch_specificity(), ResultTemplate.created_at, ResultTemplate.id)
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def find_receipt_template(session: AsyncSession, company_id: uuid.UUID, branch_id: uuid.UUID) -> ResultTemplate | None:
+    """Active receipt (cheque) template of the branch — most branch-specific first, then the oldest."""
+    stmt = (
+        select(ResultTemplate)
+        .where(ResultTemplate.company_id == company_id, alive(ResultTemplate), ResultTemplate.status == "active", ResultTemplate.scope == "receipt", _branch_ok(branch_id))
         .order_by(_branch_specificity(), ResultTemplate.created_at, ResultTemplate.id)
         .limit(1)
     )
@@ -400,6 +412,7 @@ async def find_generic_template(session: AsyncSession, company_id: uuid.UUID, br
             ResultTemplate.company_id == company_id,
             alive(ResultTemplate),
             ResultTemplate.status == "active",
+            ResultTemplate.scope != "receipt",
             func.cardinality(ResultTemplate.service_type_ids) == 0,
             _branch_ok(branch_id),
         )

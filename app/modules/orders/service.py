@@ -66,6 +66,7 @@ from app.modules.orders.schemas import (
     WorklistQuery,
 )
 from app.modules.templates import service as templates_svc
+from app.modules.templates.renderer.context import build_render_context, to_render_item
 
 log = logging.getLogger("app.orders")
 
@@ -256,6 +257,58 @@ async def get_order_bundle(
 
 async def _order_items_out(session: AsyncSession, o: Order) -> OrderItemsOut:
     return OrderItemsOut(order=order_out(o), items=[item_out(i) for i in await repo.items_of_order(session, o.id)])
+
+
+def _patient_ctx(p: Any) -> dict[str, Any]:
+    return {"fullName": p.full_name, "phone": p.phone, "birthDate": p.birth_date, "gender": p.gender, "street": getattr(p, "street", None), "passportNumber": getattr(p, "passport_number", None)}
+
+
+async def render_receipt_pdf(session: AsyncSession, order_id: uuid.UUID, company_scope: uuid.UUID | None, template_id: uuid.UUID | None) -> tuple[bytes, str]:
+    """The cheque rendered with a receipt template (explicit `template_id`, else the branch's active one).
+    404 `no_template` when the company has none — the client then prints its built-in cheque."""
+    from app.modules.templates import service as templates_service
+
+    o = await get_order_or_404(session, order_id, company_scope)
+    tpl = await repo.get_template(session, template_id, o.company_id) if template_id else None
+    if tpl is not None and (tpl.scope != "receipt" or (tpl.branch_ids and o.branch_id not in tpl.branch_ids)):
+        tpl = None
+    if tpl is None:
+        tpl = await repo.find_receipt_template(session, o.company_id, o.branch_id)
+    if tpl is None:
+        raise NotFoundError("Chek andozasi yo‘q", code="no_template")
+    items = [i for i in await repo.items_of_order(session, o.id) if i.status != "cancelled"]
+    payments = [p for p in await repo.payments_of_order(session, o.id) if p.refunded_at is None]
+    patient = await repo.get_patient(session, o.patient_id, o.company_id)
+    company = await session.get(Company, o.company_id)
+    branch = await repo.get_branch(session, o.branch_id, o.company_id)
+    cashier = await repo.get_employee_name(session, o.created_by_employee_id)
+    language = str(tpl.language or (company.locale if company else "uz"))
+    ctx = build_render_context(
+        patient=_patient_ctx(patient) if patient else None,
+        order={
+            "number": o.number,
+            "createdAt": o.created_at,
+            "subtotal": o.subtotal,
+            "discountPercent": o.discount_percent,
+            "discountAmount": o.discount_amount,
+            "total": o.total,
+            "paidAmount": o.paid_amount,
+            "itemCount": len(items),
+            "note": o.note,
+            "status": o.status,
+        },
+        company={"name": company.name, "phone": company.phone, "address": company.address} if company else None,
+        branch={"name": branch.name, "address": branch.address, "phone": branch.phone} if branch else None,
+        items=[
+            to_render_item(code=str(i.service_type_id), service_type_id=str(i.service_type_id), service_name=i.service_name, status=i.status, values={}, schema=None, price=i.price, final_price=i.final_price, category=i.category_name)
+            for i in items
+        ],
+        payments=[{"createdAt": p.created_at, "method": p.method, "amount": p.amount, "note": p.note} for p in payments],
+        cashier=cashier,
+        language=language,
+    )
+    pdf = await templates_service.render_doc_pdf(session, tpl.company_id, tpl.doc or {}, ctx)
+    return pdf, f"chek-{o.number}.pdf"
 
 
 async def _order_payments_out(session: AsyncSession, o: Order) -> OrderPaymentsOut:

@@ -297,6 +297,14 @@ def test_templates_api_lifecycle(ctx: dict) -> None:
     assert c.put(f"/api/v1/templates/{bound['id']}", json={"name": "hack"}, headers=h(ctx, "admin-b")).status_code == 404
     lst = c.get(f"/api/v1/companies/{cid}/templates", params={"status": "active"}, headers=h(ctx, "admin-a")).json()
     assert {x["id"] for x in lst} == {bound["id"]}
+    # receipt template: its own scope + paper; previews with a sample cheque; never offered for results
+    r = c.post(f"/api/v1/companies/{cid}/templates", json={"name": f"T-templates Chek {SFX}", "scope": "receipt", "doc": {"paper": "Receipt80", "orientation": "portrait", "background": "#ffffff", "margin": 8, "elements": [{"id": "t1", "type": "text", "x": 8, "y": 8, "w": 280, "h": 20, "text": "{company.name} {order.number} {order.total} {cashier.name}", "style": {"fontFamily": "sans", "fontSize": 12, "fontWeight": 400, "color": "#000000", "align": "left"}}]}}, headers=h(ctx, "admin-a"))
+    assert r.status_code == 201, r.text
+    receipt = r.json()
+    assert receipt["scope"] == "receipt" and receipt["doc"]["paper"] == "Receipt80"
+    r = c.post(f"/api/v1/templates/{receipt['id']}/preview.pdf", headers=h(ctx, "admin-a"))
+    assert r.status_code == 200 and r.content[:4] == b"%PDF"
+    assert c.post(f"/api/v1/companies/{cid}/templates", json={"name": "x", "scope": "receipt", "doc": {"paper": "B5", "orientation": "portrait", "background": "#fff", "margin": 0, "elements": []}}, headers=h(ctx, "admin-a")).status_code == 422
     # duplicate
     r = c.post(f"/api/v1/templates/{bound['id']}/duplicate", headers=h(ctx, "admin-a"))
     assert r.status_code == 201, r.text

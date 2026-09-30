@@ -462,6 +462,24 @@ def _sample_table_rows(f: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _sample_receipt_context(company: Company | None, branch: Branch | None, now: datetime) -> dict[str, Any]:
+    """Preview data for a receipt template: three services, a discount, a partial payment."""
+    services = [("PAR", "Парозитологик тахлил", "Parazitologiya", 52000), ("BAK", "Бактериологик тахлил", "Bakteriologiya", 160000), ("IFA", "ИФА ВГ “B”", "Virusologiya", 41000)]
+    subtotal = sum(p for *_, p in services)
+    discount = 10
+    total = subtotal - subtotal * discount // 100
+    return build_render_context(
+        patient=SAMPLE_PATIENT,
+        order={"number": "UR-001240", "createdAt": now, "subtotal": subtotal, "discountPercent": discount, "discountAmount": subtotal * discount // 100, "total": total, "paidAmount": total - 50000, "itemCount": len(services), "status": "in_progress"},
+        company={"name": company.name, "phone": company.phone, "address": company.address} if company else SAMPLE_COMPANY,
+        branch={"name": branch.name, "address": branch.address, "phone": branch.phone} if branch else SAMPLE_BRANCH,
+        items=[to_render_item(code=c, service_type_id=c, service_name=n, status="pending", values={}, schema=None, price=p, final_price=p - p * discount // 100, category=cat) for c, n, cat, p in services],
+        payments=[{"createdAt": now, "method": "cash", "amount": total - 50000}],
+        cashier="Umida Qodirova",
+        language=str(company.locale) if company and company.locale else "uz",
+    )
+
+
 async def _sample_context(session: AsyncSession, template: ResultTemplate, company: Company | None) -> dict[str, Any]:
     """Frontend `sampleRenderContext` / `sampleOrderRenderContext` for the template's bound services."""
     service_types = await repo.get_service_types(session, template.company_id, template.service_type_ids or [])
@@ -475,6 +493,8 @@ async def _sample_context(session: AsyncSession, template: ResultTemplate, compa
     category = await repo.get_category(session, template.company_id, first.category_id) if first else None
     now = utcnow()
     items = None
+    if template.scope == "receipt":
+        return _sample_receipt_context(company, branch, now)
     if template.scope == "order":
         items = [
             to_render_item(
@@ -634,6 +654,13 @@ async def build_document_snapshot(
         "context": context,
         "assets": await _asset_map(session, template.company_id, doc),
     }
+
+
+async def render_doc_pdf(session: AsyncSession, company_id: uuid.UUID, doc: dict[str, Any], ctx: dict[str, Any]) -> bytes:
+    """Render a template doc with a ready context (assets of the company resolved) — receipts, ad-hoc previews."""
+    use_doc = doc or empty_doc()
+    loader = await _loader_for(session, await _asset_map(session, company_id, use_doc))
+    return await asyncio.to_thread(render, use_doc, ctx, loader)
 
 
 async def render_snapshot_pdf(session: AsyncSession, snapshot: dict[str, Any]) -> bytes:

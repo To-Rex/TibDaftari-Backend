@@ -28,7 +28,8 @@ AssetLoader = Callable[[str], tuple[bytes, str] | None]
 
 FONT_DIR = Path(__file__).parent / "fonts"
 PX_TO_PT = 0.75
-PAPER_PX: dict[str, tuple[float, float]] = {"A4": (794, 1123), "A5": (559, 794), "Letter": (816, 1056)}
+# receipt papers: 80 / 58 mm wide strips (the print service trims the blank tail on thermal printers)
+PAPER_PX: dict[str, tuple[float, float]] = {"A4": (794, 1123), "A5": (559, 794), "Letter": (816, 1056), "Receipt80": (302, 800), "Receipt58": (219, 800)}
 ABN = "#c2413f"
 def _header_groups(cols: list[dict[str, Any]]) -> list[tuple[str | None, int, int]]:
     """Consecutive columns sharing `group` → (group, first index, count); ungrouped columns are singletons."""

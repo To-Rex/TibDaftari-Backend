@@ -10,11 +10,11 @@ from pydantic import Field, field_validator
 from app.core.schemas import CamelModel
 
 TemplateStatus = Literal["draft", "active", "archived"]
-TemplateScope = Literal["item", "order"]
+TemplateScope = Literal["item", "order", "receipt"]
 TemplateLanguage = Literal["uz", "ru", "en"]
 AssetKind = Literal["logo", "stamp", "signature", "image"]
 
-PAPERS = {"A4", "A5", "Letter"}
+PAPERS = {"A4", "A5", "Letter", "Receipt80", "Receipt58"}
 ORIENTATIONS = {"portrait", "landscape"}
 ELEMENT_TYPES = {"text", "rect", "line", "image", "ellipse", "table", "field"}
 
@@ -38,7 +38,7 @@ def validate_doc(doc: Any) -> dict[str, Any]:
     margin = doc.get("margin", 40)
     elements = doc.get("elements", [])
     if paper not in PAPERS:
-        raise ValueError("doc.paper must be A4 | A5 | Letter")
+        raise ValueError("doc.paper must be A4 | A5 | Letter | Receipt80 | Receipt58")
     if orientation not in ORIENTATIONS:
         raise ValueError("doc.orientation must be portrait | landscape")
     if not isinstance(background, str) or len(background) > 40:

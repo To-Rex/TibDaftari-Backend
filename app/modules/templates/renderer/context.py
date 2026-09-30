@@ -67,8 +67,12 @@ def to_render_item(
     approved_at: datetime | str | None = None,
     technician: str | None = None,
     doctor: str | None = None,
+    price: int | float | None = None,
+    final_price: int | float | None = None,
+    category: str | None = None,
 ) -> dict[str, Any]:
-    """RenderItem dict for order-scoped documents (approvedAt pre-formatted 'dd.MM.yyyy HH:mm')."""
+    """RenderItem dict for order-scoped documents (approvedAt pre-formatted 'dd.MM.yyyy HH:mm');
+    receipts also carry the formatted prices and the category name."""
     item: dict[str, Any] = {
         "code": code,
         "serviceTypeId": service_type_id,
@@ -83,7 +87,32 @@ def to_render_item(
         item["technician"] = technician
     if doctor:
         item["doctor"] = doctor
+    if price is not None:
+        item["price"] = fmt_money(price)
+    if final_price is not None:
+        item["finalPrice"] = fmt_money(final_price)
+    if category:
+        item["category"] = category
     return item
+
+
+def fmt_money(v: int | float | None) -> str:
+    """Frontend `fmtMoney(v, false)`: thousands separated by commas, no decimals ("305,000")."""
+    if v is None:
+        return ""
+    return f"{round(float(v)):,}"
+
+
+PAYMENT_METHOD_LABELS = {
+    "uz": {"cash": "Naqd", "card": "Karta", "transfer": "O‘tkazma", "insurance": "Sug‘urta"},
+    "ru": {"cash": "Наличные", "card": "Карта", "transfer": "Перевод", "insurance": "Страховка"},
+    "en": {"cash": "Cash", "card": "Card", "transfer": "Transfer", "insurance": "Insurance"},
+}
+
+
+def payment_method_label(method: str | None, language: str = "uz") -> str:
+    labels = PAYMENT_METHOD_LABELS.get(language) or PAYMENT_METHOD_LABELS["uz"]
+    return labels.get(method or "", method or "")
 
 
 def build_render_context(
@@ -99,15 +128,19 @@ def build_render_context(
     items: list[dict[str, Any]] | None = None,
     language: str = "uz",
     today: date | None = None,
+    payments: list[dict[str, Any]] | None = None,
+    cashier: str | None = None,
 ) -> dict[str, Any]:
     """Build a RenderContext dict (spec §1) from plain dicts.
 
     Input shapes (all optional):
       patient  {fullName, phone, birthDate, gender, street, passportNumber}
-      order    {number, createdAt}
+      order    {number, createdAt, subtotal?, discountPercent?, discountAmount?, total?, paidAmount?, itemCount?, note?, status?}
       item     {serviceName, approvedAt, technicianName, doctorName, labNote, values}
-      company  {name, phone, address}   branch {name, address}   category {name, phone}
+      company  {name, phone, address}   branch {name, address, phone}   category {name, phone}
       items    list of RenderItem dicts (see `to_render_item`)
+      payments receipts: [{createdAt, method, amount, note}] → `payments` dataset (i/date/method/amount/note)
+      cashier  receipts: name of the employee who opened the cheque
     """
     p = patient or {}
     birth = _date(p.get("birthDate"))
@@ -126,7 +159,7 @@ def build_render_context(
             "address": address,
             "passportNumber": p.get("passportNumber") or "",
         },
-        "order": {"number": (order or {}).get("number") or "", "date": _fmt_date((order or {}).get("createdAt"))},
+        "order": _order_block(order or {}),
         "item": {
             "serviceName": it.get("serviceName") or "",
             "approvedAt": _fmt_datetime(it.get("approvedAt")) if it.get("approvedAt") else "",
@@ -139,7 +172,7 @@ def build_render_context(
             "phone": (company or {}).get("phone"),
             "address": (company or {}).get("address"),
         },
-        "branch": {"name": (branch or {}).get("name") or "", "address": (branch or {}).get("address")},
+        "branch": {"name": (branch or {}).get("name") or "", "address": (branch or {}).get("address"), "phone": fmt_phone((branch or {}).get("phone")) if (branch or {}).get("phone") else None},
         "category": {"name": (category or {}).get("name") or "", "phone": (category or {}).get("phone")},
         "today": fmt_date(ref_day),
         "values": it.get("values") or {},
@@ -147,4 +180,41 @@ def build_render_context(
     }
     if items is not None:
         ctx["items"] = items
+    if cashier is not None:
+        ctx["cashier"] = {"name": cashier}
+    if payments is not None:
+        ctx["payments"] = [
+            {
+                "i": i + 1,
+                "date": _fmt_datetime(p.get("createdAt")) if p.get("createdAt") else "",
+                "method": payment_method_label(p.get("method"), language),
+                "amount": fmt_money(p.get("amount")),
+                "note": p.get("note") or "",
+            }
+            for i, p in enumerate(payments)
+        ]
     return ctx
+
+
+def _order_block(order: dict[str, Any]) -> dict[str, Any]:
+    """`order.*` placeholders: number/date for every document, money fields when the order carries them (receipts)."""
+    block: dict[str, Any] = {"number": order.get("number") or "", "date": _fmt_date(order.get("createdAt"))}
+    if order.get("createdAt"):
+        block["dateTime"] = _fmt_datetime(order.get("createdAt"))
+    if "total" in order:
+        total = float(order.get("total") or 0)
+        paid = float(order.get("paidAmount") or 0)
+        block.update(
+            {
+                "subtotal": fmt_money(order.get("subtotal")),
+                "discountPercent": str(order.get("discountPercent") or 0),
+                "discountAmount": fmt_money(order.get("discountAmount")),
+                "total": fmt_money(total),
+                "paidAmount": fmt_money(paid),
+                "remaining": fmt_money(max(0.0, total - paid)),
+                "itemCount": str(order.get("itemCount") or 0),
+                "note": order.get("note") or "",
+                "status": order.get("status") or "",
+            }
+        )
+    return block

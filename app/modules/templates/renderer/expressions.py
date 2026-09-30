@@ -248,6 +248,9 @@ def item_rows(ctx: Context) -> list[Row]:
     for i, it in enumerate(ctx.get("items") or []):
         sub = _sub_context(ctx, it)
         row: Row = {"code": it.get("code"), "name": it.get("serviceName"), "status": it.get("status"), "i": i + 1}
+        for extra in ("price", "finalPrice", "category"):  # receipts
+            if it.get(extra) is not None:
+                row[extra] = it.get(extra)
         for f in (it.get("schema") or {}).get("fields") or []:
             if isinstance(f, dict) and f.get("type") != "table":
                 row[f["key"]] = format_value(sub, f["key"])
@@ -259,6 +262,8 @@ def table_rows(ctx: Context, field_key: str) -> list[Row]:
     """Dataset rows for a table / repeat binding: `items` → itemRows, else raw list value or []."""
     if field_key == ITEMS_DATASET:
         return item_rows(ctx)
+    if field_key == "payments":
+        return [r for r in (ctx.get("payments") or []) if isinstance(r, dict)]
     v = get_values(ctx).get(field_key)
     return [r for r in v if isinstance(r, dict)] if isinstance(v, list) else []
 

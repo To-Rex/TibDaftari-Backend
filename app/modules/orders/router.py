@@ -90,6 +90,13 @@ async def get_order(order_id: uuid.UUID, staff: Staff, session: DbSession) -> Or
     return await service.get_order_bundle(session, order_id, service.scope_company(staff))
 
 
+@router.get("/orders/{order_id}/receipt.pdf", summary="Cheque rendered with the branch's receipt template (404 no_template when none)", response_class=StarletteResponse, responses={200: {"content": {"application/pdf": {}}}})
+async def order_receipt_pdf(order_id: uuid.UUID, staff: Staff, session: DbSession, template_id: Annotated[uuid.UUID | None, Query(alias="templateId")] = None) -> StarletteResponse:
+    staff.require(*ORDER_READ)
+    pdf, filename = await service.render_receipt_pdf(session, order_id, service.scope_company(staff), template_id)
+    return _pdf_response(pdf, filename)
+
+
 @router.post("/orders/{order_id}/items", response_model=OrderItemsOut, summary="Add services to an order")
 async def add_items(
     order_id: uuid.UUID, body: AddItemsIn, staff: Staff, session: DbSession, meta: Meta
