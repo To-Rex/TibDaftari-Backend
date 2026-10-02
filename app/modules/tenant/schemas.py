@@ -168,3 +168,37 @@ class TelegramSettingsIn(CamelModel):
     """`botToken` null/empty disconnects the bot; a value is validated against Telegram `getMe`."""
 
     bot_token: str | None = Field(default=None, max_length=120)
+
+
+class ResetPartOut(CamelModel):
+    """One part of a reset: what it removes (counts) and which parts it pulls in."""
+
+    key: str
+    counts: dict[str, int]
+    requires: list[str]
+
+
+class ResetPreviewOut(CamelModel):
+    """What a superadmin reset would remove, per part — nothing is changed by the preview."""
+
+    target: Literal["company", "branch"]
+    id: str
+    name: str
+    #: the word to type to confirm: the company slug / the branch code
+    confirm_word: str
+    parts: list[ResetPartOut]
+
+
+class ResetIn(CamelModel):
+    """Parts to reset (their dependencies are added) + the confirmation word (company slug / branch code)."""
+
+    parts: list[str] = Field(min_length=1, max_length=10)
+    confirm: str = Field(min_length=1, max_length=120)
+
+
+class ResetOut(CamelModel):
+    """The parts actually reset (dependencies included) and the rows removed / changed."""
+
+    parts: list[str]
+    counts: dict[str, int]
+
