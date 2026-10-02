@@ -37,7 +37,8 @@ Filling (buildRenderContext):
 | patient.address | [districtName, street].filter(Boolean).join(', ') (region NOT included); '' when empty |
 | patient.passportNumber | raw or '' |
 | order.number | e.g. UR-000123 |
-| order.date | fmtDate(order.createdAt) dd.MM.yyyy ('—' when none) |
+| order.date | fmtDateTime(order.createdAt) dd.MM.yyyy HH:mm in the clinic timezone (2026-10: was date only; a bare-date value stays dd.MM.yyyy; '—' when none) |
+| order.dateOnly | fmtDate(order.createdAt) dd.MM.yyyy ('—' when none) — for blanks that want just the day |
 | item.serviceName | '' default |
 | item.approvedAt | fmtDateTime dd.MM.yyyy HH:mm, '' when not approved |
 | item.technician / doctor / labNote | names / note or '' |

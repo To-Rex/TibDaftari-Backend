@@ -196,9 +196,17 @@ def build_render_context(
     return ctx
 
 
+def _fmt_order_date(v: datetime | date | str | None) -> str:
+    """`{order.date}`: the cheque's date AND time (dd.MM.yyyy HH:mm, clinic timezone); a bare date stays a date; '—' when none."""
+    d = _dt(v)
+    return fmt_datetime(d) if isinstance(d, datetime) else fmt_date(d)
+
+
 def _order_block(order: dict[str, Any], has_payments: bool = False) -> dict[str, Any]:
-    """`order.*` placeholders: number/date for every document, money fields when the order carries them (receipts)."""
-    block: dict[str, Any] = {"number": order.get("number") or "", "date": _fmt_date(order.get("createdAt"))}
+    """`order.*` placeholders: number/date for every document, money fields when the order carries them (receipts).
+
+    `date` carries the time too; `dateOnly` is the bare date for blanks that want just the day."""
+    block: dict[str, Any] = {"number": order.get("number") or "", "date": _fmt_order_date(order.get("createdAt")), "dateOnly": _fmt_date(order.get("createdAt"))}
     if order.get("createdAt"):
         block["dateTime"] = _fmt_datetime(order.get("createdAt"))
     if "total" in order:

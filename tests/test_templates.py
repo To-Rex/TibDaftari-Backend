@@ -90,7 +90,7 @@ def test_format_value_and_interpolate() -> None:
     text = "Bemor: {patient.fullName} ({patient.gender}, {patient.age}) · {order.number} · Hb {values.hb} · {unknown.path} {not a ph}"
     assert ex.interpolate(text, ctx) == "Bemor: Test Bemor (Ayol, 36) · UR-000001 · Hb 12 ·  {not a ph}"
     assert ctx["patient"]["phone"] == "+998 90 123-45-67" and ctx["patient"]["birthDate"] == "15.01.1990"
-    assert ctx["patient"]["address"] == "Urganch shahri" and ctx["order"]["date"] == "16.08.2026"
+    assert ctx["patient"]["address"] == "Urganch shahri" and ctx["order"]["date"] == "16.08.2026 10:00" and ctx["order"]["dateOnly"] == "16.08.2026"
     assert ctx["item"]["approvedAt"] == "16.08.2026 12:30"
     # row context: {i} and {row.x}
     assert ex.interpolate("{i}. {row.name} = {row.v}", ctx, {"name": "x", "v": 9, "__i": 1}) == "1. x = 9"
