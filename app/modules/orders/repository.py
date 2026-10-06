@@ -433,3 +433,28 @@ async def find_generic_template(session: AsyncSession, company_id: uuid.UUID, br
         .limit(1)
     )
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+# ----------------------------------------------------------------------------- receipt tracking
+
+
+async def mark_document_viewed(session: AsyncSession, document_id: uuid.UUID, now: datetime) -> None:
+    """The patient opened the result (public link / portal): first + last open and a counter."""
+    await session.execute(
+        update(ResultDocument)
+        .where(ResultDocument.id == document_id)
+        .values(view_count=ResultDocument.view_count + 1, viewed_at=func.coalesce(ResultDocument.viewed_at, now), last_viewed_at=now)
+        .execution_options(synchronize_session=False)
+    )
+
+
+async def mark_document_printed(session: AsyncSession, document_id: uuid.UUID, now: datetime) -> int:
+    """Staff printed the result (it is handed over on paper): first print + a counter; returns the new count."""
+    res = await session.execute(
+        update(ResultDocument)
+        .where(ResultDocument.id == document_id)
+        .values(print_count=ResultDocument.print_count + 1, printed_at=func.coalesce(ResultDocument.printed_at, now))
+        .returning(ResultDocument.print_count)
+        .execution_options(synchronize_session=False)
+    )
+    return int(res.scalar_one_or_none() or 0)

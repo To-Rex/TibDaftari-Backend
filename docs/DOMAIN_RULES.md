@@ -136,6 +136,18 @@ if status != cancelled: status = completed if (active and all approved) else ope
 * `dashboard`: todayOrders (today, non-cancelled), todayRevenue (Σ payments today, non-refunded), pendingLab (items pending|entered, all time), pendingApproval (submitted, all time), patients (company total), smsQueued (queued|scheduled), trend: dense daily series over range with orders count + revenue (Σ paidAmount of orders created that day — keep mock semantics), byCategory: items in range excluding cancelled (**FIX** consistent with breakdown), rolled up to top-level category `{name, count, revenue(Σ finalPrice), color}` sorted revenue desc.
 * `breakdown(by=category|service|branch|employee)`: items in range, non-cancelled, grouped by name (category name / service name / branch name / technicianName or '—'), `{name, count, revenue}` sorted revenue desc.
 
+* Patient reports (2026-10), all over the period's non-cancelled cheques, branch-scoped like the rest, cached 30 s;
+  money fields are null without `reports.finance.read`:
+  * `patients` — distinct patients; "new" = their first non-cancelled cheque (in the same branches) is in the period;
+    gender, age groups (0-17/18-29/30-44/45-59/60+), districts, daily patients/new, top 10 by cheques, debts.
+  * `results` — items in the lab / at approval / approved / overdue (cheque time + service `turnaround_days`), average
+    hours cheque→approval, on time, per category; documents received vs not. **Received** = opened by the patient
+    (`/d/{token}` or the portal: `viewed_at`, `view_count`), printed by staff (`POST /documents/{id}/printed`:
+    `printed_at`, `print_count`), or Telegram sent the PDF. Opens/prints are recorded from 2026-10-07 (`trackingSince`).
+  * `results/list?status=not_received|received|waiting` — paged rows (documents, or cheques still waiting), search.
+  * `services` — per service: items, patients, Σ final price, not ready, avg hours; the same-length previous period's
+    count; active catalog services nobody ordered in the period (`unused`).
+
 ## 10. SMS texts (company name = the ORDER's company, **FIX**)
 * payment_receipt: `Chek {order.number}: {amount:ru-RU grouping, U+00A0} so‘m qabul qilindi. Natijalar tayyor bo‘lganda xabar beramiz. {company.name}`
 * result_ready (item): `{serviceName} natijasi tayyor: {link} {company.name}`

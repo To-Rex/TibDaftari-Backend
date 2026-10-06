@@ -76,6 +76,7 @@ orders:    GET/POST /companies/{cid}/orders  GET /orders/{id}  POST /orders/{id}
            GET /companies/{cid}/documents  GET /documents/{id}  GET /documents/{id}/pdf
 messaging: GET /companies/{cid}/outbox  POST /companies/{cid}/messages/send  GET /notifications  POST /notifications/read
 reports:   GET /companies/{cid}/reports/dashboard  GET /companies/{cid}/reports/breakdown
+           GET /companies/{cid}/reports/{patients,results,results/list,services}  POST /documents/{id}/printed
 portal:    GET /portal/overview  GET /portal/orders/{id}  GET /portal/documents/{id}  GET /portal/documents/{id}/pdf
 files:     GET /files/{id}  (public assets & PDFs by unguessable id; PDFs also via /d/{token})
 telegram:  POST /telegram/webhook/{companyId}/{secret} (optional; polling is default)

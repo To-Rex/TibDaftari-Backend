@@ -27,6 +27,7 @@ from app.modules.orders.schemas import (
     OrderOut,
     OrderPaymentsOut,
     PayIn,
+    PrintedOut,
     ReasonIn,
     ResultDocumentOut,
     ResultSmsIn,
@@ -261,6 +262,11 @@ async def resend_document_sms(document_id: uuid.UUID, staff: Staff, session: DbS
     return await service.resend_result_sms(session, document_id, staff, body or ResultSmsIn(), meta)
 
 
+@router.post("/documents/{document_id}/printed", response_model=PrintedOut, summary="Staff printed the result (counts as handed over)")
+async def document_printed(document_id: uuid.UUID, staff: Staff, session: DbSession) -> PrintedOut:
+    return PrintedOut(print_count=await service.mark_document_printed(session, document_id, staff))
+
+
 @router.get("/documents/{document_id}/pdf", summary="Result document PDF (rendered on demand when missing)")
 async def document_pdf(document_id: uuid.UUID, staff: Staff, session: DbSession) -> StarletteResponse:
     doc = await service.get_document_or_404(session, document_id, service.scope_company(staff), staff)
@@ -274,4 +280,5 @@ async def public_document_pdf(token: str, session: DbSession) -> StarletteRespon
     if not doc:
         raise NotFoundError(service.DOC_NOT_FOUND)
     pdf = await service.ensure_document_pdf(session, doc)
+    await service.mark_document_viewed(session, doc)  # the patient got it ("results received" reports)
     return _pdf_response(pdf, service.pdf_filename(doc))

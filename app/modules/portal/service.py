@@ -170,6 +170,7 @@ async def get_owned_document(
 async def document(session: AsyncSession, document_id: uuid.UUID, principal: PatientPrincipal) -> PortalDocumentOut:
     """Everything the portal viewer needs to render a result document."""
     d, o = await get_owned_document(session, document_id, principal)
+    await orders_svc.mark_document_viewed(session, d)  # the patient opened the result
     template = await repo.get_template(session, d.template_id, d.company_id)
     if not template:
         raise NotFoundError(DOC_NOT_FOUND)
@@ -203,4 +204,5 @@ async def document_pdf(session: AsyncSession, document_id: uuid.UUID, principal:
     """PDF bytes + download filename of an owned document (rendered on demand when missing)."""
     d, _ = await get_owned_document(session, document_id, principal)
     pdf = await orders_svc.ensure_document_pdf(session, d)
+    await orders_svc.mark_document_viewed(session, d)
     return pdf, orders_svc.pdf_filename(d)

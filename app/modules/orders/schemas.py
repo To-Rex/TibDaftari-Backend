@@ -117,6 +117,10 @@ class DocumentDeliveryOut(CamelModel):
     detail: str | None = None
 
 
+class PrintedOut(CamelModel):
+    print_count: int
+
+
 class ResultSmsIn(CamelModel):
     """Re-send a result's "ready" SMS. `to` defaults to the patient's phone; `dry_run` only builds the text."""
 

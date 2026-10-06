@@ -1289,3 +1289,21 @@ async def ensure_document_pdf(session: AsyncSession, document: ResultDocument) -
 def pdf_filename(document: ResultDocument) -> str:
     """Download name for a document PDF."""
     return f"{slugify(document.title)}-{str(document.id)[-6:]}.pdf"
+
+
+# ----------------------------------------------------------------------------- receipt tracking
+
+
+async def mark_document_viewed(session: AsyncSession, doc: ResultDocument) -> None:
+    """Record that the patient opened the result (never fails the download)."""
+    try:
+        async with session.begin_nested():
+            await repo.mark_document_viewed(session, doc.id, utcnow())
+    except Exception:  # pragma: no cover - tracking must never cost the patient their PDF
+        log.warning("could not record the open of document %s", doc.id, exc_info=True)
+
+
+async def mark_document_printed(session: AsyncSession, document_id: uuid.UUID, staff: StaffPrincipal) -> int:
+    """Staff printed the result (TPrints or the browser dialog) — counts as handed over to the patient."""
+    doc = await get_document_or_404(session, document_id, scope_company(staff), staff)
+    return await repo.mark_document_printed(session, doc.id, utcnow())
