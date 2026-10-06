@@ -165,7 +165,9 @@ Har klinika o‘z SMS akkaunti va o‘z Telegram botiga ega — sozlamalar kompa
    API: `PUT /api/v1/companies/{id}` (`sms.apiKey` faqat yozish uchun; javobda niqob).
 3. `POST /api/v1/companies/{id}/sms/test` — haqiqiy test SMS.
 4. Yuborish navbati (`outbox_messages`) va qayta urinishlar — bizda; dispatcher ishchi
-   `OUTBOX_POLL_SECONDS` oraliqda navbatni ishlaydi. Matn shablonlari — kompaniya `settings.smsTemplates`.
+   `OUTBOX_POLL_SECONDS` oraliqda navbatni ishlaydi. Matn shablonlari — har filialning o‘zi
+   (`branches.settings.smsTemplates`, `GET/PUT /api/v1/branches/{id}/sms-templates`); o‘z matnini saqlamagan filial
+   kompaniyaning `settings.smsTemplates` matnlarini ishlatadi.
 
 **Telegram bot**
 1. `@BotFather` → yangi bot → token.

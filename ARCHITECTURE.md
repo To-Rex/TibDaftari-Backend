@@ -59,7 +59,7 @@ Dependency direction: `router → service → repository → models`; modules ma
 auth:      POST /auth/staff/login  GET /auth/staff/me  POST /auth/patient/otp/request  POST /auth/patient/otp/verify
            GET /auth/patient/me  POST /auth/logout
 tenant:    GET/POST /companies  GET/PUT /companies/{id}  GET/POST /companies/{id}/branches  PUT /branches/{id}
-           POST /companies/{id}/sms/test  PUT /companies/{id}/telegram
+           POST /companies/{id}/sms/test  PUT /companies/{id}/telegram  GET/PUT /branches/{id}/sms-templates
 staff:     GET/POST /companies/{cid}/employees  GET/PUT /employees/{id}  PUT /employees/{id}/overrides
            GET/POST /companies/{cid}/roles  PUT/DELETE /roles/{id}
 patients:  GET/POST /companies/{cid}/patients  GET /companies/{cid}/patients/search  POST /companies/{cid}/patients/duplicates
