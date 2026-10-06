@@ -117,6 +117,25 @@ class DocumentDeliveryOut(CamelModel):
     detail: str | None = None
 
 
+class ResultSmsIn(CamelModel):
+    """Re-send a result's "ready" SMS. `to` defaults to the patient's phone; `dry_run` only builds the text."""
+
+    to: str | None = Field(default=None, max_length=30)
+    dry_run: bool = False
+
+
+class ResultSmsOut(CamelModel):
+    """The SMS that was (or, on a dry run, would be) queued."""
+
+    to: str
+    text: str
+    #: the company has an SMS provider; without one the message is only recorded as failed
+    configured: bool
+    queued: bool
+    status: str | None = None
+    message_id: str | None = None
+
+
 class ResultDocumentOut(CamelModel):
     id: str
     company_id: str

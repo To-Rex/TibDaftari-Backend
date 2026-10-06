@@ -29,6 +29,8 @@ from app.modules.orders.schemas import (
     PayIn,
     ReasonIn,
     ResultDocumentOut,
+    ResultSmsIn,
+    ResultSmsOut,
     SaveValuesIn,
     WorklistCountsOut,
     WorklistItemOut,
@@ -251,6 +253,12 @@ async def list_documents(
 async def get_document(document_id: uuid.UUID, staff: Staff, session: DbSession) -> ResultDocumentOut:
     staff.require(*DOC_READ)
     return service.document_out(await service.get_document_or_404(session, document_id, service.scope_company(staff), staff))
+
+
+@router.post("/documents/{document_id}/sms", response_model=ResultSmsOut, summary="Re-send the result-ready SMS (with the result link); dryRun only builds it")
+async def resend_document_sms(document_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta, body: ResultSmsIn | None = None) -> ResultSmsOut:
+    staff.require("confirm.result.approve", "messaging.send")
+    return await service.resend_result_sms(session, document_id, staff, body or ResultSmsIn(), meta)
 
 
 @router.get("/documents/{document_id}/pdf", summary="Result document PDF (rendered on demand when missing)")

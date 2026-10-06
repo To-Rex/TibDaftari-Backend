@@ -24,10 +24,17 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.api.deps import RequestMeta, StaffPrincipal
 from app.core.audit import audit
 from app.core.config import settings
-from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError, StateError, ValidationError
+from app.core.exceptions import (
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    RateLimitedError,
+    StateError,
+    ValidationError,
+)
 from app.core.pagination import page_of
 from app.core.schemas import Page, iso_z
-from app.core.textutil import slugify
+from app.core.textutil import is_valid_uz_phone, norm_phone, slugify
 from app.core.timeutil import utcnow
 from app.infrastructure.db.models import (
     Company,
@@ -40,6 +47,7 @@ from app.infrastructure.db.models import (
     empty_progress,
 )
 from app.infrastructure.redis import cache
+from app.infrastructure.redis.client import get_redis
 from app.modules.files import service as files_svc
 from app.modules.messaging import service as messaging
 from app.modules.orders import repository as repo
@@ -61,6 +69,8 @@ from app.modules.orders.schemas import (
     PaymentOut,
     ProgressOut,
     ResultDocumentOut,
+    ResultSmsIn,
+    ResultSmsOut,
     SaveValuesIn,
     WorklistCountsOut,
     WorklistItemOut,
@@ -1197,6 +1207,49 @@ async def approve_order(
 
 
 # ----------------------------------------------------------------------------- documents
+
+
+RESEND_COOLDOWN_SECONDS = 60
+
+
+async def resend_result_sms(session: AsyncSession, document_id: uuid.UUID, staff: StaffPrincipal, body: ResultSmsIn, meta: RequestMeta) -> ResultSmsOut:
+    """Queue the result's "ready" SMS again — the same text the approval sent (with the result link), to the
+    patient's current phone or the number given. A dry run only returns the recipient and the text."""
+    doc = await get_document_or_404(session, document_id, scope_company(staff), staff)
+    order = await get_order_or_404(session, doc.order_id, doc.company_id, staff=staff)
+    company = await session.get(Company, order.company_id)
+    if company is None:
+        raise NotFoundError("Kompaniya topilmadi")
+    patient = await repo.get_patient(session, order.patient_id, order.company_id) if order.patient_id else None
+    to = norm_phone(body.to if body.to and body.to.strip() else (patient.phone if patient else order.patient_phone))
+    if not is_valid_uz_phone(to):
+        raise ValidationError("Telefon raqam noto‘g‘ri", code="invalid_phone")
+    link = public_result_link(doc, meta)
+    if doc.order_item_ids:  # one document for several services of the cheque (order-scope template)
+        tpl = await repo.get_template(session, doc.template_id, doc.company_id)
+        text = messaging.result_ready_order_text(company, tpl.name if tpl else doc.title, len(doc.order_item_ids), order.patient_name, order.number, link)
+    else:
+        item = await repo.get_item(session, doc.order_item_id, doc.company_id) if doc.order_item_id else None
+        text = messaging.result_ready_text(company, item.service_name if item else doc.title, order.patient_name, order.number, link)
+    configured = company.sms_provider != "none" and bool(company.sms_api_key_enc)
+    if body.dry_run:
+        return ResultSmsOut(to=to, text=text, configured=configured, queued=False)
+    # a double click (or an impatient second press) must not send the same SMS twice
+    key = f"co:{company.id}:resend-sms:{doc.id}"
+    try:
+        fresh = await get_redis().set(key, "1", ex=RESEND_COOLDOWN_SECONDS, nx=True)
+    except Exception:  # pragma: no cover - Redis degraded: do not block the resend
+        fresh = True
+    if not fresh:
+        raise RateLimitedError("SMS hozirgina yuborildi. Bir daqiqadan keyin qayta urinib ko‘ring.", details={"retryAfter": RESEND_COOLDOWN_SECONDS})
+    msg = await messaging.enqueue_sms_if_configured(
+        session, company, kind="result_ready", to=to, text=text, patient_id=order.patient_id, order_id=order.id,
+        branch_id=order.branch_id, document_id=doc.id, created_by=staff.id,
+    )
+    status = msg.status if msg else None
+    await messaging.mark_document_delivery(session, doc.id, "sms", "failed" if status == "failed" else "queued", msg.error if msg and status == "failed" else None)
+    await audit(session, actor_type="staff", actor_id=staff.id, company_id=order.company_id, action="document.sms_resend", entity="result_document", entity_id=doc.id, after={"to": to, "status": status}, ip=meta.ip, request_id=meta.request_id)
+    return ResultSmsOut(to=to, text=text, configured=configured, queued=status is not None and status != "failed", status=status, message_id=str(msg.id) if msg else None)
 
 
 async def list_documents(
