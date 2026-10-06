@@ -30,7 +30,8 @@ from app.modules.messaging.schemas import NotificationOut, OutboxCountsOut, Outb
 # ----------------------------------------------------------------------------- texts
 
 DEFAULT_TEMPLATES: dict[str, str] = {
-    # {patient} {order} {service} {company} {amount} {count} {code} {link}
+    # {patient} {order} {service} {company} {branch} {amount} {count} {code} {link}
+    # {branch} = the name of the order's branch (empty for messages without one)
     # {link} = the public result PDF (results only); it is what makes the SMS useful on any phone
     "payment_receipt": "Chek {order}: {amount} so‘m qabul qilindi. Natijalar tayyor bo‘lganda xabar beramiz. {company}",
     "result_ready": "{service} natijasi tayyor: {link} {company}",
@@ -57,7 +58,7 @@ def render_text(company: Company | None, kind: str, *, branch: Branch | None = N
         # A customised `result_ready` text also wins for order-scope approvals (DOMAIN_RULES §10).
         tpl = overrides.get("result_ready")
     tpl = tpl or DEFAULT_TEMPLATES.get(kind, "{service}")
-    values = {"patient": "", "order": "", "service": "", "company": company.name if company else "", "amount": "", "count": "", "code": "", "link": ""}
+    values = {"patient": "", "order": "", "service": "", "company": company.name if company else "", "branch": (getattr(branch, "name", "") or "") if branch is not None else "", "amount": "", "count": "", "code": "", "link": ""}
     values.update({k: ("" if v is None else str(v)) for k, v in vars.items()})
     out = tpl
     for k, v in values.items():

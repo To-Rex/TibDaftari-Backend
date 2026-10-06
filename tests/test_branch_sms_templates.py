@@ -16,7 +16,7 @@ from app.modules.tenant.service import branch_sms_templates_out
 
 COMPANY = SimpleNamespace(name="Temo Med", settings={"smsTemplates": {"result_ready": "Kompaniya: {service} {link}"}})
 INHERITS = SimpleNamespace(id=uuid.uuid4(), settings={})
-OWN = SimpleNamespace(id=uuid.uuid4(), settings={"smsTemplates": {"result_ready": "Filial: {service} {link}", "payment_receipt": "Filial chek {order}"}})
+OWN = SimpleNamespace(id=uuid.uuid4(), name="Markaziy filial", settings={"smsTemplates": {"result_ready": "Filial: {service} {link}", "payment_receipt": "Filial chek {order}"}})
 DEFAULTS = SimpleNamespace(id=uuid.uuid4(), settings={"smsTemplates": {}})  # saved "everything default"
 
 
@@ -46,3 +46,13 @@ def test_branch_dto_reports_inheritance() -> None:
     assert own.inherited is False and own.templates.payment_receipt == "Filial chek {order}" and own.applied == 1
     body = own.model_dump(by_alias=True)
     assert body["branchId"] == str(OWN.id) and "payment_receipt" in body["templates"]
+
+
+def test_branch_placeholder_is_the_branch_name() -> None:
+    assert render_text(COMPANY, "payment_receipt", branch=OWN, order="UR-1") == "Filial chek UR-1"
+    branchy = SimpleNamespace(name="Temo Med", settings={"smsTemplates": {"payment_receipt": "Chek {order} — {branch}, {company}"}})
+    named = SimpleNamespace(id=uuid.uuid4(), name="Markaziy filial", settings={})  # uses the company text
+    assert render_text(branchy, "payment_receipt", branch=named, order="UR-7") == "Chek UR-7 — Markaziy filial, Temo Med"
+    # without a branch the placeholder is just dropped (no double space left behind)
+    plain = SimpleNamespace(name="Temo Med", settings={"smsTemplates": {"result_ready": "{service} tayyor {branch} {link}"}})
+    assert render_text(plain, "result_ready", service="Qon", link="L") == "Qon tayyor L"
