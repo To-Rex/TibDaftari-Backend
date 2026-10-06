@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import RequestMeta, StaffPrincipal
 from app.core.audit import audit
 from app.core.crypto import decrypt, encrypt
-from app.core.exceptions import ConflictError, ExternalServiceError, NotFoundError, ValidationError
+from app.core.exceptions import ConflictError, ExternalServiceError, ForbiddenError, NotFoundError, ValidationError
 from app.core.pagination import page_of
 from app.core.permissions import DEFAULT_COMPANY_ROLES
 from app.core.schemas import Page, PageQuery
@@ -30,6 +30,8 @@ from app.modules.tenant import repository as repo
 from app.modules.tenant.schemas import (
     BranchCreateIn,
     BranchOut,
+    BranchSmsTemplatesIn,
+    BranchSmsTemplatesOut,
     BranchUpdateIn,
     CompanyCreateIn,
     CompanyOut,
@@ -469,3 +471,49 @@ async def update_branch(session: AsyncSession, branch_id: uuid.UUID, body: Branc
     await audit(session, actor_type="staff", actor_id=staff.id, company_id=branch.company_id, action="update", entity="branch", entity_id=branch.id, before=before, after=_branch_snapshot(branch), ip=meta.ip, request_id=meta.request_id)
     await invalidate_company_cache(branch.company_id)
     return branch_out(branch, await repo.geo_names(session, [branch]))
+
+
+# ----------------------------------------------------------------------------- branch SMS texts
+
+
+def branch_sms_templates_out(branch: Branch, company: Company, applied: int = 0) -> BranchSmsTemplatesOut:
+    own = (branch.settings or {}).get("smsTemplates")
+    inherited = not isinstance(own, dict)
+    texts = ((company.settings or {}).get("smsTemplates") or {}) if inherited else own
+    return BranchSmsTemplatesOut(branch_id=str(branch.id), templates=SmsTemplates.model_validate(texts), inherited=inherited, applied=applied)
+
+
+async def _branch_in_scope(session: AsyncSession, branch_id: uuid.UUID, staff: StaffPrincipal) -> Branch:
+    """The branch, when it belongs to the caller's company and lies inside their branch scope (else 404 / 403)."""
+    branch = await get_branch_or_404(session, branch_id, None if staff.is_super_admin else staff.company_id)
+    if not staff.allows_branch(branch.id):
+        raise ForbiddenError("Ruxsat yo‘q")
+    return branch
+
+
+async def get_branch_sms_templates(session: AsyncSession, branch_id: uuid.UUID, staff: StaffPrincipal) -> BranchSmsTemplatesOut:
+    """The SMS texts a branch's messages use (its own, or the company's while it has none)."""
+    branch = await _branch_in_scope(session, branch_id, staff)
+    return branch_sms_templates_out(branch, await get_company_or_404(session, branch.company_id))
+
+
+async def set_branch_sms_templates(session: AsyncSession, branch_id: uuid.UUID, body: BranchSmsTemplatesIn, staff: StaffPrincipal, meta: RequestMeta) -> BranchSmsTemplatesOut:
+    """Save the branch's own SMS texts — other branches keep theirs. `applyToAll` (superadmin / company admin):
+    the same texts for every branch of the company and for the company itself (new branches start with them)."""
+    branch = await _branch_in_scope(session, branch_id, staff)
+    company = await get_company_or_404(session, branch.company_id)
+    texts = {k: v for k, v in body.templates.model_dump().items() if v}
+    targets = [branch]
+    if body.apply_to_all:
+        if not staff.can_switch_branch:
+            raise ForbiddenError("Matnlarni barcha filiallarga faqat kompaniya administratori qo‘llay oladi")
+        targets = list(await repo.list_branches(session, company.id))
+        _apply_sms_templates(company, body.templates)
+    for b in targets:
+        before = (b.settings or {}).get("smsTemplates")
+        b.settings = {**(b.settings or {}), "smsTemplates": dict(texts)}  # reassign → JSONB change is tracked
+        await audit(session, actor_type="staff", actor_id=staff.id, company_id=company.id, action="sms_templates", entity="branch", entity_id=b.id, before={"smsTemplates": before}, after={"smsTemplates": texts, "applyToAll": body.apply_to_all}, ip=meta.ip, request_id=meta.request_id)
+    await session.flush()
+    if body.apply_to_all:
+        await invalidate_company_cache(company.id)
+    return branch_sms_templates_out(branch, company, applied=len(targets))

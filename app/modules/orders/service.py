@@ -37,6 +37,7 @@ from app.core.schemas import Page, iso_z
 from app.core.textutil import is_valid_uz_phone, norm_phone, slugify
 from app.core.timeutil import utcnow
 from app.infrastructure.db.models import (
+    Branch,
     Company,
     Order,
     OrderItem,
@@ -617,7 +618,7 @@ async def pay(
         await repo.bump_patient_stats(session, patient.id, spent=body.amount, now=now)
     company = await repo.get_company(session, order.company_id)
     if company:
-        text = messaging.payment_receipt_text(company, order.number, body.amount, order.patient_name)
+        text = messaging.payment_receipt_text(company, order.number, body.amount, order.patient_name, branch=await session.get(Branch, order.branch_id))
         if body.send_sms:
             await messaging.enqueue_sms_if_configured(
                 session,
@@ -1102,7 +1103,7 @@ async def approve_item(
     _touch(item, now)
     await recompute(session, order, now)
     if company:
-        text = messaging.result_ready_text(company, item.service_name, order.patient_name, order.number, public_result_link(doc, meta))
+        text = messaging.result_ready_text(company, item.service_name, order.patient_name, order.number, public_result_link(doc, meta), branch=await session.get(Branch, order.branch_id))
         await _notify_result_ready(
             session, order=order, company=company, patient=patient, doc=doc, text=text, actor_id=staff.id
         )
@@ -1182,7 +1183,7 @@ async def approve_order(
             _touch(it, now)
     await recompute(session, order, now)
     if company:
-        text = messaging.result_ready_order_text(company, tpl.name, len(to_approve), order.patient_name, order.number, public_result_link(doc, meta))
+        text = messaging.result_ready_order_text(company, tpl.name, len(to_approve), order.patient_name, order.number, public_result_link(doc, meta), branch=await session.get(Branch, order.branch_id))
         await _notify_result_ready(
             session, order=order, company=company, patient=patient, doc=doc, text=text, actor_id=staff.id
         )
@@ -1225,12 +1226,13 @@ async def resend_result_sms(session: AsyncSession, document_id: uuid.UUID, staff
     if not is_valid_uz_phone(to):
         raise ValidationError("Telefon raqam noto‘g‘ri", code="invalid_phone")
     link = public_result_link(doc, meta)
+    branch = await session.get(Branch, order.branch_id)
     if doc.order_item_ids:  # one document for several services of the cheque (order-scope template)
         tpl = await repo.get_template(session, doc.template_id, doc.company_id)
-        text = messaging.result_ready_order_text(company, tpl.name if tpl else doc.title, len(doc.order_item_ids), order.patient_name, order.number, link)
+        text = messaging.result_ready_order_text(company, tpl.name if tpl else doc.title, len(doc.order_item_ids), order.patient_name, order.number, link, branch=branch)
     else:
         item = await repo.get_item(session, doc.order_item_id, doc.company_id) if doc.order_item_id else None
-        text = messaging.result_ready_text(company, item.service_name if item else doc.title, order.patient_name, order.number, link)
+        text = messaging.result_ready_text(company, item.service_name if item else doc.title, order.patient_name, order.number, link, branch=branch)
     configured = company.sms_provider != "none" and bool(company.sms_api_key_enc)
     if body.dry_run:
         return ResultSmsOut(to=to, text=text, configured=configured, queued=False)

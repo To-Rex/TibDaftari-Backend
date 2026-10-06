@@ -14,6 +14,8 @@ from app.modules.tenant import reset, service
 from app.modules.tenant.schemas import (
     BranchCreateIn,
     BranchOut,
+    BranchSmsTemplatesIn,
+    BranchSmsTemplatesOut,
     BranchUpdateIn,
     CompanyCreateIn,
     CompanyOut,
@@ -74,6 +76,17 @@ async def create_branch(company_id: uuid.UUID, body: BranchCreateIn, staff: Staf
 async def update_branch(branch_id: uuid.UUID, body: BranchUpdateIn, staff: Staff, session: DbSession, meta: Meta) -> BranchOut:
     staff.require("admin.branch.write")
     return await service.update_branch(session, branch_id, body, staff, meta)
+
+
+@router.get("/branches/{branch_id}/sms-templates", response_model=BranchSmsTemplatesOut, summary="The branch's SMS texts (its own, or the company's while it has none)")
+async def get_branch_sms_templates(branch_id: uuid.UUID, staff: Staff, session: DbSession) -> BranchSmsTemplatesOut:
+    return await service.get_branch_sms_templates(session, branch_id, staff)
+
+
+@router.put("/branches/{branch_id}/sms-templates", response_model=BranchSmsTemplatesOut, summary="Save the branch's own SMS texts (applyToAll: every branch)")
+async def set_branch_sms_templates(branch_id: uuid.UUID, body: BranchSmsTemplatesIn, staff: Staff, session: DbSession, meta: Meta) -> BranchSmsTemplatesOut:
+    staff.require("admin.settings.write", "admin.company.write")
+    return await service.set_branch_sms_templates(session, branch_id, body, staff, meta)
 
 
 # ----------------------------------------------------------------------------- superadmin reset ("like newborn")

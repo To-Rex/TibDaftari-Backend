@@ -40,9 +40,18 @@ DEFAULT_TEMPLATES: dict[str, str] = {
 }
 
 
-def render_text(company: Company | None, kind: str, **vars: Any) -> str:
-    """Company override (companies.settings.smsTemplates[kind]) or the default text."""
-    overrides = ((company.settings or {}).get("smsTemplates") or {}) if company else {}
+def sms_overrides(company: Company | None, branch: Branch | None = None) -> dict[str, str]:
+    """The texts a message of `branch` uses: the branch's own once it saved them (an empty value = the default),
+    otherwise the company's (`companies.settings.smsTemplates`)."""
+    own = (branch.settings or {}).get("smsTemplates") if branch is not None else None
+    if isinstance(own, dict):
+        return own
+    return ((company.settings or {}).get("smsTemplates") or {}) if company else {}
+
+
+def render_text(company: Company | None, kind: str, *, branch: Branch | None = None, **vars: Any) -> str:
+    """The branch's / company's override (`sms_overrides`) or the default text."""
+    overrides = sms_overrides(company, branch)
     tpl = overrides.get(kind)
     if not tpl and kind == "result_ready_order":
         # A customised `result_ready` text also wins for order-scope approvals (DOMAIN_RULES §10).
@@ -59,16 +68,16 @@ def render_text(company: Company | None, kind: str, **vars: Any) -> str:
     return out
 
 
-def payment_receipt_text(company: Company, order_number: str, amount: int, patient_name: str = "") -> str:
-    return render_text(company, "payment_receipt", order=order_number, amount=fmt_money_ru(amount), patient=patient_name)
+def payment_receipt_text(company: Company, order_number: str, amount: int, patient_name: str = "", branch: Branch | None = None) -> str:
+    return render_text(company, "payment_receipt", branch=branch, order=order_number, amount=fmt_money_ru(amount), patient=patient_name)
 
 
-def result_ready_text(company: Company, service_name: str, patient_name: str = "", order_number: str = "", link: str = "") -> str:
-    return render_text(company, "result_ready", service=service_name, patient=patient_name, order=order_number, link=link)
+def result_ready_text(company: Company, service_name: str, patient_name: str = "", order_number: str = "", link: str = "", branch: Branch | None = None) -> str:
+    return render_text(company, "result_ready", branch=branch, service=service_name, patient=patient_name, order=order_number, link=link)
 
 
-def result_ready_order_text(company: Company, template_name: str, count: int, patient_name: str = "", order_number: str = "", link: str = "") -> str:
-    return render_text(company, "result_ready_order", service=template_name, count=count, patient=patient_name, order=order_number, link=link)
+def result_ready_order_text(company: Company, template_name: str, count: int, patient_name: str = "", order_number: str = "", link: str = "", branch: Branch | None = None) -> str:
+    return render_text(company, "result_ready_order", branch=branch, service=template_name, count=count, patient=patient_name, order=order_number, link=link)
 
 
 def otp_text(company: Company | None, code: str) -> str:

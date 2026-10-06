@@ -61,6 +61,8 @@ class Branch(PKMixin, AuditMixin, SoftDeleteMixin, TenantMixin, Base):
     timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Asia/Tashkent")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     order_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # branch-level settings; `smsTemplates` = the branch's own SMS texts (absent → the company's are used)
+    settings: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
 
     __table_args__ = (
         Index("uq_branches_company_code_alive", "company_id", "code", unique=True, postgresql_where=text("deleted_at IS NULL")),

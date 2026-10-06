@@ -47,6 +47,23 @@ class SmsTemplates(BaseModel):
     reminder: str | None = Field(default=None, max_length=500)
 
 
+class BranchSmsTemplatesIn(CamelModel):
+    """A branch's own SMS texts (empty = platform default). `applyToAll` (company admins): the same texts for every
+    branch and for the company (what branches created later start with)."""
+
+    templates: SmsTemplates
+    apply_to_all: bool = False
+
+
+class BranchSmsTemplatesOut(CamelModel):
+    branch_id: str
+    templates: SmsTemplates
+    #: the branch has not saved its own texts yet — the company's are used
+    inherited: bool
+    #: how many branches the save changed (1, or all of them with `applyToAll`)
+    applied: int = 0
+
+
 class CompanyOut(CamelModel):
     id: str
     name: str
