@@ -23,6 +23,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.api.deps import RequestMeta, StaffPrincipal
 from app.core.audit import audit
+from app.core.config import settings
 from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError, StateError, ValidationError
 from app.core.pagination import page_of
 from app.core.schemas import Page, iso_z
@@ -185,6 +186,16 @@ def payment_out(p: Payment) -> PaymentOut:
 def document_pdf_url(document_id: uuid.UUID | str) -> str:
     """Staff PDF endpoint of a document."""
     return f"/api/v1/documents/{document_id}/pdf"
+
+
+def public_result_link(doc: ResultDocument, meta: RequestMeta | None) -> str:
+    """Short public link to a result for SMS / Telegram: `<web app>/d/<token>` — the web app the approving staff
+    used (its Origin, checked against the CORS list), else FRONTEND_URL. The app page opens the PDF
+    (`GET /api/v1/d/{token}`)."""
+    if not doc.public_token:
+        return ""
+    base = (meta.origin if meta and meta.origin else settings.frontend_url).rstrip("/")
+    return f"{base}/d/{doc.public_token}"
 
 
 def document_out(d: ResultDocument) -> ResultDocumentOut:
@@ -1081,7 +1092,7 @@ async def approve_item(
     _touch(item, now)
     await recompute(session, order, now)
     if company:
-        text = messaging.result_ready_text(company, item.service_name, order.patient_name, order.number)
+        text = messaging.result_ready_text(company, item.service_name, order.patient_name, order.number, public_result_link(doc, meta))
         await _notify_result_ready(
             session, order=order, company=company, patient=patient, doc=doc, text=text, actor_id=staff.id
         )
@@ -1161,7 +1172,7 @@ async def approve_order(
             _touch(it, now)
     await recompute(session, order, now)
     if company:
-        text = messaging.result_ready_order_text(company, tpl.name, len(to_approve), order.patient_name, order.number)
+        text = messaging.result_ready_order_text(company, tpl.name, len(to_approve), order.patient_name, order.number, public_result_link(doc, meta))
         await _notify_result_ready(
             session, order=order, company=company, patient=patient, doc=doc, text=text, actor_id=staff.id
         )

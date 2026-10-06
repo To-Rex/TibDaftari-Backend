@@ -138,8 +138,11 @@ if status != cancelled: status = completed if (active and all approved) else ope
 
 ## 10. SMS texts (company name = the ORDER's company, **FIX**)
 * payment_receipt: `Chek {order.number}: {amount:ru-RU grouping, U+00A0} so‘m qabul qilindi. Natijalar tayyor bo‘lganda xabar beramiz. {company.name}`
-* result_ready (item): `{serviceName} natijasi tayyor. Portalda ko‘rishingiz mumkin. {company.name}`
-* result_ready (order): `{template.name}: {n} ta tahlil natijasi tayyor. Portalda ko‘rishingiz mumkin. {company.name}`
+* result_ready (item): `{serviceName} natijasi tayyor: {link} {company.name}`
+* result_ready (order): `{template.name}: {n} ta tahlil natijasi tayyor: {link} {company.name}`
+* `{link}` (2026-10) = `<web app>/d/<document.public_token>` — the web app the approving staff used (Origin, only if it
+  is an allowed CORS origin), else FRONTEND_URL; the app page `/d/:token` opens the PDF from `GET /api/v1/d/{token}`.
+  Available in company overrides of `result_ready` too.
 * otp: `Sizning tasdiqlash kodingiz: {code}` (uz) — Telegram bot uses its own per-language text.
 * Optional per-company overrides in `companies.settings.smsTemplates` `{payment_receipt, result_ready, reminder}` with placeholders `{patient} {order} {service} {company}` — when set, they win.
 

@@ -30,10 +30,11 @@ from app.modules.messaging.schemas import NotificationOut, OutboxCountsOut, Outb
 # ----------------------------------------------------------------------------- texts
 
 DEFAULT_TEMPLATES: dict[str, str] = {
-    # {patient} {order} {service} {company} {amount} {count} {code}
+    # {patient} {order} {service} {company} {amount} {count} {code} {link}
+    # {link} = the public result PDF (results only); it is what makes the SMS useful on any phone
     "payment_receipt": "Chek {order}: {amount} so‘m qabul qilindi. Natijalar tayyor bo‘lganda xabar beramiz. {company}",
-    "result_ready": "{service} natijasi tayyor. Portalda ko‘rishingiz mumkin. {company}",
-    "result_ready_order": "{service}: {count} ta tahlil natijasi tayyor. Portalda ko‘rishingiz mumkin. {company}",
+    "result_ready": "{service} natijasi tayyor: {link} {company}",
+    "result_ready_order": "{service}: {count} ta tahlil natijasi tayyor: {link} {company}",
     "reminder": "Hurmatli {patient}! Sizni {company} klinikasida kutamiz. Chek: {order}",
     "otp": "Sizning tasdiqlash kodingiz: {code}",
 }
@@ -47,11 +48,14 @@ def render_text(company: Company | None, kind: str, **vars: Any) -> str:
         # A customised `result_ready` text also wins for order-scope approvals (DOMAIN_RULES §10).
         tpl = overrides.get("result_ready")
     tpl = tpl or DEFAULT_TEMPLATES.get(kind, "{service}")
-    values = {"patient": "", "order": "", "service": "", "company": company.name if company else "", "amount": "", "count": "", "code": ""}
+    values = {"patient": "", "order": "", "service": "", "company": company.name if company else "", "amount": "", "count": "", "code": "", "link": ""}
     values.update({k: ("" if v is None else str(v)) for k, v in vars.items()})
     out = tpl
     for k, v in values.items():
         out = out.replace("{" + k + "}", v)
+    # an empty value (e.g. no link) must not leave a double space behind (a text written with one stays as is)
+    if "  " in out and "  " not in tpl:
+        out = re.sub(" {2,}", " ", out).strip()
     return out
 
 
@@ -59,12 +63,12 @@ def payment_receipt_text(company: Company, order_number: str, amount: int, patie
     return render_text(company, "payment_receipt", order=order_number, amount=fmt_money_ru(amount), patient=patient_name)
 
 
-def result_ready_text(company: Company, service_name: str, patient_name: str = "", order_number: str = "") -> str:
-    return render_text(company, "result_ready", service=service_name, patient=patient_name, order=order_number)
+def result_ready_text(company: Company, service_name: str, patient_name: str = "", order_number: str = "", link: str = "") -> str:
+    return render_text(company, "result_ready", service=service_name, patient=patient_name, order=order_number, link=link)
 
 
-def result_ready_order_text(company: Company, template_name: str, count: int, patient_name: str = "", order_number: str = "") -> str:
-    return render_text(company, "result_ready_order", service=template_name, count=count, patient=patient_name, order=order_number)
+def result_ready_order_text(company: Company, template_name: str, count: int, patient_name: str = "", order_number: str = "", link: str = "") -> str:
+    return render_text(company, "result_ready_order", service=template_name, count=count, patient=patient_name, order=order_number, link=link)
 
 
 def otp_text(company: Company | None, code: str) -> str:

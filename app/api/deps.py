@@ -41,6 +41,9 @@ class RequestMeta:
     ip: str | None
     request_id: str | None
     user_agent: str | None
+    #: the web app the request came from (its Origin), only when it is one of the allowed CORS origins —
+    #: links sent to patients (SMS) point at the same app the staff used
+    origin: str | None = None
 
 
 def client_ip(request: Request) -> str | None:
@@ -63,7 +66,14 @@ def client_ip(request: Request) -> str | None:
 
 def request_meta(request: Request) -> RequestMeta:
     ip = client_ip(request)
-    return RequestMeta(ip=ip, request_id=getattr(request.state, "request_id", None), user_agent=(request.headers.get("user-agent") or "")[:300])
+    origin = (request.headers.get("origin") or "").strip().rstrip("/")
+    allowed = {o.strip().rstrip("/") for o in settings.cors_origins}
+    return RequestMeta(
+        ip=ip,
+        request_id=getattr(request.state, "request_id", None),
+        user_agent=(request.headers.get("user-agent") or "")[:300],
+        origin=origin if origin and origin in allowed else None,
+    )
 
 
 Meta = Annotated[RequestMeta, Depends(request_meta)]
