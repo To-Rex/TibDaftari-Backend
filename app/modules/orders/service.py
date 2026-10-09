@@ -60,6 +60,7 @@ from app.modules.orders.schemas import (
     ApproveOrderOut,
     CreateOrderIn,
     DocumentDeliveryOut,
+    ItemEventOut,
     OrderBundleOut,
     OrderItemOut,
     OrderItemsOut,
@@ -72,6 +73,7 @@ from app.modules.orders.schemas import (
     ResultDocumentOut,
     ResultSmsIn,
     ResultSmsOut,
+    RevokeOut,
     SaveValuesIn,
     WorklistCountsOut,
     WorklistItemOut,
@@ -173,7 +175,34 @@ def _item_fields(i: OrderItem) -> dict[str, Any]:
         "created_at": i.created_at,
         "updated_at": i.updated_at,
         "created_by": _s(i.created_by),
+        "history": [ItemEventOut.model_validate(e) for e in item_history(i) if isinstance(e, dict)],
     }
+
+
+def _legacy_history(i: OrderItem) -> list[dict[str, Any]]:
+    """Items from before the trail existed: what their timestamps tell (shown until their next event)."""
+    events: list[dict[str, Any]] = []
+    if i.submitted_at:
+        events.append({"type": "submitted", "at": iso_z(i.submitted_at), "byId": _s(i.technician_id), "byName": i.technician_name})
+    if i.status == "approved" and i.approved_at:
+        events.append({"type": "approved", "at": iso_z(i.approved_at), "byId": _s(i.doctor_id), "byName": i.doctor_name, "documentId": _s(i.document_id)})
+    if i.status == "rejected" and i.reject_reason and i.updated_at:
+        events.append({"type": "returned", "at": iso_z(i.updated_at), "reason": i.reject_reason})
+    return events
+
+
+def item_history(i: OrderItem) -> list[dict[str, Any]]:
+    """The item's result trail, oldest first."""
+    return list(i.history) if i.history else _legacy_history(i)
+
+
+def _push_history(i: OrderItem, kind: str, staff: StaffPrincipal, now: datetime, *, reason: str | None = None, document_id: uuid.UUID | str | None = None) -> None:
+    event: dict[str, Any] = {"type": kind, "at": iso_z(now), "byId": str(staff.id), "byName": staff.employee.full_name}
+    if reason:
+        event["reason"] = reason
+    if document_id:
+        event["documentId"] = str(document_id)
+    i.history = [*item_history(i), event]  # reassign → the JSONB change is tracked
 
 
 def payment_out(p: Payment) -> PaymentOut:
@@ -874,6 +903,7 @@ async def submit_item(
     else:
         item.status = "submitted"
         item.submitted_at = now
+    _push_history(item, "submitted" if item.status == "submitted" else "unsubmitted", staff, now)
     _touch(item, now)
     await recompute(session, order, now)
     await audit(
@@ -904,6 +934,7 @@ async def reject_item(
     item.status = "rejected"
     item.reject_reason = reason or None
     item.submitted_at = None
+    _push_history(item, "returned", staff, now, reason=reason or None)
     _touch(item, now)
     await recompute(session, order, now)
     await audit(
@@ -1103,6 +1134,7 @@ async def approve_item(
         actor_id=staff.id,
     )
     item.document_id = doc.id
+    _push_history(item, "approved", staff, now, document_id=doc.id)
     _touch(item, now)
     await recompute(session, order, now)
     if company:
@@ -1123,6 +1155,63 @@ async def approve_item(
         request_id=meta.request_id,
     )
     return ApproveItemOut(item=item_out(item), document=document_out(doc))
+
+
+async def revoke_item(session: AsyncSession, item_id: uuid.UUID, staff: StaffPrincipal, reason: str, meta: RequestMeta) -> RevokeOut:
+    """Doctor takes back an approved result (a mistake was found): its document is withdrawn — PDF, public link, portal
+    and reports drop it, the row stays for the trail — and the result goes back to the lab with the reason. Approved
+    items that shared that (order-scope) document return to the approval queue."""
+    reason = (reason or "").strip()
+    if not reason:
+        raise ValidationError("Bekor qilish sababini yozing", code="reason")
+    item = await get_item_or_404(session, item_id, scope_company(staff), staff)
+    order = await _lock_order_of_item(session, item)
+    ensure_category_access(item, await allowed_category_ids(session, staff, item.company_id))
+    if item.status != "approved":
+        raise StateError("Faqat tasdiqlangan natijani bekor qilish mumkin", code="state")
+    now = utcnow()
+    doc = await repo.get_document(session, item.document_id, item.company_id) if item.document_id else None
+    affected: list[OrderItem] = [item]
+    if doc is not None:
+        doc.status = "revoked"
+        doc.deleted_at = now
+        doc.deleted_by = staff.id
+        _touch(doc, now)
+        if doc.order_item_ids:
+            for other in await repo.items_of_order(session, order.id):
+                if other.id != item.id and other.document_id == doc.id and other.status == "approved":
+                    other.status = "submitted"
+                    other.approved_at = None
+                    other.doctor_id = None
+                    other.doctor_name = None
+                    other.document_id = None
+                    _push_history(other, "reopened", staff, now, reason=reason, document_id=doc.id)
+                    _touch(other, now)
+                    affected.append(other)
+    item.status = "rejected"
+    item.reject_reason = reason
+    item.submitted_at = None
+    item.approved_at = None
+    item.doctor_id = None
+    item.doctor_name = None
+    item.document_id = None
+    _push_history(item, "revoked", staff, now, reason=reason, document_id=doc.id if doc else None)
+    _touch(item, now)
+    await recompute(session, order, now)
+    await audit(
+        session,
+        actor_type="staff",
+        actor_id=staff.id,
+        company_id=item.company_id,
+        action="item.revoke",
+        entity="order_item",
+        entity_id=item.id,
+        before={"status": "approved", "documentId": str(doc.id) if doc else None},
+        after={"status": "rejected", "reason": reason, "reopened": [str(x.id) for x in affected[1:]]},
+        ip=meta.ip,
+        request_id=meta.request_id,
+    )
+    return RevokeOut(item=item_out(item), items=[item_out(x) for x in affected], document_id=str(doc.id) if doc else None)
 
 
 async def order_scope_items(
@@ -1184,6 +1273,8 @@ async def approve_order(
         if it in to_approve or it.document_id is None:
             it.document_id = doc.id
             _touch(it, now)
+    for it in to_approve:
+        _push_history(it, "approved", staff, now, document_id=doc.id)
     await recompute(session, order, now)
     if company:
         text = messaging.result_ready_order_text(company, tpl.name, len(to_approve), order.patient_name, order.number, public_result_link(doc, meta), branch=await session.get(Branch, order.branch_id))

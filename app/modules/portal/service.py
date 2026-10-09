@@ -93,8 +93,8 @@ def document_out(d: ResultDocument) -> ResultDocumentOut:
 
 
 def item_out(i: OrderItem) -> OrderItemOut:
-    """`OrderItem` DTO; results (`values`, `labNote`) only once approved."""
-    dto = orders_svc.item_out(i)
+    """`OrderItem` DTO; results (`values`, `labNote`) only once approved; the staff-side trail never."""
+    dto = orders_svc.item_out(i).model_copy(update={"history": []})
     if i.status == "approved":
         return dto
     return dto.model_copy(update={"values": {}, "lab_note": None})

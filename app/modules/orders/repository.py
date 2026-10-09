@@ -272,6 +272,12 @@ async def get_document_by_token(session: AsyncSession, token: str) -> ResultDocu
     return (await session.execute(stmt.limit(1))).scalar_one_or_none()
 
 
+async def document_token_revoked(session: AsyncSession, token: str) -> bool:
+    """The link belongs to a result the doctor took back (it is being corrected)."""
+    stmt = select(ResultDocument.id).where(ResultDocument.public_token == token, ResultDocument.status == "revoked").limit(1)
+    return (await session.execute(stmt)).first() is not None
+
+
 async def order_branch_id(session: AsyncSession, order_id: uuid.UUID) -> uuid.UUID | None:
     """Branch of an order (documents carry no branch of their own)."""
     return (await session.execute(select(Order.branch_id).where(Order.id == order_id))).scalar_one_or_none()

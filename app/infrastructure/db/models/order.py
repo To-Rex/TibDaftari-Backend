@@ -78,6 +78,8 @@ class OrderItem(PKMixin, AuditMixin, SoftDeleteMixin, TenantMixin, Base):
     reject_reason: Mapped[str | None] = mapped_column(Text)
     document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     lab_note: Mapped[str | None] = mapped_column(Text)
+    # the result's trail: [{type: submitted|unsubmitted|returned|approved|revoked|reopened, at, byId, byName, reason?, documentId?}]
+    history: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
 
     __table_args__ = (
         Index("ix_order_items_company_status_created", "company_id", "status", "created_at"),

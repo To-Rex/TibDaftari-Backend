@@ -55,6 +55,19 @@ class OrderOut(CamelModel):
     created_by: str | None = None
 
 
+class ItemEventOut(CamelModel):
+    """One step of a result's trail (newest last)."""
+
+    #: submitted | unsubmitted | returned (sent back before approval) | approved | revoked (approval taken back)
+    #: | reopened (back to approval because a shared order document was revoked)
+    type: str
+    at: str
+    by_id: str | None = None
+    by_name: str | None = None
+    reason: str | None = None
+    document_id: str | None = None
+
+
 class OrderItemOut(CamelModel):
     id: str
     order_id: str
@@ -83,6 +96,7 @@ class OrderItemOut(CamelModel):
     created_at: datetime
     updated_at: datetime
     created_by: str | None = None
+    history: list[ItemEventOut] = Field(default_factory=list)
 
 
 class WorklistItemOut(OrderItemOut):
@@ -209,6 +223,14 @@ class PayIn(CamelModel):
 
 class ReasonIn(CamelModel):
     reason: str = Field(default="", max_length=2000)
+
+
+class RevokeOut(CamelModel):
+    """The result taken back (now `rejected`), every item whose state changed, and the withdrawn document."""
+
+    item: OrderItemOut
+    items: list[OrderItemOut]
+    document_id: str | None = None
 
 
 class SaveValuesIn(CamelModel):

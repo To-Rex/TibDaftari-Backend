@@ -129,6 +129,17 @@ if status != cancelled: status = completed if (active and all approved) else ope
 * `listDocuments({orderId?, patientId?})` scoped to caller's company (**FIX**); patientId → documents of that patient's orders (all statuses); sort createdAt desc. `getDocument(id)`: company-scoped 404.
 * `GET documents/{id}/pdf` → stored PDF (render on demand if missing).
 
+* **Result trail (2026-10):** `order_items.history` = `[{type, at, byId, byName, reason?, documentId?}]`, oldest first:
+  `submitted` / `unsubmitted` (lab toggles), `returned` (doctor sends a submitted result back, reason), `approved`
+  (documentId), `revoked` (doctor takes an approved result back, reason, documentId), `reopened` (an approved item went
+  back to approval because the order-scope document it shared was revoked). Items from before have their trail rebuilt
+  from `submittedAt` / `approvedAt` / `rejectReason` until their next event. The portal never gets the trail.
+* **Revoke (`POST /items/{id}/revoke {reason}`, confirm.result.approve, reason required):** approved → `rejected` with
+  `rejectReason`; approvedAt / doctor / documentId / submittedAt cleared; the document gets `status = revoked` and is
+  soft-deleted (PDF link, portal, reports drop it; the public link answers 410 `revoked`); approved items sharing that
+  order-scope document → `submitted` (`reopened`). The lab corrects and submits again; approval issues a new document
+  and a new SMS.
+
 ## 8. Messaging / notifications
 * `listOutbox`: status/kind exact; search: to contains digits (only when digits present) OR fold(text); sort createdAt desc fixed.
 * `send({to[], text, kind, scheduledAt?})`: one message per recipient (normalise phones, dedupe); status scheduled if scheduledAt future else queued; channel sms; permission messaging.send, >1 recipient requires messaging.broadcast. Real dispatch by the outbox worker → Xabarchi `POST /api/v1/public/messages` (X-API-Key) with the company key; provider id stored; retries with backoff (max attempts) → failed with error text.

@@ -32,6 +32,7 @@ from app.modules.orders.schemas import (
     ResultDocumentOut,
     ResultSmsIn,
     ResultSmsOut,
+    RevokeOut,
     SaveValuesIn,
     WorklistCountsOut,
     WorklistItemOut,
@@ -206,6 +207,12 @@ async def approve_item(
     return await service.approve_item(session, item_id, staff, body or ApproveItemIn(), meta)
 
 
+@router.post("/items/{item_id}/revoke", response_model=RevokeOut, summary="Take back an approved result: withdraw its document, send it back to the lab")
+async def revoke_item(item_id: uuid.UUID, body: ReasonIn, staff: Staff, session: DbSession, meta: Meta) -> RevokeOut:
+    staff.require("confirm.result.approve")
+    return await service.revoke_item(session, item_id, staff, body.reason, meta)
+
+
 @router.post("/items/{item_id}/reject", response_model=OrderItemOut, summary="Send a submitted result back to the lab")
 async def reject_item(item_id: uuid.UUID, body: ReasonIn, staff: Staff, session: DbSession, meta: Meta) -> OrderItemOut:
     staff.require("confirm.result.approve")
@@ -284,6 +291,9 @@ async def document_pdf(document_id: uuid.UUID, staff: Staff, session: DbSession)
 async def public_document_pdf(token: str, session: DbSession) -> StarletteResponse:
     doc = await repo.get_document_by_token(session, token) if 16 <= len(token) <= 64 else None
     if not doc:
+        if 16 <= len(token) <= 64 and await repo.document_token_revoked(session, token):
+            # the doctor took this result back to correct it — the patient gets the corrected one later
+            raise NotFoundError("Natija qayta ko‘rib chiqilmoqda", code="revoked", status=410)
         raise NotFoundError(service.DOC_NOT_FOUND)
     pdf = await service.ensure_document_pdf(session, doc)
     await service.mark_document_viewed(session, doc)  # the patient got it ("results received" reports)
