@@ -220,12 +220,19 @@ class AddItemsIn(CamelModel):
     service_type_ids: list[str] = Field(min_length=1, max_length=200)
 
 
+class PayPartIn(CamelModel):
+    method: PaymentMethod
+    amount: int = Field(gt=0)
+
+
 class PayIn(CamelModel):
-    """`PayOrderInput` minus `orderId` (taken from the path)."""
+    """`PayOrderInput` minus `orderId` (taken from the path). `parts` = one payment split over several methods
+    (their sum must equal `amount`); without it the whole `amount` is paid by `method`."""
 
     amount: int
     method: PaymentMethod
     send_sms: bool = False
+    parts: list[PayPartIn] | None = Field(default=None, max_length=8)
 
 
 class ReasonIn(CamelModel):

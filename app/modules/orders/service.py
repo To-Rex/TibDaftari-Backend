@@ -658,6 +658,17 @@ async def _telegram_push(
         )
 
 
+def payment_parts(body: PayIn) -> list[tuple[str, int]]:
+    """(method, amount) per method of one payment action: the split parts (same method summed, order kept) or the
+    single `method` with the whole `amount`."""
+    if not body.parts:
+        return [(body.method, body.amount)]
+    merged: dict[str, int] = {}
+    for part in body.parts:
+        merged[part.method] = merged.get(part.method, 0) + part.amount
+    return list(merged.items())
+
+
 async def pay(
     session: AsyncSession, order_id: uuid.UUID, staff: StaffPrincipal, body: PayIn, meta: RequestMeta
 ) -> OrderPaymentsOut:
@@ -668,29 +679,38 @@ async def pay(
     if order.payment == "paid":
         raise ConflictError("Chek allaqachon to‘langan", code="already_paid")
     remaining = order.total - order.paid_amount
-    if body.amount <= 0 or body.amount > remaining:
+    parts = payment_parts(body)
+    amount = sum(a for _, a in parts)
+    if body.parts and amount != body.amount:
+        raise ValidationError("To‘lov qismlarining yig‘indisi summaga teng emas", code="parts")
+    if amount <= 0 or amount > remaining:
         raise ValidationError(f"Summa 1 – {remaining} oralig‘ida bo‘lishi kerak", code="amount")
     now = utcnow()
-    payment = Payment(
-        order_id=order.id,
-        company_id=order.company_id,
-        branch_id=order.branch_id,
-        amount=body.amount,
-        method=body.method,
-        employee_id=staff.id,
-        created_by=staff.id,
-        created_at=now,
-        updated_at=now,
-    )
-    session.add(payment)
+    # one row per method — a split payment (part cash, part card…) is still one action: one SMS, one audit entry
+    payments = [
+        Payment(
+            order_id=order.id,
+            company_id=order.company_id,
+            branch_id=order.branch_id,
+            amount=part_amount,
+            method=method,
+            employee_id=staff.id,
+            created_by=staff.id,
+            created_at=now,
+            updated_at=now,
+        )
+        for method, part_amount in parts
+    ]
+    session.add_all(payments)
+    payment = payments[0]
     await recompute(session, order, now)
     patient = await repo.get_patient(session, order.patient_id, order.company_id)
     if patient:
-        await repo.bump_patient_stats(session, patient.id, spent=body.amount, now=now)
+        await repo.bump_patient_stats(session, patient.id, spent=amount, now=now)
     company = await repo.get_company(session, order.company_id)
     if company:
         text = messaging.payment_receipt_text(
-            company, order.number, body.amount, order.patient_name, branch=await session.get(Branch, order.branch_id),
+            company, order.number, amount, order.patient_name, branch=await session.get(Branch, order.branch_id),
             total=order.total, remaining=max(0, order.total - order.paid_amount),  # after this payment
         )
         if body.send_sms:
@@ -722,7 +742,7 @@ async def pay(
         action="order.pay",
         entity="payment",
         entity_id=payment.id,
-        after={"orderId": str(order.id), "amount": body.amount, "method": body.method, "payment": order.payment},
+        after={"orderId": str(order.id), "amount": amount, "method": parts[0][0], "parts": [{"method": m, "amount": a} for m, a in parts], "payment": order.payment},
         ip=meta.ip,
         request_id=meta.request_id,
     )
