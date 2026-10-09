@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from app.modules.orders.service import _push_history, item_history
+from app.modules.orders.service import _push_history, _seed_history, item_history
 
 T1 = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
 T2 = datetime(2026, 10, 1, 10, 30, tzinfo=UTC)
@@ -33,6 +33,8 @@ def test_legacy_trail_is_rebuilt_from_timestamps() -> None:
 
 def test_new_events_keep_the_legacy_trail() -> None:
     it = _item(status="approved", submitted_at=T1, approved_at=T2, doctor_name="Dr Aliyev", document_id=DOC)
+    _seed_history(it)  # before the state changes
+    it.status, it.approved_at, it.reject_reason = "rejected", None, "Birlik noto‘g‘ri"
     _push_history(it, "revoked", DOCTOR, T3, reason="Birlik noto‘g‘ri", document_id=DOC)
     assert [e["type"] for e in it.history] == ["submitted", "approved", "revoked"]
     last = it.history[-1]
@@ -53,3 +55,15 @@ def test_many_returns_and_submissions_are_all_kept() -> None:
     types = [e["type"] for e in it.history]
     assert types.count("submitted") == 4 and types.count("returned") == 3 and types[-1] == "approved"
     assert [e.get("reason") for e in it.history if e["type"] == "returned"] == ["xato 1", "xato 2", "xato 3"]
+
+
+def test_first_event_is_not_doubled() -> None:
+    # a fresh item: seeding before the change finds nothing, the new step is stored once
+    it = _item()
+    _seed_history(it)
+    it.status, it.submitted_at = "submitted", T1
+    _push_history(it, "submitted", DOCTOR, T1)
+    assert [e["type"] for e in it.history] == ["submitted"]
+    # a trail stored by the first release (rebuilt step + identical new step) is shown once
+    dup = _item(history=[{"type": "submitted", "at": "2026-10-01T09:00:00.000Z", "byName": "Laborant"}, {"type": "submitted", "at": "2026-10-01T09:00:00.000Z", "byName": "Laborant"}, {"type": "approved", "at": "2026-10-01T10:30:00.000Z"}])
+    assert [e["type"] for e in item_history(dup)] == ["submitted", "approved"]

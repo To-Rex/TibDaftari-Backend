@@ -192,8 +192,23 @@ def _legacy_history(i: OrderItem) -> list[dict[str, Any]]:
 
 
 def item_history(i: OrderItem) -> list[dict[str, Any]]:
-    """The item's result trail, oldest first."""
-    return list(i.history) if i.history else _legacy_history(i)
+    """The item's result trail, oldest first. A rebuilt step stored right before the identical new one (same type and
+    time — the first release of the trail did that) is shown once."""
+    events = list(i.history) if i.history else _legacy_history(i)
+    out: list[dict[str, Any]] = []
+    for e in events:
+        if out and isinstance(e, dict) and e.get("type") == out[-1].get("type") and e.get("at") == out[-1].get("at"):
+            continue
+        out.append(e)
+    return out
+
+
+def _seed_history(i: OrderItem) -> None:
+    """Call BEFORE an item's state changes: an item from before the trail keeps what its timestamps tell."""
+    if not i.history:
+        legacy = _legacy_history(i)
+        if legacy:
+            i.history = legacy
 
 
 def _push_history(i: OrderItem, kind: str, staff: StaffPrincipal, now: datetime, *, reason: str | None = None, document_id: uuid.UUID | str | None = None) -> None:
@@ -202,7 +217,7 @@ def _push_history(i: OrderItem, kind: str, staff: StaffPrincipal, now: datetime,
         event["reason"] = reason
     if document_id:
         event["documentId"] = str(document_id)
-    i.history = [*item_history(i), event]  # reassign → the JSONB change is tracked
+    i.history = [*(i.history or []), event]  # reassign → the JSONB change is tracked
 
 
 def payment_out(p: Payment) -> PaymentOut:
@@ -897,6 +912,7 @@ async def submit_item(
     if missing:
         raise ValidationError("To‘ldirilmagan: " + ", ".join(str(m) for m in missing), code="required")
     now = utcnow()
+    _seed_history(item)
     if item.status == "submitted":
         item.status = "entered"
         item.submitted_at = None
@@ -931,6 +947,7 @@ async def reject_item(
     if item.status != "submitted":
         raise StateError("Faqat yuborilgan natijani qaytarish mumkin", code="state")
     now = utcnow()
+    _seed_history(item)
     item.status = "rejected"
     item.reject_reason = reason or None
     item.submitted_at = None
@@ -1117,6 +1134,7 @@ async def approve_item(
         raise StateError("Faqat yuborilgan natijani tasdiqlash mumkin", code="state")
     template = await _resolve_item_template(session, item, body.template_id)
     now = utcnow()
+    _seed_history(item)
     item.status = "approved"
     item.doctor_id = staff.id
     item.doctor_name = staff.employee.full_name
@@ -1170,6 +1188,7 @@ async def revoke_item(session: AsyncSession, item_id: uuid.UUID, staff: StaffPri
     if item.status != "approved":
         raise StateError("Faqat tasdiqlangan natijani bekor qilish mumkin", code="state")
     now = utcnow()
+    _seed_history(item)
     doc = await repo.get_document(session, item.document_id, item.company_id) if item.document_id else None
     affected: list[OrderItem] = [item]
     if doc is not None:
@@ -1180,6 +1199,7 @@ async def revoke_item(session: AsyncSession, item_id: uuid.UUID, staff: StaffPri
         if doc.order_item_ids:
             for other in await repo.items_of_order(session, order.id):
                 if other.id != item.id and other.document_id == doc.id and other.status == "approved":
+                    _seed_history(other)
                     other.status = "submitted"
                     other.approved_at = None
                     other.doctor_id = None
@@ -1253,6 +1273,7 @@ async def approve_order(
         ensure_category_access(it, allowed)
     now = utcnow()
     for it in to_approve:
+        _seed_history(it)
         it.status = "approved"
         it.doctor_id = staff.id
         it.doctor_name = staff.employee.full_name
