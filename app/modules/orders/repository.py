@@ -45,6 +45,9 @@ ORDER_SORTABLE: dict[str, Any] = {
     "remaining": Order.total - Order.paid_amount,
     "itemCount": Order.item_count,
     "discountAmount": Order.discount_amount,
+    "discountPercent": Order.discount_percent,
+    # when every result was ready (cheques not completed yet sort last)
+    "completedAt": Order.completed_at,
 }
 
 WORKLIST_SORTABLE: dict[str, Any] = {
@@ -220,7 +223,75 @@ def order_conditions(company_id: uuid.UUID, q: OrderListQuery, branches: list[uu
         conds.append(exists().where(live_item, OrderItem.category_id.in_(parse_uuids(q.category_ids))))
     if q.created_by:
         conds.append(Order.created_by_employee_id == to_uuid(q.created_by))
+    approved = exists().where(live_item, OrderItem.status == "approved")
+    not_ready = exists().where(live_item, OrderItem.status != "approved")
+    if q.results == "ready":
+        conds.append(and_(approved, ~not_ready))
+    elif q.results == "partial":
+        conds.append(and_(approved, not_ready))
+    elif q.results == "none":
+        conds.append(~approved)
+    if q.min_items is not None:
+        conds.append(Order.item_count >= q.min_items)
+    if q.max_items is not None:
+        conds.append(Order.item_count <= q.max_items)
+    refunds = exists().where(Payment.order_id == Order.id, alive(Payment), Payment.refunded_at.is_not(None))
+    if q.refunded is True:
+        conds.append(refunds)
+    elif q.refunded is False:
+        conds.append(~refunds)
     return conds
+
+
+def _chunks(ids: list[uuid.UUID], size: int = 2000) -> Iterable[list[uuid.UUID]]:
+    for i in range(0, len(ids), size):
+        yield ids[i : i + size]
+
+
+async def payments_by_order(session: AsyncSession, order_ids: list[uuid.UUID]) -> dict[uuid.UUID, dict[str, int]]:
+    """order → {method: Σ non-refunded payments}."""
+    out: dict[uuid.UUID, dict[str, int]] = {}
+    for part in _chunks(order_ids):
+        rows = (
+            await session.execute(
+                select(Payment.order_id, Payment.method, func.coalesce(func.sum(Payment.amount), 0))
+                .where(Payment.order_id.in_(part), alive(Payment), Payment.refunded_at.is_(None))
+                .group_by(Payment.order_id, Payment.method)
+            )
+        ).all()
+        for oid, method, amount in rows:
+            out.setdefault(oid, {})[str(method)] = int(amount)
+    return out
+
+
+async def service_names_by_order(session: AsyncSession, order_ids: list[uuid.UUID]) -> dict[uuid.UUID, list[str]]:
+    """order → names of its non-cancelled services (cheque order)."""
+    out: dict[uuid.UUID, list[str]] = {}
+    for part in _chunks(order_ids):
+        rows = (
+            await session.execute(
+                select(OrderItem.order_id, OrderItem.service_name)
+                .where(OrderItem.order_id.in_(part), alive(OrderItem), OrderItem.status != "cancelled")
+                .order_by(OrderItem.order_id, OrderItem.created_at, OrderItem.id)
+            )
+        ).all()
+        for oid, name in rows:
+            out.setdefault(oid, []).append(name)
+    return out
+
+
+async def export_orders(session: AsyncSession, company_id: uuid.UUID, q: OrderListQuery, branches: list[uuid.UUID] | None, limit: int) -> tuple[list[Row[Any]], bool]:
+    """Every cheque the list's filters select, in the list's order (+ who opened it, branch) — at most `limit`."""
+    stmt = (
+        select(Order, Employee.full_name.label("creator"), Branch.name.label("branch"))
+        .outerjoin(Employee, Employee.id == Order.created_by_employee_id)
+        .outerjoin(Branch, Branch.id == Order.branch_id)
+        .where(*order_conditions(company_id, q, branches))
+        .order_by(sort_clause(q.sort_by, q.sort_dir, ORDER_SORTABLE, "createdAt"), Order.id.desc())
+        .limit(limit + 1)
+    )
+    rows = list((await session.execute(stmt)).all())
+    return rows[:limit], len(rows) > limit
 
 
 async def orders_summary(session: AsyncSession, company_id: uuid.UUID, q: OrderListQuery, branches: list[uuid.UUID] | None = None) -> dict[str, Any]:

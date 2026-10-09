@@ -51,6 +51,7 @@ from app.infrastructure.redis import cache
 from app.infrastructure.redis.client import get_redis
 from app.modules.files import service as files_svc
 from app.modules.messaging import service as messaging
+from app.modules.orders import export as order_export
 from app.modules.orders import repository as repo
 from app.modules.orders.schemas import (
     AddItemsIn,
@@ -61,7 +62,9 @@ from app.modules.orders.schemas import (
     CreateOrderIn,
     DocumentDeliveryOut,
     ItemEventOut,
+    MethodSumOut,
     OrderBundleOut,
+    OrderExportQuery,
     OrderItemOut,
     OrderItemsOut,
     OrderListQuery,
@@ -431,7 +434,24 @@ async def recompute(session: AsyncSession, order: Order, now: datetime | None = 
 async def list_orders(session: AsyncSession, company_id: uuid.UUID, q: OrderListQuery, staff: StaffPrincipal | None = None) -> Page[OrderOut]:
     """Paged company orders, confined to the caller's branch scope."""
     rows, total = await repo.list_orders(session, company_id, q, staff.branch_scope(q.branch_id) if staff else None)
-    return page_of([order_out(o) for o in rows], q, total)
+    paid = await repo.payments_by_order(session, [o.id for o in rows])
+    return page_of([_with_methods(order_out(o), paid.get(o.id, {})) for o in rows], q, total)
+
+
+def _with_methods(dto: OrderOut, by_method: dict[str, int]) -> OrderOut:
+    return dto.model_copy(update={"payments_by_method": [MethodSumOut(method=m, amount=a) for m, a in sorted(by_method.items(), key=lambda x: -x[1])]})  # type: ignore[arg-type]
+
+
+async def export_orders_xlsx(session: AsyncSession, company_id: uuid.UUID, q: OrderExportQuery, staff: StaffPrincipal | None = None) -> tuple[bytes, str, int]:
+    """The cheques the list's filters + sort select, as an Excel workbook (bytes, file name, rows)."""
+    rows, truncated = await repo.export_orders(session, company_id, q, staff.branch_scope(q.branch_id) if staff else None, order_export.EXPORT_LIMIT)
+    ids = [r.Order.id for r in rows]
+    data = order_export.build_xlsx(
+        rows, await repo.payments_by_order(session, ids), await repo.service_names_by_order(session, ids),
+        lang=q.lang, caption=q.caption, truncated=truncated, generated_at=utcnow(),
+    )
+    stamp = (q.date_from or "") + ("_" + q.date_to if q.date_to and q.date_to != q.date_from else "")
+    return data, f"cheklar{'-' + stamp if stamp else ''}.xlsx", len(rows)
 
 
 async def orders_summary(session: AsyncSession, company_id: uuid.UUID, q: OrderListQuery, staff: StaffPrincipal | None = None) -> OrderSummaryOut:

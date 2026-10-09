@@ -29,6 +29,11 @@ class ProgressOut(CamelModel):
     cancelled: int = 0
 
 
+class MethodSumOut(CamelModel):
+    method: PaymentMethod
+    amount: int
+
+
 class OrderOut(CamelModel):
     id: str
     company_id: str
@@ -53,6 +58,8 @@ class OrderOut(CamelModel):
     created_at: datetime
     updated_at: datetime
     created_by: str | None = None
+    #: non-refunded payments by method (filled in the cheque list)
+    payments_by_method: list[MethodSumOut] = Field(default_factory=list)
 
 
 class ItemEventOut(CamelModel):
@@ -270,11 +277,19 @@ class OrderListQuery(PageQuery):
     category_ids: list[str] = Field(default_factory=list, max_length=500)
     #: the employee who opened the cheque
     created_by: str | None = None
+    #: results: ready = every service approved; partial = some; none = none yet
+    results: Literal["ready", "partial", "none"] | None = None
+    min_items: int | None = Field(default=None, ge=0)
+    max_items: int | None = Field(default=None, ge=0)
+    #: True: has a refunded payment; False: none
+    refunded: bool | None = None
 
 
-class MethodSumOut(CamelModel):
-    method: PaymentMethod
-    amount: int
+class OrderExportQuery(OrderListQuery):
+    """The list's filters + sort; `caption` = the filters as the user sees them (written above the table)."""
+
+    lang: Literal["uz", "ru", "en"] = "uz"
+    caption: str | None = Field(default=None, max_length=600)
 
 
 class CashierOut(CamelModel):

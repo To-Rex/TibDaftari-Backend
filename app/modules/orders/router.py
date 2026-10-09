@@ -21,6 +21,7 @@ from app.modules.orders.schemas import (
     ApproveOrderOut,
     CreateOrderIn,
     OrderBundleOut,
+    OrderExportQuery,
     OrderItemOut,
     OrderItemsOut,
     OrderListQuery,
@@ -67,6 +68,18 @@ def _pdf_response(pdf: bytes, filename: str) -> Response:
 
 
 # ----------------------------------------------------------------------------- orders
+
+
+@router.get("/companies/{company_id}/orders/export.xlsx", summary="The filtered + sorted cheques as an Excel workbook", response_class=Response,
+            responses={200: {"content": {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {}}}})
+async def export_orders(company_id: uuid.UUID, q: Annotated[OrderExportQuery, Query()], staff: Staff, session: DbSession) -> Response:
+    staff.require(*ORDER_READ).scope(company_id)
+    data, filename, count = await service.export_orders_xlsx(session, company_id, q, staff)
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store", "X-Export-Count": str(count)},
+    )
 
 
 @router.get("/companies/{company_id}/orders/summary", response_model=OrderSummaryOut, summary="The filtered cheques at a glance (same filters as the list)")
