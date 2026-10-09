@@ -238,6 +238,15 @@ class _Renderer:
             lines.append((cur, True))
         return lines
 
+    def clamp_lines(self, lines: list[tuple[str, bool]], n: int, width: float) -> list[tuple[str, bool]]:
+        """CSS line-clamp: the first `n` wrapped lines, the last one shortened until "…" fits (current font)."""
+        kept = list(lines[:n])
+        last = kept[-1][0].rstrip()
+        while last and self.sw(last + "…") > width + 0.01:
+            last = last[:-1].rstrip()
+        kept[-1] = (last + "…", True)
+        return kept
+
     def draw_line(self, x: float, width: float, baseline: float, line: str, align: str, justify: bool) -> None:
         """One laid-out line inside [x, x+width] honouring align (justify only when `justify`)."""
         vis = line.rstrip()
@@ -589,6 +598,12 @@ class _Renderer:
         cell_st = _style(el.get("cellStyle"))
         row_h_min = _num(el.get("rowHeight"), 22)
         nowrap = bool(el.get("nowrap"))
+        # multi-line cells: every data row keeps room for at least `minLines` text lines, and a cell shows at most
+        # `maxLines` (longer text ends with "…"); 0 = as many lines as the text needs. Single-line cells ignore both.
+        min_lines = 0 if nowrap else max(0, int(_num(el.get("minLines"))))
+        max_lines = 0 if nowrap else max(0, int(_num(el.get("maxLines"))))
+        if max_lines and max_lines < min_lines:
+            max_lines = min_lines
         grow = bool(el.get("grow"))  # every row is drawn, the box height is only the designer's estimate
         bw = _num(el.get("borderWidth"), 1)
         bcolor = parse_color(el.get("borderColor")) or (195, 206, 201)
@@ -624,7 +639,9 @@ class _Renderer:
             return (", ".join(ex.fmt(i) for i in v) if isinstance(v, list) else ex.fmt(v)), False
 
         # --- layout: compute row heights first (text wraps grow rows), then draw within the clip
-        def row_height(cells: list[tuple[str, str]], st: dict[str, Any], pad_v: float, weights: list[int | None], *, single: bool = False) -> tuple[float, list[list[tuple[str, bool]]]]:
+        def row_height(
+            cells: list[tuple[str, str]], st: dict[str, Any], pad_v: float, weights: list[int | None], *, single: bool = False, lines_min: int = 0, lines_max: int = 0
+        ) -> tuple[float, list[list[tuple[str, bool]]]]:
             # single-line rows (el.nowrap): no wrapping, no vertical padding — a row is exactly rowHeight unless the font is taller
             self.set_font(st)
             _, lh, _ = self.metrics(st)
@@ -632,9 +649,12 @@ class _Renderer:
             best = row_h_min
             for (text, _align), cw, wt in zip(cells, widths, weights, strict=False):
                 self.set_font(st, weight=wt)
-                lines = [(text, True)] if single else (self.wrap(text, max(0.0, cw - 12)) if text else [("", True)])
+                inner = max(0.0, cw - 12)
+                lines = [(text, True)] if single else (self.wrap(text, inner) if text else [("", True)])
+                if lines_max and len(lines) > lines_max:
+                    lines = self.clamp_lines(lines, lines_max, inner)
                 wrapped.append(lines)
-                best = max(best, len(lines) * lh + (0.0 if single else 2 * pad_v))
+                best = max(best, max(len(lines), lines_min) * lh + (0.0 if single else 2 * pad_v))
             return best, wrapped
 
         # header cells follow the column alignment unless the header style asks for centre/right explicitly
@@ -696,7 +716,7 @@ class _Renderer:
                 formatted = [fmt_cell(r, key_of(c, ci)) for ci, c in enumerate(cols_def)]
                 cells = [(t, str(c.get("align") or "left")) for (t, _), c in zip(formatted, cols_def, strict=True)]
                 abn = [a and highlight for _, a in formatted]
-                rh, wrapped = row_height(cells, cell_st, 3.0, [600 if a else None for a in abn], single=nowrap)
+                rh, wrapped = row_height(cells, cell_st, 3.0, [600 if a else None for a in abn], single=nowrap, lines_min=min_lines, lines_max=max_lines)
                 if zebra is not None and i % 2 == 1:
                     self.fill_rect(x, cy, w, rh, zebra)
                 fx = x + num_w
