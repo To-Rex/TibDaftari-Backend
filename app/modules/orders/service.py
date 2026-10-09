@@ -67,6 +67,7 @@ from app.modules.orders.schemas import (
     OrderListQuery,
     OrderOut,
     OrderPaymentsOut,
+    OrderSummaryOut,
     PayIn,
     PaymentOut,
     ProgressOut,
@@ -431,6 +432,12 @@ async def list_orders(session: AsyncSession, company_id: uuid.UUID, q: OrderList
     """Paged company orders, confined to the caller's branch scope."""
     rows, total = await repo.list_orders(session, company_id, q, staff.branch_scope(q.branch_id) if staff else None)
     return page_of([order_out(o) for o in rows], q, total)
+
+
+async def orders_summary(session: AsyncSession, company_id: uuid.UUID, q: OrderListQuery, staff: StaffPrincipal | None = None) -> OrderSummaryOut:
+    """The list's filters at a glance (same branch scope as the list)."""
+    data = await repo.orders_summary(session, company_id, q, staff.branch_scope(q.branch_id) if staff else None)
+    return OrderSummaryOut.model_validate(data)
 
 
 # ----------------------------------------------------------------------------- create / items

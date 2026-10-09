@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import ColumnElement, Row, Select, String, case, false, func, or_, select, update
+from sqlalchemy import ColumnElement, Row, Select, String, and_, case, exists, false, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.pagination import paginate_query, sort_clause
@@ -41,6 +41,10 @@ ORDER_SORTABLE: dict[str, Any] = {
     "payment": Order.payment,
     "patientName": Order.patient_name,
     "paidAmount": Order.paid_amount,
+    # still to pay; the number of services; the discount
+    "remaining": Order.total - Order.paid_amount,
+    "itemCount": Order.item_count,
+    "discountAmount": Order.discount_amount,
 }
 
 WORKLIST_SORTABLE: dict[str, Any] = {
@@ -170,26 +174,95 @@ async def list_orders(session: AsyncSession, company_id: uuid.UUID, q: OrderList
     """Filtered + paged orders of one company (DOMAIN_RULES section 7 `list`).
 
     `branches` is the caller's branch scope (StaffPrincipal.branch_scope); without it `q.branch_id` applies as is."""
-    stmt: Select = select(Order).where(Order.company_id == company_id, alive(Order))
-    scope = branches if branches is not None else ([to_uuid(q.branch_id)] if q.branch_id else None)
-    if scope is not None:
-        stmt = stmt.where(Order.branch_id.in_(scope))
-    if q.status:
-        stmt = stmt.where(Order.status == q.status)
-    if q.payment:
-        stmt = stmt.where(Order.payment == q.payment)
-    if q.patient_id:
-        stmt = stmt.where(Order.patient_id == to_uuid(q.patient_id))
-    start, end = day_range(q.date_from, q.date_to)
-    if start:
-        stmt = stmt.where(Order.created_at >= start)
-    if end:
-        stmt = stmt.where(Order.created_at < end)
-    pred = _order_search(q.search)
-    if pred is not None:
-        stmt = stmt.where(pred)
+    stmt: Select = select(Order).where(*order_conditions(company_id, q, branches))
     order_by = [sort_clause(q.sort_by, q.sort_dir, ORDER_SORTABLE, "createdAt"), Order.id.desc()]
     return await paginate_query(session, stmt, q, order_by=order_by)
+
+
+def order_conditions(company_id: uuid.UUID, q: OrderListQuery, branches: list[uuid.UUID] | None = None) -> list[ColumnElement[bool]]:
+    """WHERE clauses of the cheque list (shared by the list and its summary)."""
+    conds: list[ColumnElement[bool]] = [Order.company_id == company_id, alive(Order)]
+    scope = branches if branches is not None else ([to_uuid(q.branch_id)] if q.branch_id else None)
+    if scope is not None:
+        conds.append(Order.branch_id.in_(scope))
+    if q.status:
+        conds.append(Order.status == q.status)
+    if q.payment:
+        conds.append(Order.payment == q.payment)
+    if q.patient_id:
+        conds.append(Order.patient_id == to_uuid(q.patient_id))
+    start, end = day_range(q.date_from, q.date_to)
+    if start:
+        conds.append(Order.created_at >= start)
+    if end:
+        conds.append(Order.created_at < end)
+    pred = _order_search(q.search)
+    if pred is not None:
+        conds.append(pred)
+    if q.methods:
+        conds.append(exists().where(Payment.order_id == Order.id, alive(Payment), Payment.refunded_at.is_(None), Payment.method.in_(q.methods)))
+    if q.min_total is not None:
+        conds.append(Order.total >= q.min_total)
+    if q.max_total is not None:
+        conds.append(Order.total <= q.max_total)
+    if q.debt is True:
+        conds.append(and_(Order.status != "cancelled", Order.paid_amount < Order.total))
+    elif q.debt is False:
+        conds.append(or_(Order.status == "cancelled", Order.paid_amount >= Order.total))
+    if q.discount is True:
+        conds.append(Order.discount_amount > 0)
+    elif q.discount is False:
+        conds.append(Order.discount_amount == 0)
+    live_item = and_(OrderItem.order_id == Order.id, alive(OrderItem), OrderItem.status != "cancelled")
+    if q.service_type_id:
+        conds.append(exists().where(live_item, OrderItem.service_type_id == to_uuid(q.service_type_id)))
+    if q.category_ids:
+        conds.append(exists().where(live_item, OrderItem.category_id.in_(parse_uuids(q.category_ids))))
+    if q.created_by:
+        conds.append(Order.created_by_employee_id == to_uuid(q.created_by))
+    return conds
+
+
+async def orders_summary(session: AsyncSession, company_id: uuid.UUID, q: OrderListQuery, branches: list[uuid.UUID] | None = None) -> dict[str, Any]:
+    """Count + money (non-cancelled) of the filtered cheques, their payments by method, and who opened them."""
+    conds = order_conditions(company_id, q, branches)
+    live = Order.status != "cancelled"
+    row = (
+        await session.execute(
+            select(
+                func.count().label("count"),
+                func.coalesce(func.sum(case((live, Order.total), else_=0)), 0).label("total"),
+                func.coalesce(func.sum(case((live, Order.paid_amount), else_=0)), 0).label("paid"),
+                func.coalesce(func.sum(case((live, func.greatest(Order.total - Order.paid_amount, 0)), else_=0)), 0).label("debt"),
+            ).where(*conds)
+        )
+    ).one()
+    methods = (
+        await session.execute(
+            select(Payment.method, func.coalesce(func.sum(Payment.amount), 0))
+            .where(Payment.order_id.in_(select(Order.id).where(*conds)), alive(Payment), Payment.refunded_at.is_(None))
+            .group_by(Payment.method)
+        )
+    ).all()
+    n = func.count()
+    cashiers = (
+        await session.execute(
+            select(Order.created_by_employee_id, func.max(Employee.full_name), n)
+            .outerjoin(Employee, Employee.id == Order.created_by_employee_id)
+            .where(*order_conditions(company_id, q.model_copy(update={"created_by": None}), branches))
+            .group_by(Order.created_by_employee_id)
+            .order_by(n.desc())
+            .limit(50)
+        )
+    ).all()
+    return {
+        "count": int(row.count),
+        "total": int(row.total),
+        "paid": int(row.paid),
+        "debt": int(row.debt),
+        "methods": [{"method": m, "amount": int(a)} for m, a in methods],
+        "cashiers": [{"id": str(eid), "name": name or "—", "count": int(c)} for eid, name, c in cashiers if eid is not None],
+    }
 
 
 # ----------------------------------------------------------------------------- worklist

@@ -257,6 +257,42 @@ class OrderListQuery(PageQuery):
     date_from: str | None = Field(default=None, max_length=10)
     date_to: str | None = Field(default=None, max_length=10)
     patient_id: str | None = None
+    #: cheques with a (non-refunded) payment of any of these methods
+    methods: list[PaymentMethod] = Field(default_factory=list, max_length=4)
+    min_total: int | None = Field(default=None, ge=0)
+    max_total: int | None = Field(default=None, ge=0)
+    #: True: something is still to pay (non-cancelled, paid < total); False: nothing is
+    debt: bool | None = None
+    #: True: with a discount; False: without
+    discount: bool | None = None
+    #: cheques with a non-cancelled item of this service / of one of these categories
+    service_type_id: str | None = None
+    category_ids: list[str] = Field(default_factory=list, max_length=500)
+    #: the employee who opened the cheque
+    created_by: str | None = None
+
+
+class MethodSumOut(CamelModel):
+    method: PaymentMethod
+    amount: int
+
+
+class CashierOut(CamelModel):
+    id: str
+    name: str
+    count: int
+
+
+class OrderSummaryOut(CamelModel):
+    """The filtered cheques at a glance: money over the non-cancelled ones, payments by method, and who opened
+    them (the latter ignores the `createdBy` filter so it can offer every option)."""
+
+    count: int
+    total: int
+    paid: int
+    debt: int
+    methods: list[MethodSumOut]
+    cashiers: list[CashierOut]
 
 
 class WorklistCountsOut(CamelModel):

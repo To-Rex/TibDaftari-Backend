@@ -26,6 +26,7 @@ from app.modules.orders.schemas import (
     OrderListQuery,
     OrderOut,
     OrderPaymentsOut,
+    OrderSummaryOut,
     PayIn,
     PrintedOut,
     ReasonIn,
@@ -66,6 +67,12 @@ def _pdf_response(pdf: bytes, filename: str) -> Response:
 
 
 # ----------------------------------------------------------------------------- orders
+
+
+@router.get("/companies/{company_id}/orders/summary", response_model=OrderSummaryOut, summary="The filtered cheques at a glance (same filters as the list)")
+async def orders_summary(company_id: uuid.UUID, q: Annotated[OrderListQuery, Query()], staff: Staff, session: DbSession) -> OrderSummaryOut:
+    staff.require(*ORDER_READ).scope(company_id)
+    return await service.orders_summary(session, company_id, q, staff)
 
 
 @router.get(
