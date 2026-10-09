@@ -618,7 +618,10 @@ async def pay(
         await repo.bump_patient_stats(session, patient.id, spent=body.amount, now=now)
     company = await repo.get_company(session, order.company_id)
     if company:
-        text = messaging.payment_receipt_text(company, order.number, body.amount, order.patient_name, branch=await session.get(Branch, order.branch_id))
+        text = messaging.payment_receipt_text(
+            company, order.number, body.amount, order.patient_name, branch=await session.get(Branch, order.branch_id),
+            total=order.total, remaining=max(0, order.total - order.paid_amount),  # after this payment
+        )
         if body.send_sms:
             await messaging.enqueue_sms_if_configured(
                 session,

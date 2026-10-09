@@ -160,7 +160,8 @@ if status != cancelled: status = completed if (active and all approved) else ope
   is an allowed CORS origin), else FRONTEND_URL; the app page `/d/:token` opens the PDF from `GET /api/v1/d/{token}`.
   Available in company overrides of `result_ready` too.
 * otp: `Sizning tasdiqlash kodingiz: {code}` (uz) — Telegram bot uses its own per-language text.
-* Optional per-company overrides in `companies.settings.smsTemplates` `{payment_receipt, result_ready, reminder}` with placeholders `{patient} {order} {service} {company} {branch}` — when set, they win.
+* Optional per-company overrides in `companies.settings.smsTemplates` `{payment_receipt, result_ready, reminder}` with placeholders `{patient} {order} {service} {company} {branch}` — when set, they win. The payment receipt also has
+  `{amount}` (this payment), `{total}` (the cheque total) and `{remaining}` (still to pay after it), money as `120 000`.
 * Per-branch texts (2026-10): `branches.settings.smsTemplates`. A branch that saved its own texts uses only those (an
   empty value = the default); a branch that never saved uses the company's. Messages render with the order's branch;
   `{branch}` = that branch's name (2026-10, any text).

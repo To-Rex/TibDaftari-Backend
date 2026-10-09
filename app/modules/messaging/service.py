@@ -30,7 +30,8 @@ from app.modules.messaging.schemas import NotificationOut, OutboxCountsOut, Outb
 # ----------------------------------------------------------------------------- texts
 
 DEFAULT_TEMPLATES: dict[str, str] = {
-    # {patient} {order} {service} {company} {branch} {amount} {count} {code} {link}
+    # {patient} {order} {service} {company} {branch} {amount} {total} {remaining} {count} {code} {link}
+    # payment receipt: {amount} = this payment, {total} = the cheque total, {remaining} = still to pay (money as 120 000)
     # {branch} = the name of the order's branch (empty for messages without one)
     # {link} = the public result PDF (results only); it is what makes the SMS useful on any phone
     "payment_receipt": "Chek {order}: {amount} so‘m qabul qilindi. Natijalar tayyor bo‘lganda xabar beramiz. {company}",
@@ -58,7 +59,7 @@ def render_text(company: Company | None, kind: str, *, branch: Branch | None = N
         # A customised `result_ready` text also wins for order-scope approvals (DOMAIN_RULES §10).
         tpl = overrides.get("result_ready")
     tpl = tpl or DEFAULT_TEMPLATES.get(kind, "{service}")
-    values = {"patient": "", "order": "", "service": "", "company": company.name if company else "", "branch": (getattr(branch, "name", "") or "") if branch is not None else "", "amount": "", "count": "", "code": "", "link": ""}
+    values = {"patient": "", "order": "", "service": "", "company": company.name if company else "", "branch": (getattr(branch, "name", "") or "") if branch is not None else "", "amount": "", "total": "", "remaining": "", "count": "", "code": "", "link": ""}
     values.update({k: ("" if v is None else str(v)) for k, v in vars.items()})
     out = tpl
     for k, v in values.items():
@@ -69,8 +70,13 @@ def render_text(company: Company | None, kind: str, *, branch: Branch | None = N
     return out
 
 
-def payment_receipt_text(company: Company, order_number: str, amount: int, patient_name: str = "", branch: Branch | None = None) -> str:
-    return render_text(company, "payment_receipt", branch=branch, order=order_number, amount=fmt_money_ru(amount), patient=patient_name)
+def payment_receipt_text(
+    company: Company, order_number: str, amount: int, patient_name: str = "", branch: Branch | None = None, total: int | None = None, remaining: int | None = None
+) -> str:
+    return render_text(
+        company, "payment_receipt", branch=branch, order=order_number, amount=fmt_money_ru(amount), patient=patient_name,
+        total=fmt_money_ru(total) if total is not None else "", remaining=fmt_money_ru(remaining) if remaining is not None else "",
+    )
 
 
 def result_ready_text(company: Company, service_name: str, patient_name: str = "", order_number: str = "", link: str = "", branch: Branch | None = None) -> str:

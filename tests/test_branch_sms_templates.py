@@ -56,3 +56,13 @@ def test_branch_placeholder_is_the_branch_name() -> None:
     # without a branch the placeholder is just dropped (no double space left behind)
     plain = SimpleNamespace(name="Temo Med", settings={"smsTemplates": {"result_ready": "{service} tayyor {branch} {link}"}})
     assert render_text(plain, "result_ready", service="Qon", link="L") == "Qon tayyor L"
+
+
+def test_payment_receipt_amounts() -> None:
+    co = SimpleNamespace(name="Temo Med", settings={"smsTemplates": {"payment_receipt": "Chek {order}: {amount} so'm to'landi, jami {total}, qoldiq {remaining}. {company}"}})
+    text = payment_receipt_text(co, "UR-9", 120000, total=150000, remaining=30000)
+    assert text == "Chek UR-9: 120 000 so'm to'landi, jami 150 000, qoldiq 30 000. Temo Med"
+    # the default text already shows the paid amount; callers without totals leave those placeholders empty
+    plain = SimpleNamespace(name="Temo Med", settings={})
+    assert payment_receipt_text(plain, "UR-9", 5000).startswith("Chek UR-9: 5 000 so‘m qabul qilindi.")
+    assert payment_receipt_text(co, "UR-9", 5000) == "Chek UR-9: 5 000 so'm to'landi, jami , qoldiq . Temo Med"
