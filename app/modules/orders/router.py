@@ -47,10 +47,13 @@ ORDER_READ = (
     "reception.patient.read",
     "lab.worklist.read",
     "confirm.result.read",
+    "confirm.result.view",
     "reports.operations.read",
 )
-ITEM_READ = ("lab.worklist.read", "lab.result.write", "confirm.result.read", "reception.order.create")
-DOC_READ = ("confirm.result.read", "reception.patient.read")
+ITEM_READ = ("lab.worklist.read", "lab.result.write", "confirm.result.read", "confirm.result.view", "reception.order.create")
+DOC_READ = ("confirm.result.read", "confirm.result.view", "reception.patient.read")
+#: approved results only — the registrar may list them (worklist with status=approved), never the others
+APPROVED_VIEW = "confirm.result.view"
 
 
 def _pdf_response(pdf: bytes, filename: str) -> Response:
@@ -151,7 +154,10 @@ async def cancel_order(order_id: uuid.UUID, body: ReasonIn, staff: Staff, sessio
 async def worklist(
     company_id: uuid.UUID, q: Annotated[WorklistQuery, Query()], staff: Staff, session: DbSession
 ) -> Page[WorklistItemOut]:
-    staff.require("lab.worklist.read").scope(company_id)
+    approved_only = bool(q.status) and set(q.status) == {"approved"}
+    if not (approved_only and staff.has(APPROVED_VIEW)):
+        staff.require("lab.worklist.read")
+    staff.scope(company_id)
     return await service.worklist(session, company_id, q, staff)
 
 
@@ -258,7 +264,7 @@ async def get_document(document_id: uuid.UUID, staff: Staff, session: DbSession)
 
 @router.post("/documents/{document_id}/sms", response_model=ResultSmsOut, summary="Re-send the result-ready SMS (with the result link); dryRun only builds it")
 async def resend_document_sms(document_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta, body: ResultSmsIn | None = None) -> ResultSmsOut:
-    staff.require("confirm.result.approve", "messaging.send")
+    staff.require("confirm.result.approve", "messaging.send", "confirm.result.resend")
     return await service.resend_result_sms(session, document_id, staff, body or ResultSmsIn(), meta)
 
 

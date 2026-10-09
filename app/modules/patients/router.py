@@ -75,7 +75,7 @@ async def create_patient(
 
 @router.get("/patients/{patient_id}", response_model=PatientOut, summary="Get patient (company-scoped)")
 async def get_patient(patient_id: uuid.UUID, staff: Staff, session: DbSession, branch_id: Annotated[str | None, Query(alias="branchId")] = None) -> PatientOut:
-    staff.require("reception.patient.read")
+    staff.require("reception.patient.read", "confirm.result.view")  # the patient block of an approved result
     return await service.get_patient_dto(session, patient_id, staff, branch_id)
 
 

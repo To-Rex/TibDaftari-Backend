@@ -40,7 +40,7 @@ def test_permissions_resolution() -> None:
     perms = resolve_permissions(["lab.worklist.read", "lab.result.write"], {"allow": ["reports.export", "bogus.key"], "deny": ["lab.result.write"]})
     assert perms == ["lab.worklist.read", "reports.export"]
     assert invalid_permission_keys(["lab.worklist.read", "nope"]) == ["nope"]
-    assert len(PERMISSIONS) == 31
+    assert len(PERMISSIONS) == 32
 
 
 def test_password_and_tokens() -> None:

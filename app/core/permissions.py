@@ -8,7 +8,8 @@ PERMISSIONS: tuple[str, ...] = (
     "reception.patient.read", "reception.patient.write", "reception.order.create", "reception.order.cancel",
     "reception.payment.create", "reception.payment.refund",
     "lab.worklist.read", "lab.result.write", "lab.result.submit",
-    "confirm.result.read", "confirm.result.approve", "confirm.result.resend",
+    # confirm.result.view = approved results only (view / print / re-send) — the registrar desk
+    "confirm.result.read", "confirm.result.view", "confirm.result.approve", "confirm.result.resend",
     "reports.finance.read", "reports.operations.read", "reports.export",
     "messaging.send", "messaging.broadcast",
     "admin.company.read", "admin.company.write", "admin.branch.write",
@@ -52,6 +53,8 @@ DEFAULT_COMPANY_ROLES: tuple[dict, ...] = (
         "permissions": [
             "reception.patient.read", "reception.patient.write", "reception.order.create", "reception.order.cancel",
             "reception.payment.create", "reports.operations.read", "messaging.send",
+            # approved results: view, print and re-send the SMS (no approving, nothing unapproved)
+            "confirm.result.view", "confirm.result.resend",
         ],
     },
     {"key": "laborant", "name": "Laborant", "is_system": False, "permissions": ["lab.worklist.read", "lab.result.write", "lab.result.submit"]},
