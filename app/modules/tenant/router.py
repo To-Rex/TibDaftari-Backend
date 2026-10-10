@@ -14,6 +14,8 @@ from app.modules.tenant import reset, service
 from app.modules.tenant.schemas import (
     BranchCreateIn,
     BranchOut,
+    BranchSmsIn,
+    BranchSmsOut,
     BranchSmsTemplatesIn,
     BranchSmsTemplatesOut,
     BranchUpdateIn,
@@ -87,6 +89,23 @@ async def get_branch_sms_templates(branch_id: uuid.UUID, staff: Staff, session: 
 async def set_branch_sms_templates(branch_id: uuid.UUID, body: BranchSmsTemplatesIn, staff: Staff, session: DbSession, meta: Meta) -> BranchSmsTemplatesOut:
     staff.require("admin.settings.write", "admin.company.write")
     return await service.set_branch_sms_templates(session, branch_id, body, staff, meta)
+
+
+@router.get("/branches/{branch_id}/sms", response_model=BranchSmsOut, summary="The branch's SMS account (its own Xabarchi key, the company's, or off)")
+async def get_branch_sms(branch_id: uuid.UUID, staff: Staff, session: DbSession) -> BranchSmsOut:
+    return await service.get_branch_sms(session, branch_id, staff)
+
+
+@router.put("/branches/{branch_id}/sms", response_model=BranchSmsOut, summary="Save the branch's own SMS account (other branches keep theirs)")
+async def set_branch_sms(branch_id: uuid.UUID, body: BranchSmsIn, staff: Staff, session: DbSession, meta: Meta) -> BranchSmsOut:
+    staff.require("admin.settings.write", "admin.company.write")
+    return await service.set_branch_sms(session, branch_id, body, staff, meta)
+
+
+@router.post("/branches/{branch_id}/sms/test", response_model=SmsTestOut, summary="Send a real test SMS with the branch's key")
+async def branch_sms_test(branch_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta, body: SmsTestIn | None = None) -> SmsTestOut:
+    staff.require("admin.settings.write", "admin.company.write")
+    return await service.send_branch_test_sms(session, branch_id, body.to if body else None, staff, meta)
 
 
 # ----------------------------------------------------------------------------- superadmin reset ("like newborn")

@@ -12,7 +12,7 @@ from app.core.pagination import paginate_query
 from app.core.schemas import PageQuery
 from app.core.textutil import digits, fold
 from app.infrastructure.db.base import alive
-from app.infrastructure.db.models import Company, Notification, OtpChallenge, OutboxMessage
+from app.infrastructure.db.models import Branch, Company, Notification, OtpChallenge, OutboxMessage
 from app.infrastructure.db.models import Session as SessionModel
 
 QUEUE_STATUSES = ("queued", "scheduled")
@@ -125,6 +125,14 @@ async def load_companies(session: AsyncSession, ids: set[uuid.UUID]) -> dict[uui
         return {}
     rows = (await session.execute(select(Company).where(Company.id.in_(ids)))).scalars().all()
     return {c.id: c for c in rows}
+
+
+async def load_branches(session: AsyncSession, ids: set[uuid.UUID]) -> dict[uuid.UUID, Branch]:
+    """Branches for a batch in one query (a branch may send SMS with its own key)."""
+    if not ids:
+        return {}
+    rows = (await session.execute(select(Branch).where(Branch.id.in_(ids)))).scalars().all()
+    return {b.id: b for b in rows}
 
 
 async def ensure_audit_partitions(session: AsyncSession, months_ahead: int = 3) -> None:

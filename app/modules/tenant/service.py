@@ -25,11 +25,14 @@ from app.core.textutil import is_valid_uz_phone, norm_phone, slugify
 from app.infrastructure.db.models import Branch, Company, Role
 from app.infrastructure.redis import cache
 from app.modules.messaging import xabarchi
+from app.modules.messaging.service import sms_account
 from app.modules.templates.service import ensure_default_receipt
 from app.modules.tenant import repository as repo
 from app.modules.tenant.schemas import (
     BranchCreateIn,
     BranchOut,
+    BranchSmsIn,
+    BranchSmsOut,
     BranchSmsTemplatesIn,
     BranchSmsTemplatesOut,
     BranchUpdateIn,
@@ -119,6 +122,8 @@ def branch_out(branch: Branch, names: Mapping[str, str] | None = None) -> Branch
         timezone=branch.timezone,
         is_active=branch.is_active,
         order_seq=branch.order_seq,
+        sms_mode=branch_sms_mode(branch),  # type: ignore[arg-type]
+        sms_api_key_masked=branch.sms_api_key_masked if branch.sms_provider == "xabarchi" else None,
         created_at=branch.created_at,
         updated_at=branch.updated_at,
     )
@@ -517,3 +522,85 @@ async def set_branch_sms_templates(session: AsyncSession, branch_id: uuid.UUID, 
     if body.apply_to_all:
         await invalidate_company_cache(company.id)
     return branch_sms_templates_out(branch, company, applied=len(targets))
+
+
+# ----------------------------------------------------------------------------- branch SMS account (Xabarchi key)
+
+
+def branch_sms_mode(branch: Branch) -> str:
+    """`company` (no own account — the company's shared key is used), `own` (its own key) or `off` (no SMS)."""
+    if branch.sms_provider is None:
+        return "company"
+    return "off" if branch.sms_provider == "none" else "own"
+
+
+def branch_sms_out(branch: Branch, company: Company) -> BranchSmsOut:
+    account = sms_account(company, branch)
+    return BranchSmsOut(
+        branch_id=str(branch.id),
+        mode=branch_sms_mode(branch),  # type: ignore[arg-type]
+        api_key_masked=branch.sms_api_key_masked if branch.sms_provider == "xabarchi" else None,
+        default_priority=branch.sms_default_priority or company.sms_default_priority,  # type: ignore[arg-type]
+        sender_note=branch.sms_sender_note,
+        effective=account.source if account else None,  # type: ignore[arg-type]
+        company_api_key_masked=company.sms_api_key_masked if company.sms_provider != "none" else None,
+    )
+
+
+def _branch_sms_snapshot(branch: Branch) -> dict[str, Any]:
+    return {"smsMode": branch_sms_mode(branch), "smsApiKeyMasked": branch.sms_api_key_masked, "smsDefaultPriority": branch.sms_default_priority}
+
+
+def apply_branch_sms(branch: Branch, body: BranchSmsIn) -> None:
+    """`own` needs a key (a new one, or the one already saved); `company` / `off` drop the branch's own key."""
+    if body.mode == "own":
+        key = (body.api_key or "").strip()
+        if key:
+            branch.sms_api_key_enc = encrypt(key)
+            branch.sms_api_key_masked = mask_secret(key)
+        elif not branch.sms_api_key_enc:
+            raise ValidationError("Filial uchun Xabarchi API kaliti kiritilmagan", code="sms_api_key_required", details={"field": "apiKey"})
+        branch.sms_provider = "xabarchi"
+        branch.sms_default_priority = body.default_priority
+        branch.sms_sender_note = body.sender_note or None
+        return
+    branch.sms_provider = None if body.mode == "company" else "none"
+    branch.sms_api_key_enc = None
+    branch.sms_api_key_masked = None
+    branch.sms_default_priority = None
+    branch.sms_sender_note = None
+
+
+async def get_branch_sms(session: AsyncSession, branch_id: uuid.UUID, staff: StaffPrincipal) -> BranchSmsOut:
+    """Which key the branch's SMS go out with (secrets only as masks)."""
+    branch = await _branch_in_scope(session, branch_id, staff)
+    return branch_sms_out(branch, await get_company_or_404(session, branch.company_id))
+
+
+async def set_branch_sms(session: AsyncSession, branch_id: uuid.UUID, body: BranchSmsIn, staff: StaffPrincipal, meta: RequestMeta) -> BranchSmsOut:
+    """Save the branch's own SMS account — only this branch changes; other branches and the company keep theirs."""
+    branch = await _branch_in_scope(session, branch_id, staff)
+    company = await get_company_or_404(session, branch.company_id)
+    before = _branch_sms_snapshot(branch)
+    apply_branch_sms(branch, body)
+    await session.flush()
+    await audit(session, actor_type="staff", actor_id=staff.id, company_id=branch.company_id, action="sms_account", entity="branch", entity_id=branch.id, before=before, after=_branch_sms_snapshot(branch), ip=meta.ip, request_id=meta.request_id)
+    return branch_sms_out(branch, company)
+
+
+async def send_branch_test_sms(session: AsyncSession, branch_id: uuid.UUID, to_raw: str | None, staff: StaffPrincipal, meta: RequestMeta) -> SmsTestOut:
+    """ONE real SMS through the key this branch's messages use (its own, or the company's) — default recipient:
+    the branch phone, else the company phone. Provider errors propagate as 502 with the provider message."""
+    branch = await _branch_in_scope(session, branch_id, staff)
+    company = await get_company_or_404(session, branch.company_id)
+    to = norm_phone(to_raw or branch.phone or company.phone)
+    if not is_valid_uz_phone(to):
+        raise ValidationError("Telefon raqam noto‘g‘ri", code="invalid_phone")
+    account = sms_account(company, branch)
+    if account is None:
+        raise ValidationError("SMS provayder sozlanmagan", code="sms_not_configured")
+    api_key = decrypt(account.key_enc) or ""
+    results = await xabarchi.send_sms(api_key, [to], SMS_TEST_TEXT.format(company=f"{company.name} · {branch.name}"), account.priority)
+    provider_id = results[0].provider_id if results else None
+    await audit(session, actor_type="staff", actor_id=staff.id, company_id=branch.company_id, action="sms_test", entity="branch", entity_id=branch.id, after={"to": to, "providerMessageId": provider_id, "source": account.source}, ip=meta.ip, request_id=meta.request_id)
+    return SmsTestOut(ok=True, provider_message_id=provider_id, to=to)

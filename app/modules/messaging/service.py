@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -169,13 +170,38 @@ async def enqueue(
     return msg
 
 
+@dataclass(frozen=True)
+class SmsAccount:
+    """The Xabarchi account a message goes out through."""
+
+    key_enc: str
+    priority: str
+    #: `branch` = the branch's own key, `company` = the company's shared key
+    source: str
+
+
+def sms_account(company: Company | None, branch: Branch | None = None) -> SmsAccount | None:
+    """Which key sends a message of `branch`: the branch's own key once it saved one; nothing when the branch
+    switched SMS off; otherwise (no branch, or a branch on the shared key) the company's key. None = not configured."""
+    if branch is not None and branch.sms_provider is not None:
+        if branch.sms_provider == "none" or not branch.sms_api_key_enc:
+            return None
+        fallback = company.sms_default_priority if company is not None else "transactional"
+        return SmsAccount(branch.sms_api_key_enc, branch.sms_default_priority or fallback, "branch")
+    if company is not None and company.sms_provider != "none" and company.sms_api_key_enc:
+        return SmsAccount(company.sms_api_key_enc, company.sms_default_priority, "company")
+    return None
+
+
 async def enqueue_sms_if_configured(session: AsyncSession, company: Company, **kwargs: Any) -> OutboxMessage | None:
-    """SMS only makes sense when the company has a provider; else the message is recorded as failed
-    (visible in the outbox so staff can see what was not delivered and why)."""
+    """SMS only makes sense when the message's branch (or, without its own key, the company) has a provider;
+    else the message is recorded as failed (visible in the outbox so staff can see what was not delivered and why)."""
     to = norm_phone(kwargs.get("to", ""))
     if not is_valid_uz_phone(to):
         return None
-    configured = company.sms_provider != "none" and bool(company.sms_api_key_enc)
+    branch_id = kwargs.get("branch_id")
+    branch = await session.get(Branch, branch_id) if branch_id else None
+    configured = sms_account(company, branch) is not None
     if kwargs.get("kind") == "otp":
         # OTP codes must never be readable from the outbox: the visible text is masked and the
         # real text travels encrypted in the payload; nothing is persisted without a provider.

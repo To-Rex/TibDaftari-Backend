@@ -61,6 +61,13 @@ class Branch(PKMixin, AuditMixin, SoftDeleteMixin, TenantMixin, Base):
     timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Asia/Tashkent")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     order_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # the branch's own SMS account: `sms_provider` NULL = the company's shared key is used, 'xabarchi' = this
+    # branch's own key, 'none' = the branch sends no SMS
+    sms_provider: Mapped[str | None] = mapped_column(String(20))
+    sms_api_key_enc: Mapped[str | None] = mapped_column(Text)  # Fernet-encrypted plaintext key
+    sms_api_key_masked: Mapped[str | None] = mapped_column(String(80))
+    sms_default_priority: Mapped[str | None] = mapped_column(String(20))  # NULL = the company's
+    sms_sender_note: Mapped[str | None] = mapped_column(String(200))
     # branch-level settings; `smsTemplates` = the branch's own SMS texts (absent → the company's are used)
     settings: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
 

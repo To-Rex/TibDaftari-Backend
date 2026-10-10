@@ -32,6 +32,31 @@ class CompanySmsIn(CamelModel):
     sender_note: str | None = Field(default=None, max_length=200)
 
 
+BranchSmsMode = Literal["company", "own", "off"]
+
+
+class BranchSmsIn(CamelModel):
+    """A branch's SMS account. `company` = the company's shared key, `own` = this branch's Xabarchi key (`apiKey` is
+    write-only plaintext; omitted = keep the saved one), `off` = the branch sends no SMS."""
+
+    mode: BranchSmsMode
+    api_key: str | None = Field(default=None, max_length=200)
+    default_priority: SmsPriority | None = None
+    sender_note: str | None = Field(default=None, max_length=200)
+
+
+class BranchSmsOut(CamelModel):
+    branch_id: str
+    mode: BranchSmsMode
+    api_key_masked: str | None = None
+    default_priority: SmsPriority
+    sender_note: str | None = None
+    #: where this branch's SMS really go out from: its own key, the company's, or nowhere (None)
+    effective: Literal["branch", "company"] | None = None
+    #: the company's shared key (mask) — what `company` mode uses
+    company_api_key_masked: str | None = None
+
+
 class CompanyTelegramOut(CamelModel):
     bot_username: str | None = None
     connected: bool = False
@@ -143,6 +168,9 @@ class BranchOut(CamelModel):
     timezone: str
     is_active: bool
     order_seq: int
+    #: whose key the branch's SMS use (its own / the company's / none) — details: GET /branches/{id}/sms
+    sms_mode: BranchSmsMode = "company"
+    sms_api_key_masked: str | None = None
     created_at: datetime
     updated_at: datetime
 

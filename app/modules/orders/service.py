@@ -1395,7 +1395,7 @@ async def resend_result_sms(session: AsyncSession, document_id: uuid.UUID, staff
     else:
         item = await repo.get_item(session, doc.order_item_id, doc.company_id) if doc.order_item_id else None
         text = messaging.result_ready_text(company, item.service_name if item else doc.title, order.patient_name, order.number, link, branch=branch)
-    configured = company.sms_provider != "none" and bool(company.sms_api_key_enc)
+    configured = messaging.sms_account(company, branch) is not None
     if body.dry_run:
         return ResultSmsOut(to=to, text=text, configured=configured, queued=False)
     # a double click (or an impatient second press) must not send the same SMS twice

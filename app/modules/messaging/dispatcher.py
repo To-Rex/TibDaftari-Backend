@@ -14,11 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.crypto import decrypt
-from app.infrastructure.db.models import Company, OutboxMessage
+from app.infrastructure.db.models import Branch, Company, OutboxMessage
 from app.infrastructure.db.session import session_scope
 from app.modules.messaging import repository as repo
 from app.modules.messaging import xabarchi
-from app.modules.messaging.service import mark_document_delivery, outgoing_text
+from app.modules.messaging.service import mark_document_delivery, outgoing_text, sms_account
 from app.modules.messaging.xabarchi import XabarchiError, XabarchiTransientError
 
 log = logging.getLogger("outbox")
@@ -69,12 +69,14 @@ def _defer(msg: OutboxMessage, now: datetime, delay: timedelta, note: str) -> No
     msg.next_attempt_at = now + delay
 
 
-async def _deliver_sms(msg: OutboxMessage, company: Company | None, now: datetime) -> None:
-    api_key = decrypt(company.sms_api_key_enc) if company and company.sms_provider != "none" else None
-    if not api_key:
+async def _deliver_sms(msg: OutboxMessage, company: Company | None, now: datetime, branch: Branch | None = None) -> None:
+    # the branch's own key, else the company's shared one (decided at delivery time)
+    account = sms_account(company, branch)
+    api_key = decrypt(account.key_enc) if account else None
+    if not account or not api_key:
         _mark_failed(msg, "sms_not_configured")
         return
-    priority = company.sms_default_priority if company else "transactional"
+    priority = account.priority
     try:
         results = await xabarchi.send_sms(api_key, [msg.to], outgoing_text(msg), priority)
     except XabarchiTransientError as exc:
@@ -104,11 +106,11 @@ async def _deliver_telegram(session: AsyncSession, msg: OutboxMessage, now: date
         _mark_failed(msg, msg.error or "telegram_not_configured")
 
 
-async def deliver_one(session: AsyncSession, msg: OutboxMessage, company: Company | None) -> str:
+async def deliver_one(session: AsyncSession, msg: OutboxMessage, company: Company | None, branch: Branch | None = None) -> str:
     """Deliver a claimed (`sending`) message and update it in place; returns the resulting status."""
     now = datetime.now(UTC)
     if msg.channel == "sms":
-        await _deliver_sms(msg, company, now)
+        await _deliver_sms(msg, company, now, branch)
     elif msg.channel == "telegram":
         await _deliver_telegram(session, msg, now)
     else:  # portal messages are informational — nothing to push
@@ -131,12 +133,13 @@ async def dispatch_outbox_once() -> int:
     async with session_scope() as session:
         rows = await repo.load_messages(session, ids)
         companies = await repo.load_companies(session, {r.company_id for r in rows})
+        branches = await repo.load_branches(session, {r.branch_id for r in rows if r.branch_id and r.channel == "sms"})
         for msg in rows:
             try:
                 # SAVEPOINT per row: a DB-side failure inside delivery rolls back only this row's
                 # writes and leaves the session usable for the rest of the batch.
                 async with session.begin_nested():
-                    status = await deliver_one(session, msg, companies.get(msg.company_id))
+                    status = await deliver_one(session, msg, companies.get(msg.company_id), branches.get(msg.branch_id) if msg.branch_id else None)
             except Exception:  # never let one bad row poison the batch
                 log.exception("outbox %s: unexpected delivery error", msg.id)
                 await session.refresh(msg)
