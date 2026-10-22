@@ -84,7 +84,7 @@ from app.modules.orders.schemas import (
     WorklistQuery,
 )
 from app.modules.templates import service as templates_svc
-from app.modules.templates.renderer.context import build_render_context, to_render_item
+from app.modules.templates.renderer.context import build_render_context, item_status_label, to_render_item
 
 log = logging.getLogger("app.orders")
 
@@ -334,7 +334,20 @@ async def _order_items_out(session: AsyncSession, o: Order) -> OrderItemsOut:
 
 
 def _patient_ctx(p: Any) -> dict[str, Any]:
-    return {"fullName": p.full_name, "phone": p.phone, "birthDate": p.birth_date, "gender": p.gender, "street": getattr(p, "street", None), "passportNumber": getattr(p, "passport_number", None)}
+    return {
+        "fullName": p.full_name,
+        "phone": p.phone,
+        "birthDate": p.birth_date,
+        "gender": p.gender,
+        "street": getattr(p, "street", None),
+        "passportNumber": getattr(p, "passport_number", None),
+        "pinfl": getattr(p, "pinfl", None),
+        "workplace": getattr(p, "workplace", None),
+        "discountPercent": getattr(p, "discount_percent", 0),
+        "contractNumber": getattr(p, "contract_number", None),
+        "note": getattr(p, "note", None),
+        "tags": getattr(p, "tags", None),
+    }
 
 
 async def render_receipt_pdf(session: AsyncSession, order_id: uuid.UUID, company_scope: uuid.UUID | None, template_id: uuid.UUID | None, staff: StaffPrincipal | None = None) -> tuple[bytes, str]:
@@ -356,6 +369,9 @@ async def render_receipt_pdf(session: AsyncSession, order_id: uuid.UUID, company
     company = await session.get(Company, o.company_id)
     branch = await repo.get_branch(session, o.branch_id, o.company_id)
     cashier = await repo.get_employee_name(session, o.created_by_employee_id)
+    district_name = await repo.get_district_name(session, patient.district_id) if patient else None
+    region_name = await repo.get_region_name(session, patient.region_id) if patient else None
+    sts = await repo.service_types_by_ids(session, o.company_id, {i.service_type_id for i in items})
     language = str(tpl.language or (company.locale if company else "uz"))
     ctx = build_render_context(
         patient=_patient_ctx(patient) if patient else None,
@@ -370,15 +386,42 @@ async def render_receipt_pdf(session: AsyncSession, order_id: uuid.UUID, company
             "itemCount": len(items),
             "note": o.note,
             "status": o.status,
+            "payment": o.payment,
         },
-        company={"name": company.name, "phone": company.phone, "address": company.address} if company else None,
-        branch={"name": branch.name, "address": branch.address, "phone": branch.phone} if branch else None,
+        company={
+            "name": company.name,
+            "legalName": company.legal_name,
+            "slug": company.slug,
+            "phone": company.phone,
+            "email": company.email,
+            "address": company.address,
+        } if company else None,
+        branch={"name": branch.name, "code": branch.code, "address": branch.address, "phone": branch.phone, "timezone": branch.timezone} if branch else None,
         items=[
-            to_render_item(code=str(i.service_type_id), service_type_id=str(i.service_type_id), service_name=i.service_name, status=i.status, values={}, schema=None, price=i.price, final_price=i.final_price, category=i.category_name)
+            to_render_item(
+                code=(sts[i.service_type_id].code if i.service_type_id in sts and sts[i.service_type_id].code else str(i.service_type_id)),
+                service_type_id=str(i.service_type_id),
+                service_name=i.service_name,
+                status=i.status,
+                status_label=item_status_label(i.status, language),
+                values={},
+                schema=None,
+                entered_at=i.entered_at,
+                submitted_at=i.submitted_at,
+                approved_at=i.approved_at,
+                technician=i.technician_name,
+                doctor=i.doctor_name,
+                price=i.price,
+                final_price=i.final_price,
+                category=i.category_name,
+                schema_version=i.schema_version,
+            )
             for i in items
         ],
         payments=[{"createdAt": p.created_at, "method": p.method, "amount": p.amount, "note": p.note} for p in payments],
         cashier=cashier,
+        district_name=district_name,
+        region_name=region_name,
         language=language,
     )
     pdf = await templates_service.render_doc_pdf(session, tpl.company_id, tpl.doc or {}, ctx)
@@ -1076,6 +1119,7 @@ async def _issue_document(
         for i in items
     }
     district_name = await repo.get_district_name(session, patient.district_id)
+    region_name = await repo.get_region_name(session, patient.region_id)
     snapshot = await templates_svc.build_document_snapshot(
         session,
         template=template,

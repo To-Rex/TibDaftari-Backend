@@ -26,6 +26,7 @@ from app.infrastructure.db.models import (
     OrderItem,
     Patient,
     Payment,
+    Region,
     ResultDocument,
     ResultTemplate,
     ServiceType,
@@ -480,6 +481,13 @@ async def get_district_name(session: AsyncSession, district_id: uuid.UUID | None
     if district_id is None:
         return None
     return (await session.execute(select(District.name).where(District.id == district_id))).scalar_one_or_none()
+
+
+async def get_region_name(session: AsyncSession, region_id: uuid.UUID | None) -> str | None:
+    """Region name for the render context (None when the patient has no region)."""
+    if region_id is None:
+        return None
+    return (await session.execute(select(Region.name).where(Region.id == region_id))).scalar_one_or_none()
 
 
 async def service_types_by_ids(

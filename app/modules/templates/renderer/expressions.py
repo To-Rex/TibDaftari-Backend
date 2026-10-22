@@ -233,27 +233,55 @@ def service_value(ctx: Context, path: str) -> str:
     it = find_item(ctx, code)
     if not it:
         return ""
-    if key == "name":
+    if key in ("name", "serviceName"):
         return str(it.get("serviceName") or "")
+    if key == "code":
+        return str(it.get("code") or "")
     if key == "status":
         return str(it.get("status") or "")
-    if key in ("approvedAt", "technician", "doctor"):
+    if key in (
+        "statusLabel",
+        "category",
+        "price",
+        "finalPrice",
+        "enteredAt",
+        "submittedAt",
+        "approvedAt",
+        "technician",
+        "doctor",
+        "schemaVersion",
+    ):
         return str(it.get(key) or "")
     return format_value(_sub_context(ctx, it), key)
 
 
 def item_rows(ctx: Context) -> list[Row]:
-    """Rows of the reserved `items` dataset: i/code/name/status + every non-table field formatted."""
+    """Rows of the reserved `items` dataset: schema values plus the stable metadata keys (metadata wins)."""
     rows: list[Row] = []
     for i, it in enumerate(ctx.get("items") or []):
         sub = _sub_context(ctx, it)
-        row: Row = {"code": it.get("code"), "name": it.get("serviceName"), "status": it.get("status"), "i": i + 1}
-        for extra in ("price", "finalPrice", "category"):  # receipts
-            if it.get(extra) is not None:
-                row[extra] = it.get(extra)
+        row: Row = {}
         for f in (it.get("schema") or {}).get("fields") or []:
             if isinstance(f, dict) and f.get("type") != "table":
                 row[f["key"]] = format_value(sub, f["key"])
+        row.update(
+            {
+                "i": i + 1,
+                "code": it.get("code") or "",
+                "name": it.get("serviceName") or "",
+                "status": it.get("status") or "",
+                "statusLabel": it.get("statusLabel") or "",
+                "category": it.get("category") or "",
+                "price": it.get("price") or "",
+                "finalPrice": it.get("finalPrice") or "",
+                "technician": it.get("technician") or "",
+                "doctor": it.get("doctor") or "",
+                "enteredAt": it.get("enteredAt") or "",
+                "submittedAt": it.get("submittedAt") or "",
+                "approvedAt": it.get("approvedAt") or "",
+                "schemaVersion": it.get("schemaVersion") or "",
+            }
+        )
         rows.append(row)
     return rows
 

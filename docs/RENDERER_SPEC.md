@@ -62,12 +62,26 @@ default (text|longtext|date|table) -> fmt(raw)
 Consequences: date values are printed as stored ISO `yyyy-MM-dd`; number 12.00→"12", 12.30→"12.30"; `{values.<tableKey>}` in JS gives "[object Object], …" — backend: return '' for table-typed values (documented divergence).
 
 ### items dataset — itemRows(ctx)
-Row per RenderItem i: `{ i: i+1, code, name: serviceName, status, ...for each non-table field f of item schema: row[f.key] = formatValue(item values/schema, f.key) }`.
+Row per RenderItem i: `{ i: i+1, code, name: serviceName, status, statusLabel, category, price, finalPrice, enteredAt, submittedAt, approvedAt, technician, doctor, schemaVersion, ...for each non-table field f of item schema: row[f.key] = formatValue(item values/schema, f.key) }`. Stable metadata keys overwrite same-named schema fields.
 `tableRows(ctx, fieldKey)`: 'items' → itemRows; else `values[fieldKey]` if list else [] (raw row objects, NOT formatted).
 
 ### svc.<CODE>.<field> — serviceValue(ctx, path)
 Split at LAST dot: code = path[:dot], key = path[dot+1:]. Item = items where code.strip().lower() == code.strip().lower(); none → ''.
 key 'name' → serviceName; 'status' → raw status; 'approvedAt' → item.approvedAt or ''; 'technician'/'doctor' → or ''; else formatValue(item values/schema, key).
+
+
+## Extended context keys (2026-10)
+Additional keys available to templates (frontend `RenderContext` + backend `build_render_context`):
+- patient: `pinfl`, `workplace`, `discountPercent`, `contractNumber`, `note`, `tags`, `region`, `district`, `street`.
+- order: `dateTime`, `time` (HH:mm), `status`, `statusLabel`, `payment`, `paymentLabel`, `itemCount`, `note`, `subtotal`, `discountPercent`, `discountAmount`, `total`, `paidAmount`, `remaining`, `hasDiscount`, `hasRemaining`, `hasPayments`.
+- item: `serviceCode`, `categoryName`, `status`, `statusLabel`, `price`, `finalPrice`, `enteredAt`, `submittedAt`, `approvedAt`, `technician`, `doctor`, `labNote`, `rejectReason`, `schemaVersion`.
+- company: `legalName`, `slug`, `email`; branch: `code`, `timezone`; category: `code`; plus `now` (dd.MM.yyyy HH:mm in the clinic timezone).
+- `{svc.<CODE>.<key>}` also resolves: `code`, `statusLabel`, `category`, `price`, `finalPrice`, `enteredAt`, `submittedAt`, `schemaVersion` (besides the original name/status/approvedAt/technician/doctor and schema fields).
+- The `items` dataset now carries: `i, code, name, category, status, statusLabel, price, finalPrice, enteredAt, submittedAt, approvedAt, technician, doctor, schemaVersion`. Stable metadata keys win over same-named schema fields.
+- Receipt `items` rows carry `i, code, name, category, statusLabel, price, finalPrice`; `payments` stays `i, date, method, amount, note`.
+- Result documents now receive the full order block (status/payment/totals), so money and status placeholders work there too; the actual values come from the order at approval time.
+
+- Table columns: `fillIfSet` is any CSS hex colour; ONLY the body cell whose formatted value is non-empty gets that background (not the header, not empty cells, not the whole row/column). The editor shows it for plain static text and in preview/print; the PDF renderer applies the same rule.
 
 ## 2. Placeholders — interpolate(text, ctx, row=None)
 Regex `\{([a-zA-Z0-9_.\-]+)\}` — no spaces/pipes/filters/escaping. Non-matching braces stay verbatim.

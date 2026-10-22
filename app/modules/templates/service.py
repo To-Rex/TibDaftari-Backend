@@ -53,7 +53,7 @@ from app.modules.files import service as files
 from app.modules.templates import repository as repo
 from app.modules.templates.defaults import DEFAULT_RECEIPT_NAME, default_receipt_doc
 from app.modules.templates.renderer import build_render_context, render
-from app.modules.templates.renderer.context import to_render_item
+from app.modules.templates.renderer.context import item_status_label, to_render_item
 from app.modules.templates.schemas import (
     DefaultReceiptIn,
     TemplateAssetIn,
@@ -79,11 +79,18 @@ SAMPLE_PATIENT: dict[str, Any] = {
     "gender": "female",
     "street": "Al-Xorazmiy ko‘chasi, 12-uy",
     "passportNumber": "AB1234567",
+    "pinfl": "50101992040012",
+    "workplace": "TibDaftari",
+    "discountPercent": 0,
+    "contractNumber": "SH-00124",
+    "note": "Doimiy mijoz",
+    "tags": ["VIP"],
 }
 SAMPLE_DISTRICT = "Urganch shahri"
-SAMPLE_COMPANY = {"name": "Shifo Med", "phone": "+998 62 228-82-81", "address": "Urganch sh., A. Bahodirxon 177"}
-SAMPLE_BRANCH = {"name": "Markaziy filial", "address": "Urganch sh."}
-SAMPLE_CATEGORY = {"name": "Laboratoriya", "phone": "97-092-08-88; 97-457-83-89"}
+SAMPLE_REGION = "Xorazm viloyati"
+SAMPLE_COMPANY = {"name": "TibDaftari", "legalName": "TibDaftari MChJ", "slug": "tibdaftari", "phone": "+998 62 228-82-81", "email": "info@tibdaftari.uz", "address": "Urganch sh., A. Bahodirxon 177"}
+SAMPLE_BRANCH = {"name": "Markaziy filial", "code": "M", "address": "Urganch sh.", "timezone": "Asia/Tashkent"}
+SAMPLE_CATEGORY = {"name": "Laboratoriya", "code": "LAB", "phone": "97-092-08-88; 97-457-83-89"}
 SAMPLE_SERVICE_NAME = "Namuna xizmat"
 SAMPLE_TECHNICIAN = "D. Rahimova"
 SAMPLE_DOCTOR = "A. Jumaniyazov"
@@ -512,12 +519,14 @@ def _sample_receipt_context(company: Company | None, branch: Branch | None, now:
     total = subtotal - subtotal * discount // 100
     return build_render_context(
         patient=SAMPLE_PATIENT,
-        order={"number": "UR-001240", "createdAt": now, "subtotal": subtotal, "discountPercent": discount, "discountAmount": subtotal * discount // 100, "total": total, "paidAmount": total - 50000, "itemCount": len(services), "status": "in_progress"},
-        company={"name": company.name, "phone": company.phone, "address": company.address} if company else SAMPLE_COMPANY,
-        branch={"name": branch.name, "address": branch.address, "phone": branch.phone} if branch else SAMPLE_BRANCH,
-        items=[to_render_item(code=c, service_type_id=c, service_name=n, status="pending", values={}, schema=None, price=p, final_price=p - p * discount // 100, category=cat) for c, n, cat, p in services],
+        order={"number": "UR-001240", "createdAt": now, "subtotal": subtotal, "discountPercent": discount, "discountAmount": subtotal * discount // 100, "total": total, "paidAmount": total - 50000, "itemCount": len(services), "status": "in_progress", "payment": "partial"},
+        company={"name": company.name, "legalName": company.legal_name, "slug": company.slug, "phone": company.phone, "email": company.email, "address": company.address} if company else SAMPLE_COMPANY,
+        branch={"name": branch.name, "code": branch.code, "address": branch.address, "phone": branch.phone, "timezone": branch.timezone} if branch else SAMPLE_BRANCH,
+        items=[to_render_item(code=c, service_type_id=c, service_name=n, status="pending", status_label="Navbatda", values={}, schema=None, price=p, final_price=p - p * discount // 100, category=cat, schema_version=1) for c, n, cat, p in services],
         payments=[{"createdAt": now, "method": "cash", "amount": total - 50000}],
         cashier="Umida Qodirova",
+        district_name=SAMPLE_DISTRICT,
+        region_name=SAMPLE_REGION,
         language=str(company.locale) if company and company.locale else "uz",
     )
 
@@ -544,30 +553,46 @@ async def _sample_context(session: AsyncSession, template: ResultTemplate, compa
                 service_type_id=str(s.id),
                 service_name=s.name,
                 status="approved",
+                status_label="Tasdiqlangan",
                 values=sample_values(schemas.get(s.schema_id) if s.schema_id else None),
                 schema=schemas.get(s.schema_id) if s.schema_id else None,
+                entered_at=now,
+                submitted_at=now,
                 approved_at=now,
                 technician=SAMPLE_TECHNICIAN,
                 doctor=SAMPLE_DOCTOR,
+                price=50000,
+                final_price=45000,
+                category=category.name if category else None,
+                schema_version=1,
             )
             for s in ordered
         ]
     return build_render_context(
         patient=SAMPLE_PATIENT,
-        order={"number": "UR-001240", "createdAt": now},
+        order={"number": "UR-001240", "createdAt": now, "subtotal": 50000, "discountPercent": 0, "discountAmount": 0, "total": 50000, "paidAmount": 50000, "itemCount": 1, "note": "Namuna izoh", "status": "completed", "payment": "paid"},
         item={
             "serviceName": first.name if first else SAMPLE_SERVICE_NAME,
+            "serviceCode": first.code if first else None,
+            "categoryName": category.name if category else None,
+            "status": "approved",
+            "price": 50000,
+            "finalPrice": 45000,
+            "enteredAt": now,
+            "submittedAt": now,
             "approvedAt": now,
             "technicianName": SAMPLE_TECHNICIAN,
             "doctorName": SAMPLE_DOCTOR,
             "labNote": "Namuna sifati qoniqarli",
+            "schemaVersion": 1,
             "values": sample_values(schema),
         },
-        company={"name": company.name, "phone": company.phone, "address": company.address} if company else SAMPLE_COMPANY,
-        branch={"name": branch.name, "address": branch.address} if branch else SAMPLE_BRANCH,
-        category={"name": category.name, "phone": category.phone} if category else SAMPLE_CATEGORY,
+        company={"name": company.name, "legalName": company.legal_name, "slug": company.slug, "phone": company.phone, "email": company.email, "address": company.address} if company else SAMPLE_COMPANY,
+        branch={"name": branch.name, "code": branch.code, "address": branch.address, "phone": branch.phone, "timezone": branch.timezone} if branch else SAMPLE_BRANCH,
+        category={"name": category.name, "code": category.code, "phone": category.phone} if category else SAMPLE_CATEGORY,
         schema=schema,
         district_name=SAMPLE_DISTRICT,
+        region_name=SAMPLE_REGION,
         items=items,
         language=template.language,
     )
@@ -636,6 +661,7 @@ async def build_document_snapshot(
     schemas: dict[uuid.UUID, AttributeSchema],
     service_codes: dict[uuid.UUID, str],
     district_name: str | None = None,
+    region_name: str | None = None,
     approved_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Freeze template doc + RenderContext + asset map for a result document (see module docstring).
@@ -652,14 +678,22 @@ async def build_document_snapshot(
                 service_type_id=str(it.service_type_id),
                 service_name=it.service_name,
                 status=it.status,
+                status_label=item_status_label(it.status, template.language),
                 values=it.values,
                 schema=schema_dict(schemas.get(it.schema_id)) if it.schema_id else None,
+                entered_at=it.entered_at,
+                submitted_at=it.submitted_at,
                 approved_at=it.approved_at or approved_at,
                 technician=it.technician_name,
                 doctor=it.doctor_name,
+                price=it.price,
+                final_price=it.final_price,
+                category=it.category_name,
+                schema_version=it.schema_version,
             )
             for it in items
         ]
+    primary_code = service_codes.get(primary_item.service_type_id) if primary_item else None
     context = build_render_context(
         patient={
             "fullName": patient.full_name,
@@ -668,21 +702,56 @@ async def build_document_snapshot(
             "gender": patient.gender,
             "street": patient.street,
             "passportNumber": patient.passport_number,
+            "pinfl": patient.pinfl,
+            "workplace": patient.workplace,
+            "discountPercent": patient.discount_percent,
+            "contractNumber": patient.contract_number,
+            "note": patient.note,
+            "tags": patient.tags,
         },
-        order={"number": order.number, "createdAt": order.created_at},
+        order={
+            "number": order.number,
+            "createdAt": order.created_at,
+            "status": order.status,
+            "payment": order.payment,
+            "subtotal": order.subtotal,
+            "discountPercent": order.discount_percent,
+            "discountAmount": order.discount_amount,
+            "total": order.total,
+            "paidAmount": order.paid_amount,
+            "itemCount": order.item_count,
+            "note": order.note,
+        },
         item={
             "serviceName": primary_item.service_name if primary_item else "",
+            "serviceCode": primary_code,
+            "categoryName": primary_item.category_name if primary_item else None,
+            "status": primary_item.status if primary_item else None,
+            "price": primary_item.price if primary_item else None,
+            "finalPrice": primary_item.final_price if primary_item else None,
+            "enteredAt": primary_item.entered_at if primary_item else None,
+            "submittedAt": primary_item.submitted_at if primary_item else None,
             "approvedAt": (approved_at or primary_item.approved_at) if primary_item else approved_at,
             "technicianName": primary_item.technician_name if primary_item else None,
             "doctorName": primary_item.doctor_name if primary_item else None,
             "labNote": primary_item.lab_note if primary_item else None,
+            "rejectReason": primary_item.reject_reason if primary_item else None,
+            "schemaVersion": primary_item.schema_version if primary_item else None,
             "values": primary_item.values if primary_item else {},
         },
-        company={"name": company.name, "phone": company.phone, "address": company.address},
-        branch={"name": branch.name, "address": branch.address} if branch else None,
-        category={"name": category.name, "phone": category.phone} if category else None,
+        company={
+            "name": company.name,
+            "legalName": company.legal_name,
+            "slug": company.slug,
+            "phone": company.phone,
+            "email": company.email,
+            "address": company.address,
+        },
+        branch={"name": branch.name, "code": branch.code, "address": branch.address, "phone": branch.phone, "timezone": branch.timezone} if branch else None,
+        category={"name": category.name, "code": category.code, "phone": category.phone} if category else None,
         schema=schema_dict(primary_schema),
         district_name=district_name,
+        region_name=region_name,
         items=render_items,
         language=template.language,
     )
