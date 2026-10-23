@@ -356,6 +356,11 @@ def test_assets_api(ctx: dict) -> None:
     assert r.status_code == 201
     r = c.post(f"/api/v1/templates/{r.json()['id']}/preview.pdf", headers=h(ctx, "admin-a"))
     assert r.status_code == 200 and r.content[:5] == b"%PDF-"
+    # delete: viewer forbidden, admin can, gone from the list, second delete → 404
+    assert c.delete(f"/api/v1/companies/{cid}/assets/{a['id']}", headers=h(ctx, "viewer-a")).status_code == 403
+    assert c.delete(f"/api/v1/companies/{cid}/assets/{a['id']}", headers=h(ctx, "admin-a")).status_code == 204
+    assert a["id"] not in {x["id"] for x in c.get(f"/api/v1/companies/{cid}/assets", headers=h(ctx, "viewer-a")).json()}
+    assert c.delete(f"/api/v1/companies/{cid}/assets/{a['id']}", headers=h(ctx, "admin-a")).status_code == 404
 
 
 async def _snapshot_roundtrip(company_id: str, template_id: str) -> tuple[list[str], dict, bytes]:

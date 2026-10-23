@@ -92,3 +92,10 @@ async def list_assets(company_id: uuid.UUID, staff: Staff, session: DbSession) -
 async def upload_asset(company_id: uuid.UUID, body: TemplateAssetIn, staff: Staff, session: DbSession, meta: Meta) -> TemplateAssetOut:
     staff.require(TEMPLATE_WRITE).scope(company_id)
     return await service.upload_asset(session, company_id, body, staff, meta)
+
+
+@router.delete("/companies/{company_id}/assets/{asset_id}", status_code=204, summary="Delete a template asset (soft; printed documents keep their bytes)")
+async def delete_asset(company_id: uuid.UUID, asset_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta) -> Response:
+    staff.require(TEMPLATE_WRITE).scope(company_id)
+    await service.delete_asset(session, company_id, asset_id, staff, meta)
+    return Response(status_code=204)

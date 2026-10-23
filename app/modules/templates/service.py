@@ -67,6 +67,7 @@ from app.modules.templates.schemas import (
 )
 
 MSG_TEMPLATE_NOT_FOUND = "Shablon topilmadi"
+MSG_ASSET_NOT_FOUND = "Rasm topilmadi"
 MSG_EMPTY_ACTIVATE = "Bo‘sh shablonni faollashtirib bo‘lmaydi"
 MSG_DELETE_ACTIVE = "Faol shablonni o‘chirib bo‘lmaydi — avval arxivlang"
 ACTIVE_CACHE_TTL = 120
@@ -441,6 +442,17 @@ async def upload_asset(session: AsyncSession, company_id: uuid.UUID, body: Templ
     await session.flush()
     await audit(session, actor_type="staff", actor_id=staff.id, company_id=company_id, action="asset.upload", entity="template_asset", entity_id=row.id, after={"kind": row.kind, "name": row.name, "fileId": str(stored.id), "size": stored.size}, ip=meta.ip, request_id=meta.request_id)
     return asset_out(row)
+
+
+async def delete_asset(session: AsyncSession, company_id: uuid.UUID, asset_id: uuid.UUID, staff: StaffPrincipal, meta: RequestMeta) -> None:
+    """Soft-delete a template asset; document snapshots keep their file bytes, so printed PDFs stay intact."""
+    row = await session.get(TemplateAsset, asset_id)
+    if row is None or row.company_id != company_id or row.deleted_at is not None:
+        raise NotFoundError(MSG_ASSET_NOT_FOUND)
+    row.deleted_at = utcnow()
+    row.deleted_by = staff.id
+    await session.flush()
+    await audit(session, actor_type="staff", actor_id=staff.id, company_id=company_id, action="asset.delete", entity="template_asset", entity_id=row.id, before={"kind": row.kind, "name": row.name, "fileId": str(row.file_id)}, ip=meta.ip, request_id=meta.request_id)
 
 
 # ----------------------------------------------------------------------------- sample context (preview)
