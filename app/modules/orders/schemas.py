@@ -335,3 +335,19 @@ class WorklistQuery(PageQuery):
     status: list[ItemStatus] = Field(default_factory=list)
     date_from: str | None = Field(default=None, max_length=10)
     date_to: str | None = Field(default=None, max_length=10)
+
+
+class PublicDocumentOtpOut(CamelModel):
+    """SMS challenge for a public result link that was already opened once."""
+
+    challenge_id: str
+    phone_masked: str
+    expires_in: int
+    code_length: int
+    resend_in: int
+    dev_code: str | None = None
+
+
+class PublicDocumentOtpVerifyIn(CamelModel):
+    challenge_id: str
+    code: str = Field(min_length=1, max_length=12)

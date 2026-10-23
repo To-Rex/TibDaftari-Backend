@@ -606,6 +606,32 @@ async def mark_document_viewed(session: AsyncSession, document_id: uuid.UUID, no
     )
 
 
+async def claim_public_first_view(session: AsyncSession, document_id: uuid.UUID, now: datetime) -> bool:
+    """Atomically claim the one direct public open; False means a code is required."""
+    res = await session.execute(
+        update(ResultDocument)
+        .where(ResultDocument.id == document_id, ResultDocument.public_view_count == 0)
+        .values(public_view_count=1, public_first_viewed_at=now, public_last_viewed_at=now)
+        .returning(ResultDocument.id)
+        .execution_options(synchronize_session=False)
+    )
+    return res.scalar_one_or_none() is not None
+
+
+async def mark_public_viewed(session: AsyncSession, document_id: uuid.UUID, now: datetime) -> None:
+    """Count an OTP-confirmed public open; the direct-open gate is already closed."""
+    await session.execute(
+        update(ResultDocument)
+        .where(ResultDocument.id == document_id)
+        .values(
+            public_view_count=ResultDocument.public_view_count + 1,
+            public_first_viewed_at=func.coalesce(ResultDocument.public_first_viewed_at, now),
+            public_last_viewed_at=now,
+        )
+        .execution_options(synchronize_session=False)
+    )
+
+
 async def mark_document_printed(session: AsyncSession, document_id: uuid.UUID, now: datetime) -> int:
     """Staff printed the result (it is handed over on paper): first print + a counter; returns the new count."""
     res = await session.execute(

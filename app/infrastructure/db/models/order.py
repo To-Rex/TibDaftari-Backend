@@ -126,5 +126,9 @@ class ResultDocument(PKMixin, AuditMixin, SoftDeleteMixin, TenantMixin, Base):
     view_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     printed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     print_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    # public link: the first open is direct, later opens need an SMS code to the patient's phone
+    public_view_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    public_first_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    public_last_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (Index("ix_result_documents_company_created", "company_id", "created_at"),)

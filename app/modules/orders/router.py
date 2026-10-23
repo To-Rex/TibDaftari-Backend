@@ -9,9 +9,7 @@ from fastapi import APIRouter, Query, Response
 from starlette.responses import Response as StarletteResponse
 
 from app.api.deps import DbSession, Meta, Staff
-from app.core.exceptions import NotFoundError
 from app.core.schemas import Page
-from app.modules.orders import repository as repo
 from app.modules.orders import service
 from app.modules.orders.schemas import (
     AddItemsIn,
@@ -30,6 +28,8 @@ from app.modules.orders.schemas import (
     OrderSummaryOut,
     PayIn,
     PrintedOut,
+    PublicDocumentOtpOut,
+    PublicDocumentOtpVerifyIn,
     ReasonIn,
     ResultDocumentOut,
     ResultSmsIn,
@@ -59,11 +59,15 @@ DOC_READ = ("confirm.result.read", "confirm.result.view", "reception.patient.rea
 APPROVED_VIEW = "confirm.result.view"
 
 
-def _pdf_response(pdf: bytes, filename: str) -> Response:
+def _pdf_response(pdf: bytes, filename: str, *, public: bool = False) -> Response:
     return Response(
         content=pdf,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="{filename}"', "Cache-Control": "private, max-age=3600"},
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            # public links are gated after the first open — never let the browser replay the PDF
+            "Cache-Control": "no-store" if public else "private, max-age=3600",
+        },
     )
 
 
@@ -309,12 +313,17 @@ async def document_pdf(document_id: uuid.UUID, staff: Staff, session: DbSession)
 
 @router.get("/d/{token}", summary="Public result PDF by unguessable token (SMS / Telegram links)")
 async def public_document_pdf(token: str, session: DbSession) -> StarletteResponse:
-    doc = await repo.get_document_by_token(session, token) if 16 <= len(token) <= 64 else None
-    if not doc:
-        if 16 <= len(token) <= 64 and await repo.document_token_revoked(session, token):
-            # the doctor took this result back to correct it — the patient gets the corrected one later
-            raise NotFoundError("Natija qayta ko‘rib chiqilmoqda", code="revoked", status=410)
-        raise NotFoundError(service.DOC_NOT_FOUND)
-    pdf = await service.ensure_document_pdf(session, doc)
-    await service.mark_document_viewed(session, doc)  # the patient got it ("results received" reports)
-    return _pdf_response(pdf, service.pdf_filename(doc))
+    """First open is direct; later opens answer 401 `otp_required` and need `/otp/verify`."""
+    pdf, filename = await service.public_document_pdf(session, token)
+    return _pdf_response(pdf, filename, public=True)
+
+
+@router.post("/d/{token}/otp/request", response_model=PublicDocumentOtpOut, summary="Send an SMS code for a public result link")
+async def public_document_otp_request(token: str, session: DbSession, meta: Meta) -> PublicDocumentOtpOut:
+    return await service.public_document_otp_request(session, token, meta)
+
+
+@router.post("/d/{token}/otp/verify", summary="Verify the SMS code and return the public result PDF")
+async def public_document_otp_verify(token: str, body: PublicDocumentOtpVerifyIn, session: DbSession, meta: Meta) -> StarletteResponse:
+    pdf, filename = await service.public_document_otp_verify(session, token, body.challenge_id, body.code, meta)
+    return _pdf_response(pdf, filename, public=True)

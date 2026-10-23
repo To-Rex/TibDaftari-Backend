@@ -11,13 +11,16 @@ Other modules (portal, telegram) consume `get_order_bundle`, `order_out`, `item_
 from __future__ import annotations
 
 import copy
+import hmac
 import logging
 import math
+import re
 import secrets
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -25,6 +28,7 @@ from app.api.deps import RequestMeta, StaffPrincipal
 from app.core.audit import audit
 from app.core.config import settings
 from app.core.exceptions import (
+    AuthError,
     ConflictError,
     ForbiddenError,
     NotFoundError,
@@ -34,6 +38,7 @@ from app.core.exceptions import (
 )
 from app.core.pagination import page_of
 from app.core.schemas import Page, iso_z
+from app.core.security import random_digits, sha256_hex
 from app.core.textutil import is_valid_uz_phone, norm_phone, slugify
 from app.core.timeutil import utcnow
 from app.infrastructure.db.models import (
@@ -41,13 +46,14 @@ from app.infrastructure.db.models import (
     Company,
     Order,
     OrderItem,
+    OtpChallenge,
     Patient,
     Payment,
     ResultDocument,
     ResultTemplate,
     empty_progress,
 )
-from app.infrastructure.redis import cache
+from app.infrastructure.redis import cache, rate_limit
 from app.infrastructure.redis.client import get_redis
 from app.modules.files import service as files_svc
 from app.modules.messaging import service as messaging
@@ -74,6 +80,7 @@ from app.modules.orders.schemas import (
     PayIn,
     PaymentOut,
     ProgressOut,
+    PublicDocumentOtpOut,
     ResultDocumentOut,
     ResultSmsIn,
     ResultSmsOut,
@@ -1133,6 +1140,7 @@ async def _issue_document(
         schemas=schemas,
         service_codes=service_codes,
         district_name=district_name,
+        region_name=region_name,
         approved_at=now,
     )
     at = iso_z(now)
@@ -1513,3 +1521,168 @@ async def mark_document_printed(session: AsyncSession, document_id: uuid.UUID, s
     """Staff printed the result (TPrints or the browser dialog) — counts as handed over to the patient."""
     doc = await get_document_or_404(session, document_id, scope_company(staff), staff)
     return await repo.mark_document_printed(session, doc.id, utcnow())
+
+# ----------------------------------------------------------------------------- public link access
+
+
+def mask_phone(phone: str | None) -> str | None:
+    """`+998 ** *** 03 13` - enough to recognize the number, not enough to leak it."""
+    digits = re.sub(r"\D", "", phone or "")
+    if len(digits) < 7:
+        return None
+    if len(digits) >= 12:
+        return f"+{digits[:3]} ** *** {digits[-4:-2]} {digits[-2:]}"
+    return f"+{digits[:3]} *** {digits[-2:]}"
+
+
+async def _public_document(session: AsyncSession, token: str) -> ResultDocument:
+    doc = await repo.get_document_by_token(session, token) if 16 <= len(token) <= 64 else None
+    if not doc:
+        if 16 <= len(token) <= 64 and await repo.document_token_revoked(session, token):
+            raise NotFoundError("Natija qayta ko'rib chiqilmoqda", code="revoked", status=410)
+        raise NotFoundError(DOC_NOT_FOUND)
+    return doc
+
+
+async def _public_document_patient(session: AsyncSession, doc: ResultDocument) -> tuple[Patient, str]:
+    """The patient plus the phone the result SMS actually went to (the order snapshot first)."""
+    patient = await session.get(Patient, doc.patient_id)
+    order = await session.get(Order, doc.order_id)
+    phone = norm_phone((order.patient_phone if order else None) or (patient.phone if patient else None) or "")
+    if not patient or patient.deleted_at is not None or not is_valid_uz_phone(phone):
+        raise NotFoundError("Bemor topilmadi")
+    return patient, phone
+
+
+async def public_document_pdf(session: AsyncSession, token: str) -> tuple[bytes, str]:
+    """First public open: the PDF itself. Later opens raise `otp_required`."""
+    doc = await _public_document(session, token)
+    pdf = await ensure_document_pdf(session, doc)
+    claimed = await repo.claim_public_first_view(session, doc.id, utcnow())
+    if not claimed:
+        raise NotFoundError(
+            "Bu havola allaqachon ochilgan. Natijangizni shaxsiy kabinetdan ko‘ring.",
+            code="already_viewed",
+            status=410,
+        )
+    await mark_document_viewed(session, doc)
+    return pdf, pdf_filename(doc)
+
+
+async def public_document_otp_request(session: AsyncSession, token: str, meta: RequestMeta) -> PublicDocumentOtpOut:
+    """Public links are single-use; the SMS re-verification path is closed."""
+    raise NotFoundError(
+        "Bu havola allaqachon ochilgan. Natijangizni shaxsiy kabinetdan ko‘ring.",
+        code="already_viewed",
+        status=410,
+    )
+    doc = await _public_document(session, token)
+    patient, phone = await _public_document_patient(session, doc)
+    ip = meta.ip or "?"
+    await rate_limit.enforce(f"rl:docotp:ip:{ip}", settings.auth_rate_limit_per_minute, 60)
+    await rate_limit.enforce(f"rl:docotp:token:{token}", 5, 3600, "Juda ko'p urinish. Keyinroq qayta urinib ko'ring.")
+    await rate_limit.enforce(f"rl:docotp:phone:{phone}", 5, 3600, "Juda ko'p urinish. Keyinroq qayta urinib ko'ring.")
+    cooldown_key = f"docotp:cooldown:{token}"
+    try:
+        if await get_redis().exists(cooldown_key):
+            raise RateLimitedError("Kod allaqachon yuborilgan. Biroz kuting.", details={"retryAfter": settings.otp_resend_cooldown_seconds})
+    except RateLimitedError:
+        raise
+    except Exception:  # pragma: no cover - redis is optional for this guard
+        pass
+
+    code = random_digits(settings.otp_length)
+    challenge = OtpChallenge(
+        phone=phone,
+        purpose="document",
+        code_hash=sha256_hex(code),
+        max_attempts=settings.otp_max_attempts,
+        expires_at=utcnow() + timedelta(seconds=settings.otp_ttl_seconds),
+        company_id=doc.company_id,
+        meta={"token": token, "documentId": str(doc.id), "ip": meta.ip},
+    )
+    session.add(challenge)
+    await session.flush()
+    company = await session.get(Company, doc.company_id)
+    if company:
+        await messaging.enqueue_sms_if_configured(
+            session, company, kind="otp", to=phone, text=messaging.otp_text(company, code), patient_id=patient.id, branch_id=patient.branch_id
+        )
+    try:
+        await get_redis().set(cooldown_key, "1", ex=settings.otp_resend_cooldown_seconds)
+    except Exception:  # pragma: no cover
+        pass
+    if settings.otp_dev_mode:
+        log.info("Document OTP for %s: %s (dev mode)", phone, code)
+    await audit(
+        session,
+        actor_type="patient",
+        actor_id=patient.id,
+        company_id=doc.company_id,
+        action="document_otp_request",
+        entity="result_document",
+        entity_id=doc.id,
+        ip=meta.ip,
+        request_id=meta.request_id,
+    )
+    return PublicDocumentOtpOut(
+        challenge_id=str(challenge.id),
+        phone_masked=mask_phone(phone) or "",
+        expires_in=settings.otp_ttl_seconds,
+        code_length=settings.otp_length,
+        resend_in=settings.otp_resend_cooldown_seconds,
+        dev_code=code if settings.otp_dev_mode else None,
+    )
+
+
+async def public_document_otp_verify(session: AsyncSession, token: str, challenge_id: str, code: str, meta: RequestMeta) -> tuple[bytes, str]:
+    """Public links are single-use; the SMS re-verification path is closed."""
+    raise NotFoundError(
+        "Bu havola allaqachon ochilgan. Natijangizni shaxsiy kabinetdan ko‘ring.",
+        code="already_viewed",
+        status=410,
+    )
+    doc = await _public_document(session, token)
+    patient, phone = await _public_document_patient(session, doc)
+    try:
+        cid = uuid.UUID(challenge_id)
+    except (ValueError, TypeError) as exc:
+        raise AuthError("Kod muddati tugagan", code="otp_expired") from exc
+    ip = meta.ip or "?"
+    await rate_limit.enforce(f"rl:docotp:verify:ip:{ip}", settings.auth_rate_limit_per_minute, 60)
+    await rate_limit.enforce(f"rl:docotp:verify:ch:{cid}", settings.otp_max_attempts, settings.otp_ttl_seconds, "Kod muddati tugagan")
+    challenge = await session.get(OtpChallenge, cid)
+    now = utcnow()
+    token_in_meta = (challenge.meta or {}).get("token") if challenge else None
+    if (
+        not challenge
+        or challenge.consumed_at
+        or challenge.expires_at < now
+        or challenge.purpose != "document"
+        or token_in_meta != token
+        or challenge.phone != phone
+    ):
+        raise AuthError("Kod muddati tugagan", code="otp_expired")
+    if challenge.attempts >= challenge.max_attempts:
+        raise AuthError("Kod muddati tugagan", code="otp_expired")
+    if not hmac.compare_digest(sha256_hex(code.strip()), challenge.code_hash):
+        await session.execute(update(OtpChallenge).where(OtpChallenge.id == cid).values(attempts=OtpChallenge.attempts + 1))
+        await session.commit()
+        raise AuthError("Kod noto'g'ri", code="otp_invalid")
+    challenge.consumed_at = now
+    await repo.mark_public_viewed(session, doc.id, now)
+    await mark_document_viewed(session, doc)
+    pdf = await ensure_document_pdf(session, doc)
+    await audit(
+        session,
+        actor_type="patient",
+        actor_id=patient.id,
+        company_id=doc.company_id,
+        action="document_otp_verify",
+        entity="result_document",
+        entity_id=doc.id,
+        ip=meta.ip,
+        request_id=meta.request_id,
+    )
+    await session.flush()
+    return pdf, pdf_filename(doc)

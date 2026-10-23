@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from app.api.deps import RequestMeta
 from app.core.config import settings
 from app.modules.messaging.service import render_text, result_ready_order_text, result_ready_text
-from app.modules.orders.service import public_result_link
+from app.modules.orders.service import mask_phone, public_result_link
 
 COMPANY = SimpleNamespace(name="Temo Med", settings={})
 
@@ -33,3 +33,9 @@ def test_public_link_uses_the_staff_web_app() -> None:
     assert public_result_link(doc, meta) == "https://temo.uz/d/tok123"
     assert public_result_link(doc, None) == settings.frontend_url.rstrip("/") + "/d/tok123"
     assert public_result_link(SimpleNamespace(public_token=None), meta) == ""
+
+def test_mask_phone_hides_the_middle() -> None:
+    assert mask_phone("998995340313") == "+998 ** *** 03 13"
+    assert mask_phone("+998 99 534 03 13") == "+998 ** *** 03 13"
+    assert mask_phone("123") is None
+    assert mask_phone(None) is None

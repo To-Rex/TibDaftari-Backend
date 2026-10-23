@@ -383,6 +383,11 @@ def test_full_workflow_create_pay_worklist_values_submit_approve(env: dict[str, 
     assert ("sms", "result_ready") in kinds and ("telegram", "result_ready") in kinds
     r = c.get(f"{API}/d/{token}")
     assert r.status_code == 200 and r.content == FAKE_PDF
+    # the link is single-use: a second open answers already_viewed and sends the patient to the cabinet
+    r = c.get(f"{API}/d/{token}")
+    assert r.status_code == 410 and r.json()["error"]["code"] == "already_viewed"
+    assert c.post(f"{API}/d/{token}/otp/request").status_code == 410
+    assert c.post(f"{API}/d/{token}/otp/verify", json={"challengeId": "x", "code": "000000"}).status_code == 410
     assert c.get(f"{API}/d/{'x' * 32}").status_code == 404
 
     # reject path on it2 (no schema → no required fields)
