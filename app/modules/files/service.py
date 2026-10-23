@@ -24,7 +24,7 @@ from app.infrastructure.db.models import StoredFile
 
 _DATA_URL = re.compile(r"^data:(?P<mime>[\w.+-]+/[\w.+-]+)?(?P<params>(;[\w-]+=[\w-]+)*)(?P<b64>;base64)?,(?P<data>.*)$", re.S)
 ALLOWED_IMAGE_MIMES = {"image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp", "image/bmp", "image/svg+xml"}
-MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_IMAGE_BYTES = 10_000_000
 
 
 def file_url(file_id: uuid.UUID | str) -> str:
@@ -93,7 +93,7 @@ async def store_data_url(session: AsyncSession, *, company_id: uuid.UUID | None,
     if mime not in ALLOWED_IMAGE_MIMES:
         raise ValidationError("Faqat rasm fayllari qabul qilinadi (png, jpg, webp, svg)")
     if len(data) > MAX_IMAGE_BYTES:
-        raise ValidationError("Rasm hajmi 8 MB dan oshmasligi kerak")
+        raise ValidationError("Rasm hajmi 10 MB dan oshmasligi kerak")
     row = await store_bytes(session, company_id=company_id, data=data, mime=mime, filename=filename, created_by=created_by, is_public=True)
     return row, image_size(data, mime)
 
