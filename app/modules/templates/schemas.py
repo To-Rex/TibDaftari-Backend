@@ -158,7 +158,7 @@ class TemplateAssetOut(CamelModel):
 class TemplateAssetIn(CamelModel):
     kind: AssetKind
     name: str = Field(min_length=1, max_length=200)
-    url: str = Field(min_length=10, max_length=12_000_000)
+    url: str = Field(min_length=10, max_length=14_000_000)
     width: float = Field(default=0, ge=0)
     height: float = Field(default=0, ge=0)
     employee_id: str | None = None
