@@ -38,6 +38,26 @@ from app.modules.reports.schemas import (
 
 DASHBOARD_TTL_SECONDS = 30
 MAX_RANGE_DAYS = 366 * 3
+#: staff with `reports.finance.recent` (the registrar desk) see revenue for the last 7 days only
+RECENT_WINDOW_DAYS = 7
+
+
+def _recent_only(staff: StaffPrincipal | None) -> bool:
+    """Registrar-style finance: revenue is visible, but only within the last 7 days."""
+    return staff is not None and not staff.has("reports.finance.read") and staff.has("reports.finance.recent")
+
+
+def _clamp_recent(staff: StaffPrincipal | None, d_from: date, d_to: date) -> tuple[date, date]:
+    """Cap the window of a revenue-bearing report to the last 7 days for recent-only staff."""
+    if not _recent_only(staff):
+        return d_from, d_to
+    today = today_local()
+    oldest = today - timedelta(days=RECENT_WINDOW_DAYS - 1)
+    if d_from < oldest:
+        d_from = oldest
+    if d_to > today:
+        d_to = today
+    return d_from, d_to
 
 
 def _parse_range(q: RangeQuery) -> tuple[date, date, uuid.UUID | None]:
@@ -109,6 +129,7 @@ def _branches(staff: StaffPrincipal | None, branch_id: uuid.UUID | None) -> list
 async def dashboard(session: AsyncSession, company_id: uuid.UUID, q: RangeQuery, staff: StaffPrincipal | None = None) -> DashboardSummaryOut:
     """§9 `dashboard`: today's counters + dense daily trend + top-level category split (Redis 30s)."""
     d_from, d_to, branch_id = _parse_range(q)
+    d_from, d_to = _clamp_recent(staff, d_from, d_to)
     branches = _branches(staff, branch_id)
     scope_key = ",".join(sorted(str(b) for b in branches)) if branches is not None else "all"
     key = f"co:{company_id}:reports:dashboard:{scope_key}:{d_from}:{d_to}"
@@ -123,6 +144,7 @@ async def dashboard(session: AsyncSession, company_id: uuid.UUID, q: RangeQuery,
 async def breakdown(session: AsyncSession, company_id: uuid.UUID, q: BreakdownQuery, staff: StaffPrincipal | None = None) -> list[BreakdownRowOut]:
     """§9 `breakdown`: non-cancelled items in range grouped by category/service/branch/employee, revenue desc."""
     d_from, d_to, branch_id = _parse_range(q)
+    d_from, d_to = _clamp_recent(staff, d_from, d_to)
     start, end = day_range(d_from, d_to)
     rows = await repo.breakdown(session, company_id, q.by, _branches(staff, branch_id), start, end)
     return [BreakdownRowOut(name=r.name or "—", count=int(r.count), revenue=int(r.revenue)) for r in rows]

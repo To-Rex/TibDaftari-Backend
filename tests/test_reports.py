@@ -36,6 +36,36 @@ TODAY = today_local()
 YESTERDAY = TODAY - timedelta(days=1)
 
 
+class _StubStaff:
+    """Minimal StaffPrincipal stand-in for the pure range-clamp test."""
+
+    def __init__(self, *perms: str) -> None:
+        self.perms = set(perms)
+
+    def has(self, *perms: str) -> bool:
+        return any(p in self.perms for p in perms)
+
+
+def test_clamp_recent_window() -> None:
+    """`reports.finance.recent` (registrar) sees revenue for the last 7 days only."""
+    from app.modules.reports.service import _clamp_recent
+
+    today = TODAY
+    wide = (today - timedelta(days=30), today)
+    recent = _StubStaff("reports.operations.read", "reports.finance.recent")
+    full = _StubStaff("reports.finance.read")
+    plain = _StubStaff("reports.operations.read")
+
+    f, t = _clamp_recent(recent, *wide)
+    assert f == today - timedelta(days=6) and t == today
+    inside = (today - timedelta(days=3), today - timedelta(days=1))
+    assert _clamp_recent(recent, *inside) == inside
+    assert _clamp_recent(recent, *wide)[1] == today  # future dates stay within today
+    assert _clamp_recent(full, *wide) == wide
+    assert _clamp_recent(plain, *wide) == wide
+    assert _clamp_recent(None, *wide) == wide
+
+
 def _at(day, hour: int = 10) -> datetime:
     """A moment on `day` in Asia/Tashkent (stored as UTC)."""
     return datetime.combine(day, time(hour=hour), tzinfo=DEFAULT_TZ).astimezone(UTC)
