@@ -66,6 +66,23 @@ def test_clamp_recent_window() -> None:
     assert _clamp_recent(None, *wide) == wide
 
 
+def test_reports_export_workbook_builds() -> None:
+    """The Excel builder emits a valid workbook for every sheet-label language."""
+    from datetime import UTC, date, datetime
+
+    from app.modules.reports import export
+
+    detail = [export.DetailRow(date=datetime(2026, 10, 20, 9, 0, tzinfo=UTC), number="T1-000001", patient="Bemor A", phone="+998 90 123-45-67", service="Qon tahlili", laboratory="Gematologiya", branch="T-main", price=50000, status="approved")]
+    labs = [export.AggRow(name="Gematologiya", count=3, revenue=150000)]
+    svc = [export.AggRow(name="Qon tahlili", count=2, revenue=100000)]
+    br = [export.AggRow(name="T-main", count=3, revenue=150000)]
+    emp = [export.AggRow(name="Xodim X", count=2, revenue=100000)]
+    daily = [export.DayRow(date="2026-10-20", orders=2, revenue=100000)]
+    for lang in ("uz", "ru", "en"):
+        data = export.build_xlsx(detail, labs, svc, br, emp, daily, lang=lang, d_from=date(2026, 10, 14), d_to=date(2026, 10, 20), generated_at=datetime.now(UTC))
+        assert data[:2] == b"PK" and len(data) > 4000
+
+
 def _at(day, hour: int = 10) -> datetime:
     """A moment on `day` in Asia/Tashkent (stored as UTC)."""
     return datetime.combine(day, time(hour=hour), tzinfo=DEFAULT_TZ).astimezone(UTC)

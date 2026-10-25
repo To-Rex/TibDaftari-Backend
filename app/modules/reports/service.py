@@ -14,6 +14,7 @@ from app.core.schemas import Page, dump
 from app.core.timeutil import day_range, today_local, utcnow
 from app.infrastructure.db.models import Category
 from app.infrastructure.redis import cache
+from app.modules.reports import export as reports_export
 from app.modules.reports import repository as repo
 from app.modules.reports.schemas import (
     BreakdownQuery,
@@ -25,6 +26,7 @@ from app.modules.reports.schemas import (
     PatientReportOut,
     PatientTrendPoint,
     RangeQuery,
+    ReportExportQuery,
     ResultListQuery,
     ResultRowOut,
     ResultsReportOut,
@@ -148,6 +150,62 @@ async def breakdown(session: AsyncSession, company_id: uuid.UUID, q: BreakdownQu
     start, end = day_range(d_from, d_to)
     rows = await repo.breakdown(session, company_id, q.by, _branches(staff, branch_id), start, end)
     return [BreakdownRowOut(name=r.name or "—", count=int(r.count), revenue=int(r.revenue)) for r in rows]
+
+
+async def export_workbook(session: AsyncSession, company_id: uuid.UUID, q: ReportExportQuery, staff: StaffPrincipal | None = None) -> bytes:
+    """The period as an Excel workbook: patients × analyses, labs and the other cuts (service / branch / employee / daily)."""
+    d_from, d_to, branch_id = _parse_range(q)
+    d_from, d_to = _clamp_recent(staff, d_from, d_to)
+    branches = _branches(staff, branch_id)
+    start, end = day_range(d_from, d_to)
+
+    detail = await repo.export_items(session, company_id, branches, start, end)
+    roots = top_level_lookup(await repo.categories(session, company_id)) if detail else {}
+
+    def _lab(category_id: uuid.UUID | None, fallback: str | None) -> str:
+        root = roots.get(category_id) if category_id else None
+        return root.name if root else (fallback or "—")
+
+    detail_rows = [
+        reports_export.DetailRow(
+            date=r.created_at,
+            number=r.order_number or "",
+            patient=r.patient_name or "",
+            phone=r.patient_phone or "",
+            service=r.service_name or "",
+            laboratory=_lab(r.category_id, r.category_name),
+            branch=r.branch or "",
+            price=int(r.final_price or 0),
+            status=r.status,
+        )
+        for r in detail
+    ]
+
+    def _agg(rows) -> list[reports_export.AggRow]:
+        return [reports_export.AggRow(name=r.name or "—", count=int(r.count), revenue=int(r.revenue)) for r in rows]
+
+    cat_rows = await repo.items_by_category(session, company_id, branches, start, end)
+    labs = sorted(
+        (reports_export.AggRow(name=_lab(r.category_id, r.name), count=int(r.count), revenue=int(r.revenue)) for r in cat_rows),
+        key=lambda x: x.revenue,
+        reverse=True,
+    )
+    services = _agg(await repo.breakdown(session, company_id, "service", branches, start, end))
+    branch_rows = _agg(await repo.breakdown(session, company_id, "branch", branches, start, end))
+    employee_rows = _agg(await repo.breakdown(session, company_id, "employee", branches, start, end))
+
+    trend_map = await repo.order_trend(session, company_id, branches, start, end)
+    daily: list[reports_export.DayRow] = []
+    d = d_from
+    while d <= d_to:
+        orders, revenue = trend_map.get(d.isoformat(), (0, 0))
+        daily.append(reports_export.DayRow(date=d.isoformat(), orders=orders, revenue=revenue))
+        d += timedelta(days=1)
+
+    return reports_export.build_xlsx(
+        detail_rows, labs, services, branch_rows, employee_rows, daily,
+        lang=q.lang, d_from=d_from, d_to=d_to, generated_at=utcnow(),
+    )
 
 
 # ----------------------------------------------------------------------------- patients / results / services

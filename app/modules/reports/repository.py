@@ -137,6 +137,35 @@ async def categories(session: AsyncSession, company_id: uuid.UUID) -> list[Categ
     return list((await session.execute(select(Category).where(Category.company_id == company_id, alive(Category)))).scalars().all())
 
 
+async def export_items(
+    session: AsyncSession, company_id: uuid.UUID, branches: list[uuid.UUID] | None, start: datetime, end: datetime, limit: int = 20_000
+) -> list[Row[Any]]:
+    """One row per non-cancelled item of the period (patient × analysis × price) for the Excel export."""
+    stmt = (
+        select(
+            OrderItem.created_at,
+            Order.number.label("order_number"),
+            Order.patient_name,
+            Order.patient_phone,
+            OrderItem.service_name,
+            OrderItem.category_id,
+            OrderItem.category_name,
+            OrderItem.final_price,
+            OrderItem.status,
+            func.coalesce(Branch.name, literal("—")).label("branch"),
+        )
+        .select_from(OrderItem)
+        .join(Order, Order.id == OrderItem.order_id)
+        .outerjoin(Branch, Branch.id == OrderItem.branch_id)
+        .where(OrderItem.company_id == company_id, alive(OrderItem), OrderItem.status != "cancelled", OrderItem.created_at >= start, OrderItem.created_at < end)
+        .order_by(OrderItem.created_at.asc(), OrderItem.id)
+        .limit(limit)
+    )
+    if branches is not None:
+        stmt = stmt.where(OrderItem.branch_id.in_(branches))
+    return list((await session.execute(stmt)).all())
+
+
 async def breakdown(
     session: AsyncSession, company_id: uuid.UUID, by: str, branches: list[uuid.UUID] | None, start: datetime, end: datetime
 ) -> list[Row[Any]]:

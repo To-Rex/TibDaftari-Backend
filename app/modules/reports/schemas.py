@@ -26,6 +26,12 @@ class BreakdownQuery(RangeQuery):
     by: BreakdownBy
 
 
+class ReportExportQuery(RangeQuery):
+    """Reports Excel export: the same range, plus the sheet-label language."""
+
+    lang: str = Field(default="uz", max_length=2)
+
+
 class TrendPoint(CamelModel):
     date: str
     orders: int
