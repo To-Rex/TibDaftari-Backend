@@ -12,7 +12,7 @@ import hashlib
 import io
 import re
 import uuid
-from urllib.parse import unquote_to_bytes
+from urllib.parse import quote, unquote_to_bytes
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +20,7 @@ from sqlalchemy.orm import defer
 
 from app.core.config import settings
 from app.core.exceptions import ValidationError
+from app.core.textutil import slugify
 from app.infrastructure.db.models import StoredFile
 
 _DATA_URL = re.compile(r"^data:(?P<mime>[\w.+-]+/[\w.+-]+)?(?P<params>(;[\w-]+=[\w-]+)*)(?P<b64>;base64)?,(?P<data>.*)$", re.S)
@@ -100,6 +101,18 @@ async def store_data_url(session: AsyncSession, *, company_id: uuid.UUID | None,
 
 async def get_file(session: AsyncSession, file_id: uuid.UUID) -> StoredFile | None:
     return await session.get(StoredFile, file_id)
+
+
+def content_disposition(filename: str | None) -> str | None:
+    """Safe `Content-Disposition` value for a stored file.
+
+    HTTP headers must be latin-1; a raw user-supplied name (e.g. Cyrillic) would crash the
+    response with `UnicodeEncodeError`. `filename*=` (RFC 5987) carries the original name,
+    `filename=` is the ASCII (transliterated) fallback for clients without RFC 5987 support.
+    """
+    if not filename:
+        return None
+    return f"inline; filename=\"{slugify(filename)}\"; filename*=UTF-8''{quote(filename)}"
 
 
 async def load_bytes(session: AsyncSession, file_id: uuid.UUID | str | None) -> tuple[bytes, str] | None:

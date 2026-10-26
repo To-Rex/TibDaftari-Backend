@@ -9,7 +9,7 @@ from starlette.responses import Response as StarletteResponse
 
 from app.api.deps import DbSession
 from app.core.exceptions import NotFoundError
-from app.modules.files.service import get_file
+from app.modules.files.service import content_disposition, get_file
 
 router = APIRouter()
 
@@ -25,5 +25,5 @@ async def download(file_id: uuid.UUID, session: DbSession) -> StarletteResponse:
         # Client-supplied SVG may carry scripts: never let it execute on the API origin.
         headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
     if row.filename:
-        headers["Content-Disposition"] = f'inline; filename="{row.filename}"'
+        headers["Content-Disposition"] = content_disposition(row.filename)
     return Response(content=bytes(row.data), media_type=row.mime, headers=headers)
