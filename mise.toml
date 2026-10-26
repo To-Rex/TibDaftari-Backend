@@ -4,8 +4,8 @@
 #
 # mise >= 2026.3 verifies GitHub artifact attestations for python-build-standalone tarballs.
 # Older builds (e.g. 3.12.8+20250115) have none and the build fails with
-# "No GitHub artifact attestations found for python@…". railpack.json now pins "3.12"
-# (latest patch, which IS attested); this setting is a safety net so a build never
+# "No GitHub artifact attestations found for python@…". railpack.json pins an exact patch
+# (3.12.15); this setting is a safety net so a build never
 # fails again on a missing attestation.
 [settings]
 python.github_attestations = false
