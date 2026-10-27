@@ -867,6 +867,44 @@ async def cancel_order(
     return order_out(order)
 
 
+async def delete_order(session: AsyncSession, order_id: uuid.UUID, staff: StaffPrincipal, meta: RequestMeta) -> OrderOut:
+    """Soft-delete a cheque that never "happened": unpaid, nothing refunded, no lab work started.
+
+    Only `pending`/`cancelled` items may exist (lab-entered results, payments — even refunded ones —
+    and issued documents keep the cheque undeletable, preserving the full history)."""
+    order = await get_order_or_404(session, order_id, scope_company(staff), for_update=True, staff=staff)
+    if order.payment != "unpaid" or await repo.payments_of_order(session, order.id):
+        raise ConflictError("To‘langan chekni o‘chirish uchun avval qaytarish qiling", code="paid")
+    items = await repo.items_of_order(session, order.id)
+    for it in items:
+        if it.status not in ("pending", "cancelled"):
+            raise ConflictError("Laboratoriya boshlagan tahlilni o‘chirib bo‘lmaydi", code="in_progress")
+    now = utcnow()
+    order.deleted_at = now
+    order.deleted_by = staff.id
+    _touch(order, now)
+    for it in items:
+        it.deleted_at = now
+        it.deleted_by = staff.id
+        _touch(it, now)
+    if order.patient_id:
+        await repo.bump_patient_stats(session, order.patient_id, orders=-1, now=now)
+    await audit(
+        session,
+        actor_type="staff",
+        actor_id=staff.id,
+        company_id=order.company_id,
+        action="order.delete",
+        entity="order",
+        entity_id=order.id,
+        before={"number": order.number, "status": order.status, "items": len(items)},
+        after={"deleted": True},
+        ip=meta.ip,
+        request_id=meta.request_id,
+    )
+    return order_out(order)
+
+
 # ----------------------------------------------------------------------------- category restriction
 
 CATEGORY_FORBIDDEN = "Bu kategoriya sizga biriktirilmagan"

@@ -70,7 +70,7 @@ catalog:   GET/POST /companies/{cid}/categories  PUT/DELETE /categories/{id}
 templates: GET/POST /companies/{cid}/templates  GET/PUT/DELETE /templates/{id}  POST /templates/{id}/status
            POST /templates/{id}/duplicate  GET/POST /companies/{cid}/assets  POST /templates/{id}/preview.pdf
 orders:    GET/POST /companies/{cid}/orders  GET /orders/{id}  POST /orders/{id}/items  DELETE /orders/{id}/items/{itemId}
-           POST /orders/{id}/pay  POST /orders/{id}/cancel  POST /payments/{id}/refund
+           POST /orders/{id}/pay  POST /orders/{id}/cancel  DELETE /orders/{id}  POST /payments/{id}/refund
            GET /companies/{cid}/worklist  GET /items/{id}  PUT /items/{id}/values  POST /items/{id}/submit
            POST /items/{id}/approve  POST /items/{id}/reject  POST /orders/{id}/approve  GET /orders/{id}/scope-items
            GET /companies/{cid}/documents  GET /documents/{id}  GET /documents/{id}/pdf

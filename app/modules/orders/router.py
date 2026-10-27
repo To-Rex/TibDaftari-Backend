@@ -168,6 +168,12 @@ async def cancel_order(order_id: uuid.UUID, body: ReasonIn, staff: Staff, sessio
     return await service.cancel_order(session, order_id, staff, body.reason, meta)
 
 
+@router.delete("/orders/{order_id}", response_model=OrderOut, summary="Delete an untouched (unpaid, no lab work) order")
+async def delete_order(order_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta) -> OrderOut:
+    staff.require("reception.order.delete")
+    return await service.delete_order(session, order_id, staff, meta)
+
+
 # ----------------------------------------------------------------------------- lab
 
 

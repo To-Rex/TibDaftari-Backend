@@ -6,6 +6,7 @@ from collections.abc import Iterable
 
 PERMISSIONS: tuple[str, ...] = (
     "reception.patient.read", "reception.patient.write", "reception.order.create", "reception.order.cancel",
+    "reception.order.delete",
     "reception.payment.create", "reception.payment.refund",
     "lab.worklist.read", "lab.result.write", "lab.result.submit",
     # confirm.result.view = approved results only (view / print / re-send) — the registrar desk
@@ -52,6 +53,7 @@ DEFAULT_COMPANY_ROLES: tuple[dict, ...] = (
         "is_system": False,
         "permissions": [
             "reception.patient.read", "reception.patient.write", "reception.order.create", "reception.order.cancel",
+            "reception.order.delete",
             "reception.payment.create", "reports.operations.read", "reports.finance.recent", "messaging.send",
             # approved results: view, print and re-send the SMS (no approving, nothing unapproved)
             "confirm.result.view", "confirm.result.resend",
