@@ -28,6 +28,7 @@ from app.modules.orders.schemas import (
     OrderSummaryOut,
     PayIn,
     PrintedOut,
+    PublicDocumentInfoOut,
     PublicDocumentOtpOut,
     PublicDocumentOtpVerifyIn,
     ReasonIn,
@@ -317,11 +318,10 @@ async def document_pdf(document_id: uuid.UUID, staff: Staff, session: DbSession)
     return _pdf_response(pdf, service.pdf_filename(doc))
 
 
-@router.get("/d/{token}", summary="Public result PDF by unguessable token (SMS / Telegram links)")
-async def public_document_pdf(token: str, session: DbSession) -> StarletteResponse:
-    """First open is direct; later opens answer 401 `otp_required` and need `/otp/verify`."""
-    pdf, filename = await service.public_document_pdf(session, token)
-    return _pdf_response(pdf, filename, public=True)
+@router.get("/d/{token}", response_model=PublicDocumentInfoOut, summary="Public result verification info by unguessable token (QR / SMS links)")
+async def public_document_info(token: str, session: DbSession) -> PublicDocumentInfoOut:
+    """Authenticity check for a scanned QR code — public metadata only; the PDF itself needs an SMS code."""
+    return await service.public_document_info(session, token)
 
 
 @router.post("/d/{token}/otp/request", response_model=PublicDocumentOtpOut, summary="Send an SMS code for a public result link")

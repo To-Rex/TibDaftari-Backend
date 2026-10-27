@@ -438,6 +438,8 @@ class _Renderer:
             self.el_line(el, x, y, w, h)
         elif kind == "image":
             self.el_image(el, x, y, w, h)
+        elif kind == "qr":
+            self.el_qr(el, x, y, w, h)
         elif kind == "table":
             self.el_table(el, x, y, w, h)
 
@@ -576,6 +578,35 @@ class _Renderer:
         pdf.set_dash_pattern()
         st = {**DEFAULT_STYLE, "fontSize": 10, "color": "#999999", "align": "center"}
         self.text_block(x, y, w, h, "image", st, single_line=True, v_align="middle")
+
+    def el_qr(self, el: dict[str, Any], x: float, y: float, w: float, h: float) -> None:
+        """QR code proving the document's authenticity — encodes the template expression `value`
+        (default `{doc.link}` = the public verification link). An empty value skips the element."""
+        value = ex.interpolate(str(el.get("value") or "{doc.link}"), self.ctx)
+        if not value or w <= 0 or h <= 0:
+            return
+        try:
+            import qrcode
+
+            dark = parse_color(el.get("dark")) or (20, 32, 29)
+            light = parse_color(el.get("light")) or (255, 255, 255)
+            qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=8, border=1)
+            qr.add_data(value)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color=dark, back_color=light).convert("RGBA")
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            data = buf.getvalue()
+            size = image_size(data, "image/png")
+            dx, dy, dw, dh = x, y, w, h
+            if size and size[0] > 0 and size[1] > 0:
+                scale = min(w / size[0], h / size[1])  # keep the QR square
+                dw, dh = size[0] * scale, size[1] * scale
+                dx, dy = x + (w - dw) / 2, y + (h - dh) / 2
+            with self.clip(x, y, w, h):
+                self.pdf.image(io.BytesIO(data), dx, dy, dw, dh)
+        except Exception:
+            log.exception("qr %s could not be rendered", el.get("id"))
 
     # ------------------------------------------------------------------ table
 

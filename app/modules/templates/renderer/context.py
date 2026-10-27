@@ -169,6 +169,7 @@ def build_render_context(
     today: date | None = None,
     payments: list[dict[str, Any]] | None = None,
     cashier: str | None = None,
+    doc_link: str | None = None,
 ) -> dict[str, Any]:
     """Build a RenderContext dict (spec §1) from plain dicts.
 
@@ -251,6 +252,9 @@ def build_render_context(
         ctx["items"] = items
     if cashier is not None:
         ctx["cashier"] = {"name": cashier}
+    if doc_link is not None:
+        # the QR element binds to {doc.link} — the public verification link of the issued document
+        ctx["doc"] = {"link": doc_link}
     if payments is not None:
         ctx["payments"] = [
             {

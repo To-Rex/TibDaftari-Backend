@@ -176,6 +176,8 @@ class ResultDocumentOut(CamelModel):
     created_at: datetime
     updated_at: datetime
     created_by: str | None = None
+    # the public verification link's token — the template's `{doc.link}` / QR encodes `<web app>/d/{token}`
+    public_token: str | None = None
 
 
 class OrderBundleOut(CamelModel):
@@ -337,8 +339,17 @@ class WorklistQuery(PageQuery):
     date_to: str | None = Field(default=None, max_length=10)
 
 
+class PublicDocumentInfoOut(CamelModel):
+    """Public verification info for a result link (QR / SMS): authenticity without any private data."""
+
+    id: str
+    title: str
+    company_name: str
+    issued_at: str
+
+
 class PublicDocumentOtpOut(CamelModel):
-    """SMS challenge for a public result link that was already opened once."""
+    """SMS challenge for viewing a public result link."""
 
     challenge_id: str
     phone_masked: str

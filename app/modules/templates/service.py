@@ -675,6 +675,7 @@ async def build_document_snapshot(
     district_name: str | None = None,
     region_name: str | None = None,
     approved_at: datetime | None = None,
+    doc_link: str | None = None,
 ) -> dict[str, Any]:
     """Freeze template doc + RenderContext + asset map for a result document (see module docstring).
 
@@ -766,6 +767,7 @@ async def build_document_snapshot(
         region_name=region_name,
         items=render_items,
         language=template.language,
+        doc_link=doc_link,
     )
     doc = template.doc or empty_doc()
     return {

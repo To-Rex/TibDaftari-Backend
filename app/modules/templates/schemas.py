@@ -16,7 +16,7 @@ AssetKind = Literal["logo", "stamp", "signature", "image"]
 
 PAPERS = {"A4", "A5", "Letter", "Receipt80", "Receipt58"}
 ORIENTATIONS = {"portrait", "landscape"}
-ELEMENT_TYPES = {"text", "rect", "line", "image", "ellipse", "table", "field"}
+ELEMENT_TYPES = {"text", "rect", "line", "image", "ellipse", "table", "field", "qr"}
 
 
 def empty_doc() -> dict[str, Any]:

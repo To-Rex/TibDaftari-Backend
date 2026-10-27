@@ -80,6 +80,7 @@ from app.modules.orders.schemas import (
     PayIn,
     PaymentOut,
     ProgressOut,
+    PublicDocumentInfoOut,
     PublicDocumentOtpOut,
     ResultDocumentOut,
     ResultSmsIn,
@@ -254,14 +255,22 @@ def document_pdf_url(document_id: uuid.UUID | str) -> str:
     return f"/api/v1/documents/{document_id}/pdf"
 
 
+def _public_base(meta: RequestMeta | None) -> str:
+    """The web app public links point at: the app the staff used (its Origin, checked against the CORS list),
+    else FRONTEND_URL."""
+    return (meta.origin if meta and meta.origin else settings.frontend_url).rstrip("/")
+
+
 def public_result_link(doc: ResultDocument, meta: RequestMeta | None) -> str:
-    """Short public link to a result for SMS / Telegram: `<web app>/d/<token>` — the web app the approving staff
-    used (its Origin, checked against the CORS list), else FRONTEND_URL. The app page opens the PDF
-    (`GET /api/v1/d/{token}`)."""
+    """Short public link to a result for SMS / Telegram: `<web app>/d/<token>`."""
     if not doc.public_token:
         return ""
-    base = (meta.origin if meta and meta.origin else settings.frontend_url).rstrip("/")
-    return f"{base}/d/{doc.public_token}"
+    return f"{_public_base(meta)}/d/{doc.public_token}"
+
+
+def public_result_link_for_token(token: str, meta: RequestMeta | None) -> str:
+    """The public link for a fresh token — used to freeze `{doc.link}` (the QR value) into the render snapshot."""
+    return f"{_public_base(meta)}/d/{token}"
 
 
 def document_out(d: ResultDocument) -> ResultDocumentOut:
@@ -281,6 +290,7 @@ def document_out(d: ResultDocument) -> ResultDocumentOut:
         created_at=d.created_at,
         updated_at=d.updated_at,
         created_by=_s(d.created_by),
+        public_token=d.public_token,
     )
 
 
@@ -1147,6 +1157,7 @@ async def _issue_document(
     order_item_ids: list[uuid.UUID] | None,
     now: datetime,
     actor_id: uuid.UUID,
+    meta: RequestMeta | None = None,
 ) -> tuple[ResultDocument, Company | None, Patient | None]:
     """Freeze the render snapshot, create the final document, render + store the PDF (best effort)."""
     company = await repo.get_company(session, order.company_id)
@@ -1169,6 +1180,7 @@ async def _issue_document(
     }
     district_name = await repo.get_district_name(session, patient.district_id)
     region_name = await repo.get_region_name(session, patient.region_id)
+    token = secrets.token_urlsafe(24)
     snapshot = await templates_svc.build_document_snapshot(
         session,
         template=template,
@@ -1184,6 +1196,7 @@ async def _issue_document(
         district_name=district_name,
         region_name=region_name,
         approved_at=now,
+        doc_link=public_result_link_for_token(token, meta),
     )
     at = iso_z(now)
     doc = ResultDocument(
@@ -1201,7 +1214,7 @@ async def _issue_document(
             {"channel": "sms", "status": "queued", "at": at},
         ],
         snapshot=snapshot,
-        public_token=secrets.token_urlsafe(24),
+        public_token=token,
         created_by=actor_id,
         created_at=now,
         updated_at=now,
@@ -1291,6 +1304,7 @@ async def approve_item(
         order_item_ids=None,
         now=now,
         actor_id=staff.id,
+        meta=meta,
     )
     item.document_id = doc.id
     _push_history(item, "approved", staff, now, document_id=doc.id)
@@ -1430,6 +1444,7 @@ async def approve_order(
         order_item_ids=[i.id for i in covered],
         now=now,
         actor_id=staff.id,
+        meta=meta,
     )
     for it in covered:
         if it in to_approve or it.document_id is None:
@@ -1596,28 +1611,22 @@ async def _public_document_patient(session: AsyncSession, doc: ResultDocument) -
     return patient, phone
 
 
-async def public_document_pdf(session: AsyncSession, token: str) -> tuple[bytes, str]:
-    """First public open: the PDF itself. Later opens raise `otp_required`."""
+async def public_document_info(session: AsyncSession, token: str) -> PublicDocumentInfoOut:
+    """Public verification info for a result link (QR / SMS): who issued it, when, and that it is authentic.
+
+    Scanned any number of times — nothing is consumed. The PDF itself is always behind an SMS code."""
     doc = await _public_document(session, token)
-    pdf = await ensure_document_pdf(session, doc)
-    claimed = await repo.claim_public_first_view(session, doc.id, utcnow())
-    if not claimed:
-        raise NotFoundError(
-            "Bu havola allaqachon ochilgan. Natijangizni shaxsiy kabinetdan ko‘ring.",
-            code="already_viewed",
-            status=410,
-        )
-    await mark_document_viewed(session, doc)
-    return pdf, pdf_filename(doc)
+    company = await repo.get_company(session, doc.company_id)
+    return PublicDocumentInfoOut(
+        id=str(doc.id),
+        title=doc.title,
+        company_name=company.name if company else "",
+        issued_at=iso_z(doc.created_at),
+    )
 
 
 async def public_document_otp_request(session: AsyncSession, token: str, meta: RequestMeta) -> PublicDocumentOtpOut:
-    """Public links are single-use; the SMS re-verification path is closed."""
-    raise NotFoundError(
-        "Bu havola allaqachon ochilgan. Natijangizni shaxsiy kabinetdan ko‘ring.",
-        code="already_viewed",
-        status=410,
-    )
+    """Send an SMS code to the phone the document belongs to (shown masked) — viewing the PDF needs it."""
     doc = await _public_document(session, token)
     patient, phone = await _public_document_patient(session, doc)
     ip = meta.ip or "?"
@@ -1678,12 +1687,7 @@ async def public_document_otp_request(session: AsyncSession, token: str, meta: R
 
 
 async def public_document_otp_verify(session: AsyncSession, token: str, challenge_id: str, code: str, meta: RequestMeta) -> tuple[bytes, str]:
-    """Public links are single-use; the SMS re-verification path is closed."""
-    raise NotFoundError(
-        "Bu havola allaqachon ochilgan. Natijangizni shaxsiy kabinetdan ko‘ring.",
-        code="already_viewed",
-        status=410,
-    )
+    """Verify the SMS code: the patient (or whoever holds the patient's phone) gets the PDF."""
     doc = await _public_document(session, token)
     patient, phone = await _public_document_patient(session, doc)
     try:

@@ -135,6 +135,12 @@ if status != cancelled: status = completed if (active and all approved) else ope
   (documentId), `revoked` (doctor takes an approved result back, reason, documentId), `reopened` (an approved item went
   back to approval because the order-scope document it shared was revoked). Items from before have their trail rebuilt
   from `submittedAt` / `approvedAt` / `rejectReason` until their next event. The portal never gets the trail.
+* **Public result link (2026-10, QR):** `GET /d/{token}` returns public verification info (title, clinic, issue date —
+  no private data) and may be scanned any number of times. The PDF itself is always behind an SMS code:
+  `POST /d/{token}/otp/request` sends the code to the phone the document belongs to (shown masked in the response);
+  `POST /d/{token}/otp/verify` returns the PDF and counts the view (`viewed_at`, `public_view_count`). Revoked
+  documents answer 410 `revoked` on every endpoint. The QR element of a template renders `{doc.link}` — the same
+  public link, frozen into the render snapshot at approval (RENDERER_SPEC §3.9).
 * **Revoke (`POST /items/{id}/revoke {reason}`, confirm.result.approve, reason required):** approved → `rejected` with
   `rejectReason`; approvedAt / doctor / documentId / submittedAt cleared; the document gets `status = revoked` and is
   soft-deleted (PDF link, portal, reports drop it; the public link answers 410 `revoked`); approved items sharing that
