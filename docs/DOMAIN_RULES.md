@@ -137,12 +137,25 @@ if status != cancelled: status = completed if (active and all approved) else ope
   (documentId), `revoked` (doctor takes an approved result back, reason, documentId), `reopened` (an approved item went
   back to approval because the order-scope document it shared was revoked). Items from before have their trail rebuilt
   from `submittedAt` / `approvedAt` / `rejectReason` until their next event. The portal never gets the trail.
-* **Public result link (2026-10, QR):** `GET /d/{token}` returns public verification info (title, clinic, issue date —
-  no private data) and may be scanned any number of times. The PDF itself is always behind an SMS code:
-  `POST /d/{token}/otp/request` sends the code to the phone the document belongs to (shown masked in the response);
+* **Public result link (2026-10, SMS / Telegram):** `GET /d/{token}` returns public info (title, clinic, issue date —
+  no private data) and may be opened any number of times. The PDF itself is always behind an SMS code:
+  `POST /d/{token}/otp/request` sends the code to the phone the document belongs to (the cheque's phone, else the
+  patient's; shown masked in the response) through the **cheque's branch** SMS account (the one that sent the result
+  SMS), else the patient's registration branch — a branch that switched SMS off is skipped (`sms_branch_for`). When
+  nobody can send, the request answers 409 `sms_not_configured` instead of "code sent" (dev mode still returns
+  `devCode`); no valid phone on the cheque or the patient → 409 `no_phone`; a running resend cooldown → 429 with the
+  real remaining `retryAfter`. The OTP outbox row carries the cheque (`order_id`) and the sending branch.
   `POST /d/{token}/otp/verify` returns the PDF and counts the view (`viewed_at`, `public_view_count`). Revoked
-  documents answer 410 `revoked` on every endpoint. The QR element of a template renders `{doc.link}` — the same
-  public link, frozen into the render snapshot at approval (RENDERER_SPEC §3.9).
+  documents answer 410 `revoked` on every endpoint.
+* **QR authenticity check (2026-10-29):** every issued document gets a second token, `verify_token`, of its own; the
+  QR element renders `{doc.link}` = `<web app>/v/{verify_token}`, frozen into the render snapshot at approval
+  (RENDERER_SPEC §3.9). `GET /v/{token}` answers only whether the paper is genuine — `status` `valid` | `revoked`
+  (the result was revoked, or its cheque cancelled / deleted; `revokedAt`), title, clinic, branch, cheque number,
+  approving doctor, issue time and the patient masked to initials (`H*** D***`). Never the values, the PDF, the phone
+  or an SMS code: the verify token is not accepted by `/d/…`, and the SMS token not by `/v/…`. Unknown token → 404
+  (the paper is not from this system). Scans are unlimited and not counted. `ResultDocumentOut.verifyLink` is the
+  exact QR value of the document (documents issued before 2026-10-29 have no `verify_token`; their QR — and
+  `verifyLink` — keep the SMS link).
 * **Revoke (`POST /items/{id}/revoke {reason}`, confirm.result.approve, reason required):** approved → `rejected` with
   `rejectReason`; approvedAt / doctor / documentId / submittedAt cleared; the document gets `status = revoked` and is
   soft-deleted (PDF link, portal, reports drop it; the public link answers 410 `revoked`); approved items sharing that

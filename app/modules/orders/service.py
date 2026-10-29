@@ -82,6 +82,7 @@ from app.modules.orders.schemas import (
     ProgressOut,
     PublicDocumentInfoOut,
     PublicDocumentOtpOut,
+    PublicDocumentVerifyOut,
     ResultDocumentOut,
     ResultSmsIn,
     ResultSmsOut,
@@ -268,9 +269,17 @@ def public_result_link(doc: ResultDocument, meta: RequestMeta | None) -> str:
     return f"{_public_base(meta)}/d/{doc.public_token}"
 
 
-def public_result_link_for_token(token: str, meta: RequestMeta | None) -> str:
-    """The public link for a fresh token — used to freeze `{doc.link}` (the QR value) into the render snapshot."""
-    return f"{_public_base(meta)}/d/{token}"
+def public_verify_link_for_token(token: str, meta: RequestMeta | None) -> str:
+    """The QR authenticity link `<web app>/v/<verify token>` — frozen into the render snapshot as `{doc.link}`.
+    It only answers whether the document is genuine; the result itself stays behind the SMS link."""
+    return f"{_public_base(meta)}/v/{token}"
+
+
+def document_qr_link(d: ResultDocument) -> str | None:
+    """The exact value the document's QR encodes (`{doc.link}` frozen in its snapshot): `/v/…` since 2026-10-29,
+    the SMS link `/d/…` for documents issued before; None when the snapshot carries no link."""
+    ctx = (d.snapshot or {}).get("context") or {}
+    return (ctx.get("doc") or {}).get("link") or None
 
 
 def document_out(d: ResultDocument) -> ResultDocumentOut:
@@ -291,6 +300,7 @@ def document_out(d: ResultDocument) -> ResultDocumentOut:
         updated_at=d.updated_at,
         created_by=_s(d.created_by),
         public_token=d.public_token,
+        verify_link=document_qr_link(d),
     )
 
 
@@ -1184,6 +1194,7 @@ async def _issue_document(
     district_name = await repo.get_district_name(session, patient.district_id)
     region_name = await repo.get_region_name(session, patient.region_id)
     token = secrets.token_urlsafe(24)
+    verify_token = secrets.token_urlsafe(16)
     snapshot = await templates_svc.build_document_snapshot(
         session,
         template=template,
@@ -1199,7 +1210,7 @@ async def _issue_document(
         district_name=district_name,
         region_name=region_name,
         approved_at=now,
-        doc_link=public_result_link_for_token(token, meta),
+        doc_link=public_verify_link_for_token(verify_token, meta),
     )
     at = iso_z(now)
     doc = ResultDocument(
@@ -1218,6 +1229,7 @@ async def _issue_document(
         ],
         snapshot=snapshot,
         public_token=token,
+        verify_token=verify_token,
         created_by=actor_id,
         created_at=now,
         updated_at=now,
@@ -1604,14 +1616,27 @@ async def _public_document(session: AsyncSession, token: str) -> ResultDocument:
     return doc
 
 
-async def _public_document_patient(session: AsyncSession, doc: ResultDocument) -> tuple[Patient, str]:
-    """The patient plus the phone the result SMS actually went to (the order snapshot first)."""
+async def _public_document_patient(session: AsyncSession, doc: ResultDocument) -> tuple[Patient, Order | None, str]:
+    """The patient, the cheque and the phone the result SMS actually went to (the order snapshot first)."""
     patient = await session.get(Patient, doc.patient_id)
     order = await session.get(Order, doc.order_id)
-    phone = norm_phone((order.patient_phone if order else None) or (patient.phone if patient else None) or "")
-    if not patient or patient.deleted_at is not None or not is_valid_uz_phone(phone):
+    if not patient or patient.deleted_at is not None:
         raise NotFoundError("Bemor topilmadi")
-    return patient, phone
+    phone = norm_phone((order.patient_phone if order else None) or patient.phone or "")
+    if not is_valid_uz_phone(phone):
+        raise StateError("Hujjatga telefon raqami bog‘lanmagan — SMS kod yuborib bo‘lmaydi. Klinikaga murojaat qiling.", code="no_phone")
+    return patient, order, phone
+
+
+async def _otp_sms_branch(session: AsyncSession, company: Company | None, order: Order | None, patient: Patient) -> tuple[Branch | None, bool]:
+    """Which branch's SMS account sends a public-link code: the cheque's branch first (it issued the result and sent
+    the result SMS), then the patient's registration branch — see `messaging.sms_branch_for`."""
+    branch_ids: list[uuid.UUID] = []
+    for branch_id in ((order.branch_id if order else None), patient.branch_id):
+        if branch_id and branch_id not in branch_ids:
+            branch_ids.append(branch_id)
+    branches = [await session.get(Branch, branch_id) for branch_id in branch_ids]
+    return messaging.sms_branch_for(company, *branches)
 
 
 async def public_document_info(session: AsyncSession, token: str) -> PublicDocumentInfoOut:
@@ -1628,18 +1653,69 @@ async def public_document_info(session: AsyncSession, token: str) -> PublicDocum
     )
 
 
+def mask_name(full_name: str | None) -> str:
+    """`Haydarov Dilshodjon` → `H*** D***` — enough to match the paper, not enough to identify the patient."""
+    return " ".join(f"{part[0].upper()}***" for part in (full_name or "").split()[:3])
+
+
+async def public_document_verify(session: AsyncSession, token: str) -> PublicDocumentVerifyOut:
+    """QR authenticity check (`GET /v/{token}`): was this document issued by the clinic and is it still valid.
+
+    Only what lets someone holding the paper match it — issuer, date, numbers, masked holder; never the results, the
+    PDF or an SMS code. A withdrawn result (revoked) or a cancelled / deleted cheque answers `revoked`."""
+    doc = await repo.get_document_by_verify_token(session, token) if 16 <= len(token) <= 64 else None
+    if not doc:
+        raise NotFoundError(DOC_NOT_FOUND)
+    ctx = (doc.snapshot or {}).get("context") or {}
+    order = await session.get(Order, doc.order_id)
+    company = await session.get(Company, doc.company_id)
+    branch = await session.get(Branch, order.branch_id) if order else None
+    revoked_at: datetime | None = None
+    if doc.status == "revoked" or doc.deleted_at:
+        revoked_at = doc.deleted_at or doc.updated_at
+    elif order is None or order.deleted_at or order.status == "cancelled":
+        revoked_at = (order.deleted_at or order.cancelled_at or order.updated_at) if order else doc.updated_at
+    doctor = (ctx.get("item") or {}).get("doctor") or (await repo.get_employee_name(session, doc.created_by) if doc.created_by else None)
+    return PublicDocumentVerifyOut(
+        id=str(doc.id),
+        status="revoked" if revoked_at else "valid",
+        title=doc.title,
+        company_name=(company.name if company else None) or (ctx.get("company") or {}).get("name") or "",
+        branch_name=(branch.name if branch else None) or (ctx.get("branch") or {}).get("name") or "",
+        order_number=(order.number if order else None) or (ctx.get("order") or {}).get("number") or "",
+        doctor_name=doctor or "",
+        patient=mask_name((ctx.get("patient") or {}).get("fullName") or (order.patient_name if order else None)),
+        issued_at=iso_z(doc.created_at),
+        revoked_at=iso_z(revoked_at) if revoked_at else None,
+    )
+
+
 async def public_document_otp_request(session: AsyncSession, token: str, meta: RequestMeta) -> PublicDocumentOtpOut:
-    """Send an SMS code to the phone the document belongs to (shown masked) — viewing the PDF needs it."""
+    """Send an SMS code to the phone the document belongs to (shown masked) — viewing the PDF needs it.
+
+    The code goes out through the cheque's branch (the one that issued the result and sent the result SMS), else the
+    patient's registration branch — whichever can send. When neither can, the request fails with
+    `sms_not_configured` instead of pretending a code is on its way (dev mode still answers with `devCode`)."""
     doc = await _public_document(session, token)
-    patient, phone = await _public_document_patient(session, doc)
+    patient, order, phone = await _public_document_patient(session, doc)
+    company = await session.get(Company, doc.company_id)
+    branch, configured = await _otp_sms_branch(session, company, order, patient)
+    if not configured and not settings.otp_dev_mode:
+        raise StateError(
+            "Bu klinikada SMS yuborish sozlanmagan — hujjatni havola orqali ochib bo‘lmaydi. "
+            "Natijani bemor kabinetidan ko‘ring yoki klinikaga murojaat qiling.",
+            code="sms_not_configured",
+        )
     ip = meta.ip or "?"
     await rate_limit.enforce(f"rl:docotp:ip:{ip}", settings.auth_rate_limit_per_minute, 60)
     await rate_limit.enforce(f"rl:docotp:token:{token}", 5, 3600, "Juda ko'p urinish. Keyinroq qayta urinib ko'ring.")
     await rate_limit.enforce(f"rl:docotp:phone:{phone}", 5, 3600, "Juda ko'p urinish. Keyinroq qayta urinib ko'ring.")
     cooldown_key = f"docotp:cooldown:{token}"
     try:
-        if await get_redis().exists(cooldown_key):
-            raise RateLimitedError("Kod allaqachon yuborilgan. Biroz kuting.", details={"retryAfter": settings.otp_resend_cooldown_seconds})
+        # the real seconds left (-2 = no key, -1 = no expiry), so the page counts down to the moment resend works
+        remaining = int(await get_redis().ttl(cooldown_key))
+        if remaining > 0:
+            raise RateLimitedError("Kod allaqachon yuborilgan. Biroz kuting.", details={"retryAfter": remaining})
     except RateLimitedError:
         raise
     except Exception:  # pragma: no cover - redis is optional for this guard
@@ -1657,10 +1733,16 @@ async def public_document_otp_request(session: AsyncSession, token: str, meta: R
     )
     session.add(challenge)
     await session.flush()
-    company = await session.get(Company, doc.company_id)
-    if company:
+    if company and configured:
         await messaging.enqueue_sms_if_configured(
-            session, company, kind="otp", to=phone, text=messaging.otp_text(company, code), patient_id=patient.id, branch_id=patient.branch_id
+            session,
+            company,
+            kind="otp",
+            to=phone,
+            text=messaging.otp_text(company, code),
+            patient_id=patient.id,
+            order_id=order.id if order else None,
+            branch_id=branch.id if branch else None,
         )
     try:
         await get_redis().set(cooldown_key, "1", ex=settings.otp_resend_cooldown_seconds)
@@ -1676,6 +1758,7 @@ async def public_document_otp_request(session: AsyncSession, token: str, meta: R
         action="document_otp_request",
         entity="result_document",
         entity_id=doc.id,
+        after={"branchId": str(branch.id) if branch else None, "sent": configured},
         ip=meta.ip,
         request_id=meta.request_id,
     )
@@ -1692,7 +1775,7 @@ async def public_document_otp_request(session: AsyncSession, token: str, meta: R
 async def public_document_otp_verify(session: AsyncSession, token: str, challenge_id: str, code: str, meta: RequestMeta) -> tuple[bytes, str]:
     """Verify the SMS code: the patient (or whoever holds the patient's phone) gets the PDF."""
     doc = await _public_document(session, token)
-    patient, phone = await _public_document_patient(session, doc)
+    patient, _order, phone = await _public_document_patient(session, doc)
     try:
         cid = uuid.UUID(challenge_id)
     except (ValueError, TypeError) as exc:

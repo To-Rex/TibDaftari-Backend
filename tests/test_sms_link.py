@@ -6,8 +6,19 @@ from types import SimpleNamespace
 
 from app.api.deps import RequestMeta
 from app.core.config import settings
-from app.modules.messaging.service import render_text, result_ready_order_text, result_ready_text
-from app.modules.orders.service import mask_phone, public_result_link
+from app.modules.messaging.service import (
+    render_text,
+    result_ready_order_text,
+    result_ready_text,
+    sms_branch_for,
+)
+from app.modules.orders.service import (
+    document_qr_link,
+    mask_name,
+    mask_phone,
+    public_result_link,
+    public_verify_link_for_token,
+)
 
 COMPANY = SimpleNamespace(name="Temo Med", settings={})
 
@@ -33,6 +44,43 @@ def test_public_link_uses_the_staff_web_app() -> None:
     assert public_result_link(doc, meta) == "https://temo.uz/d/tok123"
     assert public_result_link(doc, None) == settings.frontend_url.rstrip("/") + "/d/tok123"
     assert public_result_link(SimpleNamespace(public_token=None), meta) == ""
+
+
+def test_qr_gets_its_own_verification_link() -> None:
+    meta = RequestMeta(ip=None, request_id=None, user_agent=None, origin="https://temo.uz")
+    assert public_verify_link_for_token("vtok", meta) == "https://temo.uz/v/vtok"
+    # the QR value of a document is whatever was frozen into its snapshot (old documents: the SMS link)
+    assert document_qr_link(SimpleNamespace(snapshot={"context": {"doc": {"link": "https://temo.uz/v/vtok"}}})) == "https://temo.uz/v/vtok"
+    assert document_qr_link(SimpleNamespace(snapshot={"context": {"doc": {"link": "https://temo.uz/d/old"}}})) == "https://temo.uz/d/old"
+    assert document_qr_link(SimpleNamespace(snapshot={})) is None
+    assert document_qr_link(SimpleNamespace(snapshot={"context": {"doc": None}})) is None
+
+
+def test_public_link_code_goes_out_through_the_first_branch_that_can_send() -> None:
+    company = SimpleNamespace(sms_provider="xabarchi", sms_api_key_enc="co-key", sms_default_priority="transactional")
+    no_key_company = SimpleNamespace(sms_provider="none", sms_api_key_enc=None, sms_default_priority="transactional")
+    shared = SimpleNamespace(sms_provider=None, sms_api_key_enc=None, sms_default_priority=None)  # on the company's key
+    own = SimpleNamespace(sms_provider="xabarchi", sms_api_key_enc="br-key", sms_default_priority=None)  # its own key
+    off = SimpleNamespace(sms_provider="none", sms_api_key_enc=None, sms_default_priority=None)  # switched SMS off
+    # the cheque's branch sends; one that switched SMS off is skipped in favour of the patient's branch
+    assert sms_branch_for(company, shared, own) == (shared, True)
+    assert sms_branch_for(company, off, own) == (own, True)
+    assert sms_branch_for(no_key_company, shared, own) == (own, True)
+    # nobody can send → the caller must say so (never a silent "code sent")
+    assert sms_branch_for(company, off) == (None, False)
+    assert sms_branch_for(company, off, off) == (None, False)
+    assert sms_branch_for(no_key_company, shared) == (None, False)
+    # no branch at all (missing rows) → the company's key decides
+    assert sms_branch_for(company) == (None, True)
+    assert sms_branch_for(company, None, None) == (None, True)
+    assert sms_branch_for(no_key_company, None) == (None, False)
+
+
+def test_mask_name_keeps_only_initials() -> None:
+    assert mask_name("Haydarov Dilshodjon") == "H*** D***"
+    assert mask_name("  aliyev  vali  akmal o‘g‘li ") == "A*** V*** A***"
+    assert mask_name("") == "" and mask_name(None) == ""
+
 
 def test_mask_phone_hides_the_middle() -> None:
     assert mask_phone("998995340313") == "+998 ** *** 03 13"

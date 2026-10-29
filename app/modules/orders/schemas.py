@@ -176,8 +176,11 @@ class ResultDocumentOut(CamelModel):
     created_at: datetime
     updated_at: datetime
     created_by: str | None = None
-    # the public verification link's token — the template's `{doc.link}` / QR encodes `<web app>/d/{token}`
+    # the SMS / Telegram link's token (`<web app>/d/{token}`: authenticity card + the PDF behind an SMS code)
     public_token: str | None = None
+    # the exact value the document's QR encodes (`{doc.link}` frozen at approval): `<web app>/v/{verify token}` —
+    # authenticity only; documents issued before 2026-10-29 carry the SMS link here
+    verify_link: str | None = None
 
 
 class OrderBundleOut(CamelModel):
@@ -346,6 +349,22 @@ class PublicDocumentInfoOut(CamelModel):
     title: str
     company_name: str
     issued_at: str
+
+
+class PublicDocumentVerifyOut(CamelModel):
+    """QR authenticity check (`GET /v/{token}`): is the paper genuine and still valid — never the results."""
+
+    id: str
+    status: Literal["valid", "revoked"]
+    title: str
+    company_name: str
+    branch_name: str
+    order_number: str
+    doctor_name: str
+    # `H*** D***` — enough to match the paper, not enough to identify the patient
+    patient: str
+    issued_at: str
+    revoked_at: str | None = None
 
 
 class PublicDocumentOtpOut(CamelModel):

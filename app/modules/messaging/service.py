@@ -193,6 +193,20 @@ def sms_account(company: Company | None, branch: Branch | None = None) -> SmsAcc
     return None
 
 
+def sms_branch_for(company: Company | None, *candidates: Branch | None) -> tuple[Branch | None, bool]:
+    """Pick the branch a patient-facing code (public-link OTP) goes out through: the first candidate that can send —
+    its own key, or the company's key when it is on the shared one; a candidate that switched SMS off is skipped.
+    No candidate at all (missing rows) → the company's key decides. Returns `(branch, configured)`; `configured`
+    False means nobody can send, and the caller must say so instead of queueing a row that only ends up `failed`."""
+    branches = [b for b in candidates if b is not None]
+    if not branches:
+        return None, sms_account(company) is not None
+    for branch in branches:
+        if sms_account(company, branch) is not None:
+            return branch, True
+    return None, False
+
+
 async def enqueue_sms_if_configured(session: AsyncSession, company: Company, **kwargs: Any) -> OutboxMessage | None:
     """SMS only makes sense when the message's branch (or, without its own key, the company) has a provider;
     else the message is recorded as failed (visible in the outbox so staff can see what was not delivered and why)."""

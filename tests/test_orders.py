@@ -394,7 +394,28 @@ def test_full_workflow_create_pay_worklist_values_submit_approve(env: dict[str, 
     assert req["challengeId"] and req["phoneMasked"] and req["devCode"]
     r = c.post(f"{API}/d/{token}/otp/verify", json={"challengeId": req["challengeId"], "code": req["devCode"]})
     assert r.status_code == 200 and r.content == FAKE_PDF
+    # the fixture company has no SMS account: outside dev mode the request must say so instead of "code sent"
+    settings.otp_dev_mode = False
+    try:
+        r = c.post(f"{API}/d/{token}/otp/request")
+        assert r.status_code == 409 and r.json()["error"]["code"] == "sms_not_configured", r.text
+    finally:
+        settings.otp_dev_mode = True
     assert c.get(f"{API}/d/{'x' * 32}").status_code == 404
+
+    # the QR has its own link (`/v/…`): authenticity only — it never opens the PDF nor sends an SMS code
+    qr_link = doc["verifyLink"]
+    assert qr_link and "/v/" in qr_link and token not in qr_link
+    vtoken = qr_link.rsplit("/", 1)[-1]
+    check = c.get(f"{API}/v/{vtoken}").json()
+    assert check["id"] == doc["id"] and check["status"] == "valid" and check["revokedAt"] is None
+    assert check["title"] == doc["title"] and check["companyName"].startswith("T-orders") and check["orderNumber"] == order["number"]
+    assert check["doctorName"] == "T-orders Doctor" and check["branchName"] and check["issuedAt"].endswith("Z")
+    assert check["patient"].endswith("***") and "values" not in check and "phone" not in str(check).lower()
+    assert c.get(f"{API}/d/{vtoken}").status_code == 404
+    assert c.post(f"{API}/d/{vtoken}/otp/request").status_code == 404
+    assert c.get(f"{API}/v/{token}").status_code == 404
+    assert c.get(f"{API}/v/{'x' * 22}").status_code == 404
 
     # reject path on it2 (no schema → no required fields)
     c.put(f"{API}/items/{it2['id']}/values", json={"values": {"note": "ok"}}, headers=h)
@@ -422,6 +443,13 @@ def test_full_workflow_create_pay_worklist_values_submit_approve(env: dict[str, 
     assert r.status_code == 409
     p = c.get(f"{API}/patients/{env['patient']}", headers=h).json()
     assert p["stats"]["orders"] >= 1 and p["stats"]["totalSpent"] == 100000 and p["stats"]["lastVisitAt"] is not None
+
+    # the doctor takes the result back: the SMS link answers 410, the QR check says the paper is withdrawn
+    r = c.post(f"{API}/items/{it1['id']}/revoke", json={"reason": "birlik xato"}, headers=h)
+    assert r.status_code == 200, r.text
+    assert c.get(f"{API}/d/{token}").status_code == 410
+    check = c.get(f"{API}/v/{vtoken}").json()
+    assert check["status"] == "revoked" and check["revokedAt"] and check["id"] == doc["id"]
 
 
 def test_remove_cancel_and_closed(env: dict[str, Any]) -> None:

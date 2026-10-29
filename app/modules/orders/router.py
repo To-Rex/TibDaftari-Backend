@@ -31,6 +31,7 @@ from app.modules.orders.schemas import (
     PublicDocumentInfoOut,
     PublicDocumentOtpOut,
     PublicDocumentOtpVerifyIn,
+    PublicDocumentVerifyOut,
     ReasonIn,
     ResultDocumentOut,
     ResultSmsIn,
@@ -318,10 +319,16 @@ async def document_pdf(document_id: uuid.UUID, staff: Staff, session: DbSession)
     return _pdf_response(pdf, service.pdf_filename(doc))
 
 
-@router.get("/d/{token}", response_model=PublicDocumentInfoOut, summary="Public result verification info by unguessable token (QR / SMS links)")
+@router.get("/d/{token}", response_model=PublicDocumentInfoOut, summary="Public result info by unguessable token (SMS / Telegram links)")
 async def public_document_info(token: str, session: DbSession) -> PublicDocumentInfoOut:
-    """Authenticity check for a scanned QR code — public metadata only; the PDF itself needs an SMS code."""
+    """The SMS link's landing card — public metadata only; the PDF itself needs an SMS code."""
     return await service.public_document_info(session, token)
+
+
+@router.get("/v/{token}", response_model=PublicDocumentVerifyOut, summary="QR authenticity check of a result document")
+async def public_document_verify(token: str, session: DbSession) -> PublicDocumentVerifyOut:
+    """What a scanned QR shows: genuine or withdrawn, issuer, date, numbers, masked holder — never the results."""
+    return await service.public_document_verify(session, token)
 
 
 @router.post("/d/{token}/otp/request", response_model=PublicDocumentOtpOut, summary="Send an SMS code for a public result link")

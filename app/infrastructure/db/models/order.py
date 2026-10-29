@@ -120,6 +120,8 @@ class ResultDocument(PKMixin, AuditMixin, SoftDeleteMixin, TenantMixin, Base):
     # frozen render input (context) + template doc snapshot → PDF is reproducible forever
     snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     public_token: Mapped[str | None] = mapped_column(String(64), index=True)  # unguessable link for SMS/Telegram
+    # the QR code's own token (`/v/{token}`): authenticity check only — never opens the PDF, never sends an SMS
+    verify_token: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
     # did the patient get it: opened by the patient (public link / portal), printed by staff (handed over)
     viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

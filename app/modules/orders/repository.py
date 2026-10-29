@@ -417,6 +417,12 @@ async def get_document_by_token(session: AsyncSession, token: str) -> ResultDocu
     return (await session.execute(stmt.limit(1))).scalar_one_or_none()
 
 
+async def get_document_by_verify_token(session: AsyncSession, token: str) -> ResultDocument | None:
+    """QR authenticity lookup — revoked (soft-deleted) documents included: the check must say they were withdrawn."""
+    stmt = select(ResultDocument).where(ResultDocument.verify_token == token)
+    return (await session.execute(stmt.limit(1))).scalar_one_or_none()
+
+
 async def document_token_revoked(session: AsyncSession, token: str) -> bool:
     """The link belongs to a result the doctor took back (it is being corrected)."""
     stmt = select(ResultDocument.id).where(ResultDocument.public_token == token, ResultDocument.status == "revoked").limit(1)
