@@ -77,6 +77,8 @@ class ServiceTypeOut(CamelModel):
     description: str | None = None
     price: int
     branch_prices: dict[str, int]
+    # branches where the service is switched off; empty = every branch (rows cached before the field lack it)
+    disabled_branch_ids: list[str] = Field(default_factory=list)
     turnaround_days: int
     order: int
     is_active: bool
@@ -95,6 +97,7 @@ class ServiceTypeCreateIn(CamelModel):
     description: str | None = None
     price: int = Field(default=0, ge=0)
     branch_prices: dict[str, int] = Field(default_factory=dict)
+    disabled_branch_ids: list[str] = Field(default_factory=list, max_length=200)
     turnaround_days: int = Field(default=1, ge=0, le=365)
     order: int = Field(default=99, ge=0)
     is_active: bool = True
@@ -104,7 +107,7 @@ class ServiceTypeCreateIn(CamelModel):
 
 
 class ServiceTypeUpdateIn(CamelModel):
-    """Partial merge; `branchPrices` is replaced wholesale when present."""
+    """Partial merge; `branchPrices` and `disabledBranchIds` are replaced wholesale when present."""
 
     category_id: str | None = None
     name: str | None = Field(default=None, min_length=1, max_length=300)
@@ -112,6 +115,7 @@ class ServiceTypeUpdateIn(CamelModel):
     description: str | None = None
     price: int | None = Field(default=None, ge=0)
     branch_prices: dict[str, int] | None = None
+    disabled_branch_ids: list[str] | None = Field(default=None, max_length=200)
     turnaround_days: int | None = Field(default=None, ge=0, le=365)
     order: int | None = Field(default=None, ge=0)
     is_active: bool | None = None
@@ -124,6 +128,8 @@ class ServiceTypeQuery(CamelModel):
     category_id: str | None = None
     search: str | None = Field(default=None, max_length=200)
     active_only: bool = False
+    # only what this branch offers: services switched off there are dropped (reception passes the cheque's branch)
+    branch_id: str | None = None
 
 
 # ----------------------------------------------------------------------------- attribute schemas

@@ -58,7 +58,7 @@ async def delete_category(category_id: uuid.UUID, staff: Staff, session: DbSessi
 # ----------------------------------------------------------------------------- service types
 
 
-@router.get("/companies/{company_id}/service-types", response_model=list[ServiceTypeOut], summary="Service types (category subtree, search, activeOnly) with 30-day stats")
+@router.get("/companies/{company_id}/service-types", response_model=list[ServiceTypeOut], summary="Service types (category subtree, search, activeOnly, branchId = only what that branch offers) with 30-day stats")
 async def list_service_types(company_id: uuid.UUID, q: Annotated[ServiceTypeQuery, Query()], staff: Staff, session: DbSession) -> list[ServiceTypeOut]:
     staff.scope(company_id)
     return await service.list_service_types(session, company_id, q)
@@ -75,7 +75,7 @@ async def create_service_type(company_id: uuid.UUID, body: ServiceTypeCreateIn, 
     return await service.create_service_type(session, company_id, body, staff, meta)
 
 
-@router.put("/service-types/{service_type_id}", response_model=ServiceTypeOut, summary="Update a service type (partial; branchPrices wholesale)")
+@router.put("/service-types/{service_type_id}", response_model=ServiceTypeOut, summary="Update a service type (partial; branchPrices / disabledBranchIds wholesale)")
 async def update_service_type(service_type_id: uuid.UUID, body: ServiceTypeUpdateIn, staff: Staff, session: DbSession, meta: Meta) -> ServiceTypeOut:
     staff.require(CATALOG_WRITE)
     return await service.update_service_type(session, service_type_id, body, staff, meta)

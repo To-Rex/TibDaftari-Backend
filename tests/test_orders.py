@@ -445,6 +445,20 @@ def test_remove_cancel_and_closed(env: dict[str, Any]) -> None:
     assert r.status_code == 409 and r.json()["error"] == {"code": "closed", "message": "Chek yopilgan"}
     r = c.post(f"{API}/orders/{order['id']}/pay", json={"amount": 10, "method": "cash", "sendSms": False}, headers=h)
     assert r.status_code == 422 and r.json()["error"]["code"] == "empty"
+    # a service switched off in the cheque's branch: not listed for that branch, refused on a new cheque (409)
+    r = c.put(f"{API}/service-types/{env['st2']}", json={"disabledBranchIds": [env["branch"]]}, headers=h)
+    assert r.status_code == 200 and r.json()["disabledBranchIds"] == [env["branch"]], r.text
+    try:
+        listed = {s["id"] for s in c.get(f"{API}/companies/{env['co_a']}/service-types", params={"branchId": env["branch"]}, headers=h).json()}
+        assert env["st2"] not in listed and env["st1"] in listed
+        r = c.post(
+            f"{API}/companies/{env['co_a']}/orders",
+            json={"patientId": env["patient"], "branchId": env["branch"], "serviceTypeIds": [env["st1"], env["st2"]]},
+            headers=h,
+        )
+        assert r.status_code == 409 and r.json()["error"]["code"] == "not_in_branch", r.text
+    finally:
+        assert c.put(f"{API}/service-types/{env['st2']}", json={"disabledBranchIds": []}, headers=h).status_code == 200
     # bad patient/branch → 404
     r = c.post(
         f"{API}/companies/{env['co_a']}/orders",

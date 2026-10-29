@@ -12,7 +12,7 @@ from app.core.config import settings
 from app.core.permissions import COMPANY_ADMIN_PERMISSIONS
 from app.core.security import hash_password
 from app.core.timeutil import utcnow
-from app.infrastructure.db.models import Company, Employee, OrderItem, Role, ServiceType
+from app.infrastructure.db.models import Branch, Company, Employee, OrderItem, Role, ServiceType
 from app.infrastructure.db.session import engine, session_scope
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -43,7 +43,10 @@ async def _seed() -> dict[str, str]:
                 Employee(company_id=a.id, full_name="T-catalog Viewer A", login=f"t-catalog-viewer-a-{SFX}", password_hash=pw, role_id=viewer_a.id),
             ]
         )
-        ids = {"a": str(a.id), "b": str(b.id)}
+        branch_a = Branch(company_id=a.id, name=f"T-catalog filial {SFX}", code=f"TC{SFX[:4].upper()}", order_seq=0)
+        s.add(branch_a)
+        await s.flush()
+        ids = {"a": str(a.id), "b": str(b.id), "branch_a": str(branch_a.id)}
     await engine.dispose()
     return ids
 
@@ -143,8 +146,8 @@ def test_service_types_crud_filters_stats(ctx: dict) -> None:
     r = c.post(f"/api/v1/companies/{cid}/service-types", json={"categoryId": grandchild["id"], "name": "T-catalog Umumiy qon tahlili", "code": "UQT", "price": 50000, "order": 2}, headers=h(ctx, "admin-a"))
     assert r.status_code == 201, r.text
     st1 = r.json()
-    assert set(st1) == {"id", "companyId", "categoryId", "name", "code", "description", "price", "branchPrices", "turnaroundDays", "order", "isActive", "schemaId", "documentScope", "defaultTemplateId", "stats", "createdAt", "updatedAt"}
-    assert st1["branchPrices"] == {} and st1["turnaroundDays"] == 1 and st1["schemaId"] is None and st1["documentScope"] == "item" and st1["defaultTemplateId"] is None
+    assert set(st1) == {"id", "companyId", "categoryId", "name", "code", "description", "price", "branchPrices", "disabledBranchIds", "turnaroundDays", "order", "isActive", "schemaId", "documentScope", "defaultTemplateId", "stats", "createdAt", "updatedAt"}
+    assert st1["branchPrices"] == {} and st1["disabledBranchIds"] == [] and st1["turnaroundDays"] == 1 and st1["schemaId"] is None and st1["documentScope"] == "item" and st1["defaultTemplateId"] is None
     assert st1["stats"] == {"ordered30d": 0}
     r = c.post(f"/api/v1/companies/{cid}/service-types", json={"categoryId": root["id"], "name": "T-catalog Siydik tahlili", "code": "uqt"}, headers=h(ctx, "admin-a"))
     assert r.status_code == 409 and r.json()["error"]["message"] == "Bu kod band"
@@ -180,6 +183,19 @@ def test_service_types_crud_filters_stats(ctx: dict) -> None:
     assert r.json()["branchPrices"] == {bid: 70000} and r.json()["price"] == 60000 and r.json()["isActive"] is True and r.json()["categoryId"] == child["id"]
     r = c.put(f"/api/v1/service-types/{st2['id']}", json={"branchPrices": {}}, headers=h(ctx, "admin-a"))
     assert r.json()["branchPrices"] == {}
+    # per-branch availability: unknown branch → 404; a real one sticks (deduplicated); `branchId` lists drop it; reset
+    bra = ctx["ids"]["branch_a"]
+    r = c.put(f"/api/v1/service-types/{st2['id']}", json={"disabledBranchIds": [str(uuid.uuid4())]}, headers=h(ctx, "admin-a"))
+    assert r.status_code == 404 and r.json()["error"]["message"] == "Filial topilmadi"
+    r = c.put(f"/api/v1/service-types/{st2['id']}", json={"disabledBranchIds": [bra, bra]}, headers=h(ctx, "admin-a"))
+    assert r.status_code == 200 and r.json()["disabledBranchIds"] == [bra], r.text
+    assert c.get(f"/api/v1/service-types/{st2['id']}", headers=h(ctx, "admin-a")).json()["disabledBranchIds"] == [bra]
+    in_branch = ids(c.get(f"/api/v1/companies/{cid}/service-types", params={"branchId": bra}, headers=h(ctx, "admin-a")))
+    assert st2["id"] not in in_branch and st1["id"] in in_branch
+    assert st2["id"] in ids(c.get(f"/api/v1/companies/{cid}/service-types", params={"branchId": str(uuid.uuid4())}, headers=h(ctx, "admin-a")))
+    assert st2["id"] in ids(c.get(f"/api/v1/companies/{cid}/service-types", headers=h(ctx, "admin-a")))
+    r = c.put(f"/api/v1/service-types/{st2['id']}", json={"disabledBranchIds": []}, headers=h(ctx, "admin-a"))
+    assert r.status_code == 200 and r.json()["disabledBranchIds"] == []
     r = c.put(f"/api/v1/service-types/{st2['id']}", json={"code": "UQT"}, headers=h(ctx, "admin-a"))
     assert r.status_code == 409 and r.json()["error"]["message"] == "Bu kod band"
     assert c.put(f"/api/v1/service-types/{st2['id']}", json={"name": "hack"}, headers=h(ctx, "admin-b")).status_code == 404

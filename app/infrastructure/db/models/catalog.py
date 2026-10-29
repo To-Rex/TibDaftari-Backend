@@ -44,6 +44,8 @@ class ServiceType(PKMixin, AuditMixin, SoftDeleteMixin, TenantMixin, Base):
     schema_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
     document_scope: Mapped[str] = mapped_column(String(10), nullable=False, default="item")  # item | order
     default_template_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    # branches where the service is switched off (not offered at reception, not addable to their cheques); empty = every branch
+    disabled_branch_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)), nullable=False, default=list, server_default=text("'{}'::uuid[]"))
 
     __table_args__ = (
         Index("ix_service_types_company_category", "company_id", "category_id"),

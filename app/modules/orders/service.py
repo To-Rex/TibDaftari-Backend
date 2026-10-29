@@ -537,7 +537,8 @@ def _seed_values(fields: list[dict[str, Any]]) -> dict[str, Any]:
 async def _add_items(
     session: AsyncSession, order: Order, service_type_ids: list[str], actor_id: uuid.UUID, now: datetime
 ) -> list[OrderItem]:
-    """Append items for the given service types (unknown ids skipped, duplicates allowed)."""
+    """Append items for the given service types (unknown ids skipped, duplicates allowed; a service switched off
+    in the cheque's branch is refused with 409 not_in_branch — reception never lists it there, this is the safety net)."""
     wanted = repo.parse_uuids(service_type_ids)
     sts = await repo.service_types_by_ids(session, order.company_id, set(wanted))
     cats = await repo.categories_by_ids(session, order.company_id, {s.category_id for s in sts.values()})
@@ -547,6 +548,8 @@ async def _add_items(
         st = sts.get(st_id)
         if st is None:
             continue
+        if order.branch_id in (st.disabled_branch_ids or []):
+            raise ConflictError(f"«{st.name}» xizmati bu filialda ko‘rsatilmaydi", code="not_in_branch")
         schema = schemas.get(st.schema_id) if st.schema_id else None
         branch_price = (st.branch_prices or {}).get(str(order.branch_id))
         price = int(branch_price if branch_price is not None else st.price)

@@ -33,6 +33,7 @@ verbatim in the UI.
 | 409 | has_children | Avval ichki kategoriyalarni o‘chiring |
 | 409 | active | Faol shablonni o‘chirib bo‘lmaydi — avval arxivlang |
 | 409 | closed | Chek yopilgan |
+| 409 | not_in_branch | «{xizmat}» xizmati bu filialda ko‘rsatilmaydi |
 | 409 | in_progress | Laboratoriya boshlagan tahlilni o‘chirib bo‘lmaydi |
 | 409 | paid | To‘langan chekdan xizmat o‘chirib bo‘lmaydi · To‘langan chekni bekor qilish uchun avval qaytarish qiling |
 | 409 | already_paid | Chek allaqachon to‘langan |
@@ -86,8 +87,9 @@ verbatim in the UI.
 * `listCategories`: sorted by order asc; all (active + inactive).
 * `saveCategory`: create order = siblings(company, parent)+1; update: reject cycles (parentId ancestors) → 422 validation_error.
 * `deleteCategory`: children → 409 has_children; services → 409 in_use; else soft delete.
-* `listServiceTypes(q)`: categoryId → **transitive descendants**; activeOnly; search name/code; sort order asc; each row gets `stats.ordered30d` = count of order items in the last 30 days (**FIX**: real 30-day window).
-* `saveServiceType`: create defaults price 0, branchPrices {}, turnaroundDays 1, order 99, isActive true, schemaId null, documentScope item, defaultTemplateId null; branchPrices replaced wholesale.
+* `listServiceTypes(q)`: categoryId → **transitive descendants**; activeOnly; branchId → drops services whose `disabledBranchIds` contains it (reception passes the cheque's branch); search name/code; sort order asc; each row gets `stats.ordered30d` = count of order items in the last 30 days (**FIX**: real 30-day window).
+* `saveServiceType`: create defaults price 0, branchPrices {}, disabledBranchIds [], turnaroundDays 1, order 99, isActive true, schemaId null, documentScope item, defaultTemplateId null; branchPrices and disabledBranchIds replaced wholesale; every id in disabledBranchIds must be an alive branch of the company else 404 "Filial topilmadi" (duplicates collapsed).
+* **Per-branch availability (2026-10-29)**: `ServiceType.disabledBranchIds` = branches where the service is switched off (empty = offered everywhere, so older rows behave as before). Effects: reception lists `branchId=<cheque branch>` and never shows the service there; `addItems` refuses it with 409 not_in_branch; the services report's `unused` list skips services switched off in every branch of the scope. Branch prices of a switched-off branch are kept (switching back on restores them). Templates, schemas, existing order items, history and documents are untouched.
 * `deleteServiceType`: any order items → 409 in_use; else soft delete.
 * `listSchemas`: usedBy computed (count of service types using it). `getSchema` same.
 * `saveSchema` update: `version += 1` iff status == published AND payload contains `fields`; status unchanged. Create: version 1, status draft, fields [].
@@ -113,7 +115,7 @@ if status != cancelled: status = completed if (active and all approved) else ope
 ```
 * Order number: per-branch `code-000123` (`{branch.code}-{seq:06d}`), allocated atomically (`UPDATE branches SET order_seq=order_seq+1 … RETURNING`) at creation, never rolled back.
 * `create(companyId, employeeId, {patientId, branchId, serviceTypeIds, note})`: patient & branch must exist in the company else 404 "Bemor yoki filial topilmadi"; order: status open, payment unpaid, discountPercent = patient.discountPercent (snapshot), patientName/phone snapshot; patient.stats.orders++, stats.lastVisitAt = max(existing, now); then addItems. Returns {order, items}.
-* `addItems(orderId, ids)`: cancelled/completed → 409 closed; unknown ids skipped; duplicates allowed; item: price = branchPrices[branchId] ?? price; finalPrice = round(price − price*discount/100); status pending; schemaId/schemaVersion snapshot; values seeded: table fields → copy of presetRows, others null; serviceName/categoryName snapshots. Adding to a paid order flips payment to partial (allowed).
+* `addItems(orderId, ids)`: cancelled/completed → 409 closed; unknown ids skipped; a service switched off in the cheque's branch (`disabledBranchIds`) → 409 not_in_branch; duplicates allowed; item: price = branchPrices[branchId] ?? price; finalPrice = round(price − price*discount/100); status pending; schemaId/schemaVersion snapshot; values seeded: table fields → copy of presetRows, others null; serviceName/categoryName snapshots. Adding to a paid order flips payment to partial (allowed).
 * `removeItem`: item must belong to order (**FIX**); status != pending → 409 in_progress; order.payment != unpaid → 409 paid; soft delete item (status stays; excluded from all queries).
 * `pay(employeeId, {orderId, amount, method, sendSms})`: itemCount 0 → 422 empty; payment paid → 409 already_paid; amount ≤0 or > remaining → 422 amount; create payment; recompute; patient.stats.totalSpent += amount; if sendSms → outbox sms kind payment_receipt (text §10) queued.
 * `refund(paymentId, reason)` (**new**, permission reception.payment.refund): sets refundedAt/reason; recompute; patient.totalSpent −= amount; payment status may become unpaid/partial; audit.

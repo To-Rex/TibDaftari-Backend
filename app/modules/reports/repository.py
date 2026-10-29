@@ -510,9 +510,9 @@ async def service_counts(session: AsyncSession, company_id: uuid.UUID, branches:
 
 
 async def active_services(session: AsyncSession, company_id: uuid.UUID) -> list[Row[Any]]:
-    """(id, name, category name) of every active catalog service, in catalog order."""
+    """(id, name, category name, disabled_branch_ids) of every active catalog service, in catalog order."""
     stmt = (
-        select(ServiceType.id, ServiceType.name, func.coalesce(Category.name, literal("—")).label("category"))
+        select(ServiceType.id, ServiceType.name, func.coalesce(Category.name, literal("—")).label("category"), ServiceType.disabled_branch_ids)
         .outerjoin(Category, Category.id == ServiceType.category_id)
         .where(ServiceType.company_id == company_id, alive(ServiceType), ServiceType.is_active.is_(True))
         .order_by(Category.name, ServiceType.order, ServiceType.name)

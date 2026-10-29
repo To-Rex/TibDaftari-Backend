@@ -403,10 +403,11 @@ async def services_report(session: AsyncSession, company_id: uuid.UUID, q: Range
                 )
                 for r in rows
             ],
+            # a service switched off in every branch of the scope cannot be ordered there — not "unused", just absent
             unused=[
                 UnusedServiceRow(service_type_id=str(s.id), name=s.name, category=s.category, prev_count=prev.get(s.id, 0))
                 for s in await repo.active_services(session, company_id)
-                if s.id not in used
+                if s.id not in used and (branches is None or any(b not in (s.disabled_branch_ids or []) for b in branches))
             ],
         )
 

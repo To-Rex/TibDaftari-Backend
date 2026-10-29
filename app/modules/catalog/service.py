@@ -2,7 +2,7 @@
 
 Read-mostly lists are cached per company in Redis (`co:{cid}:catalog:*`, 5 min) and invalidated on
 every write. Public helpers reused by other modules: `get_service_types_by_ids`, `get_category`,
-`get_schemas_by_ids`, `invalidate_catalog_cache`.
+`get_schemas_by_ids`, `invalidate_catalog_cache`, `available_in_branch`.
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ MSG_CATEGORY_NOT_FOUND = "Kategoriya topilmadi"
 MSG_SERVICE_NOT_FOUND = "Xizmat topilmadi"
 MSG_SCHEMA_NOT_FOUND = "Sxema topilmadi"
 MSG_TEMPLATE_NOT_FOUND = "Shablon topilmadi"
+MSG_BRANCH_NOT_FOUND = "Filial topilmadi"
 
 
 def _cache_prefix(company_id: uuid.UUID | str) -> str:
@@ -108,6 +109,7 @@ def service_type_out(s: ServiceType, ordered_30d: int | None = None) -> ServiceT
         description=s.description,
         price=int(s.price),
         branch_prices={str(k): int(v) for k, v in (s.branch_prices or {}).items()},
+        disabled_branch_ids=[str(b) for b in (s.disabled_branch_ids or [])],
         turnaround_days=int(s.turnaround_days),
         order=int(s.order),
         is_active=s.is_active,
@@ -155,6 +157,7 @@ def _service_snapshot(s: ServiceType) -> dict[str, Any]:
         "categoryId": str(s.category_id),
         "price": int(s.price),
         "branchPrices": {str(k): int(v) for k, v in (s.branch_prices or {}).items()},
+        "disabledBranchIds": [str(b) for b in (s.disabled_branch_ids or [])],
         "turnaroundDays": s.turnaround_days,
         "order": s.order,
         "isActive": s.is_active,
@@ -170,6 +173,14 @@ def _schema_snapshot(s: AttributeSchema) -> dict[str, Any]:
 
 
 # ----------------------------------------------------------------------------- shared helpers (other modules)
+
+
+def available_in_branch(disabled_branch_ids: Iterable[uuid.UUID | str] | None, branch_id: uuid.UUID | str | None) -> bool:
+    """A service is offered in a branch unless that branch is in its switched-off list; no branch in question
+    (company-wide lists) hides nothing. Ids come as UUIDs from ORM rows and as strings from cached DTOs."""
+    if branch_id is None:
+        return True
+    return str(branch_id) not in {str(b) for b in (disabled_branch_ids or [])}
 
 
 async def get_service_types_by_ids(session: AsyncSession, company_id: uuid.UUID, ids: Iterable[uuid.UUID]) -> dict[uuid.UUID, ServiceType]:
@@ -317,8 +328,9 @@ async def _service_types_cached(session: AsyncSession, company_id: uuid.UUID) ->
 
 
 async def list_service_types(session: AsyncSession, company_id: uuid.UUID, q: ServiceTypeQuery) -> list[ServiceTypeOut]:
-    """Service types filtered by category subtree / activeOnly / search (fold on name+code), order asc,
-    each with `stats.ordered30d` computed by one grouped query over the last 30 days."""
+    """Service types filtered by category subtree / activeOnly / branchId (drops services switched off in that
+    branch) / search (fold on name+code), order asc, each with `stats.ordered30d` computed by one grouped query
+    over the last 30 days."""
     items = await _service_types_cached(session, company_id)
     if q.category_id:
         root = _parse_uuid(q.category_id, MSG_CATEGORY_NOT_FOUND)
@@ -326,6 +338,9 @@ async def list_service_types(session: AsyncSession, company_id: uuid.UUID, q: Se
         items = [s for s in items if s.category_id in allowed]
     if q.active_only:
         items = [s for s in items if s.is_active]
+    if q.branch_id:
+        branch_id = _parse_uuid(q.branch_id, MSG_BRANCH_NOT_FOUND)
+        items = [s for s in items if available_in_branch(s.disabled_branch_ids, branch_id)]
     if q.search:
         items = [s for s in items if matches(s.name, q.search) or matches(s.code, q.search)]
     counts = await repo.ordered_30d_by_service(session, company_id, [uuid.UUID(s.id) for s in items])
@@ -353,6 +368,18 @@ async def _resolve_schema_id(session: AsyncSession, company_id: uuid.UUID, schem
     return sid
 
 
+async def _resolve_disabled_branches(session: AsyncSession, company_id: uuid.UUID, branch_ids: list[str]) -> list[uuid.UUID]:
+    """Branches a service is switched off in: deduplicated, every one must be an alive branch of the company (404)."""
+    wanted: list[uuid.UUID] = []
+    for raw in branch_ids:
+        bid = _parse_uuid(raw, MSG_BRANCH_NOT_FOUND)
+        if bid is not None and bid not in wanted:
+            wanted.append(bid)
+    if wanted and not set(wanted) <= await repo.company_branch_ids(session, company_id):
+        raise NotFoundError(MSG_BRANCH_NOT_FOUND)
+    return wanted
+
+
 async def create_service_type(session: AsyncSession, company_id: uuid.UUID, body: ServiceTypeCreateIn, staff: StaffPrincipal, meta: RequestMeta) -> ServiceTypeOut:
     """Create a service type (defaults: price 0, turnaround 1, order 99, active, scope item); code unique per company."""
     category_id = _parse_uuid(body.category_id, MSG_CATEGORY_NOT_FOUND)
@@ -367,6 +394,7 @@ async def create_service_type(session: AsyncSession, company_id: uuid.UUID, body
         description=body.description or None,
         price=body.price,
         branch_prices=dict(body.branch_prices or {}),
+        disabled_branch_ids=await _resolve_disabled_branches(session, company_id, body.disabled_branch_ids),
         turnaround_days=body.turnaround_days,
         order=body.order,
         is_active=body.is_active,
@@ -384,7 +412,7 @@ async def create_service_type(session: AsyncSession, company_id: uuid.UUID, body
 
 
 async def update_service_type(session: AsyncSession, service_type_id: uuid.UUID, body: ServiceTypeUpdateIn, staff: StaffPrincipal, meta: RequestMeta) -> ServiceTypeOut:
-    """Partial merge; `branchPrices` replaced wholesale; code stays unique per company."""
+    """Partial merge; `branchPrices` / `disabledBranchIds` replaced wholesale; code stays unique per company."""
     row = await get_service_type_or_404(session, service_type_id, _scope_of(staff))
     before = _service_snapshot(row)
     data = body.model_dump(exclude_unset=True)
@@ -406,6 +434,8 @@ async def update_service_type(session: AsyncSession, service_type_id: uuid.UUID,
             setattr(row, field, data[field])
     if data.get("branch_prices") is not None:
         row.branch_prices = dict(data["branch_prices"])
+    if data.get("disabled_branch_ids") is not None:
+        row.disabled_branch_ids = await _resolve_disabled_branches(session, row.company_id, data["disabled_branch_ids"])
     if "schema_id" in data:
         row.schema_id = await _resolve_schema_id(session, row.company_id, data["schema_id"])
     if "default_template_id" in data:

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.timeutil import utcnow
 from app.infrastructure.db.base import alive
-from app.infrastructure.db.models import AttributeSchema, Category, OrderItem, ServiceType
+from app.infrastructure.db.models import AttributeSchema, Branch, Category, OrderItem, ServiceType
 
 # ----------------------------------------------------------------------------- categories
 
@@ -76,6 +76,12 @@ async def get_service_types_by_ids(session: AsyncSession, company_id: uuid.UUID,
         return []
     stmt = select(ServiceType).where(ServiceType.company_id == company_id, ServiceType.id.in_(id_list), alive(ServiceType))
     return (await session.execute(stmt)).scalars().all()
+
+
+async def company_branch_ids(session: AsyncSession, company_id: uuid.UUID) -> set[uuid.UUID]:
+    """Ids of the company's alive branches (a service's per-branch settings may only name these)."""
+    stmt = select(Branch.id).where(Branch.company_id == company_id, alive(Branch))
+    return set((await session.execute(stmt)).scalars().all())
 
 
 async def service_code_taken(session: AsyncSession, company_id: uuid.UUID, code: str, exclude_id: uuid.UUID | None = None) -> bool:
