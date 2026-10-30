@@ -54,8 +54,9 @@ async def get_company(company_id: uuid.UUID, staff: Staff, session: DbSession) -
 
 @router.put("/companies/{company_id}", response_model=CompanyOut, summary="Update company (partial; sms replaced wholesale)")
 async def update_company(company_id: uuid.UUID, body: CompanyUpdateIn, staff: Staff, session: DbSession, meta: Meta) -> CompanyOut:
-    # SMS settings page (admin.settings.write) may save `sms` / `smsTemplates` only; identity fields need admin.company.write.
-    if set(body.model_fields_set) <= {"sms", "sms_templates"}:
+    # SMS settings page (admin.settings.write) may save `sms` / `smsTemplates` / `documentFreeViewDays` only;
+    # identity fields need admin.company.write.
+    if set(body.model_fields_set) <= {"sms", "sms_templates", "document_free_view_days"}:
         staff.require("admin.company.write", "admin.settings.write").scope(company_id)
     else:
         staff.require("admin.company.write").scope(company_id)

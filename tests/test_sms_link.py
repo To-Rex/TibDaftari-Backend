@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from app.api.deps import RequestMeta
@@ -16,9 +17,12 @@ from app.modules.orders.service import (
     document_qr_link,
     mask_name,
     mask_phone,
+    public_code_free,
+    public_free_until,
     public_result_link,
     public_verify_link_for_token,
 )
+from app.modules.tenant.schemas import DOCUMENT_FREE_VIEW_MAX_DAYS, document_free_view_days
 
 COMPANY = SimpleNamespace(name="Temo Med", settings={})
 
@@ -87,3 +91,27 @@ def test_mask_phone_hides_the_middle() -> None:
     assert mask_phone("+998 99 534 03 13") == "+998 ** *** 03 13"
     assert mask_phone("123") is None
     assert mask_phone(None) is None
+
+
+def test_code_free_days_setting_is_read_defensively() -> None:
+    assert document_free_view_days(None) == 0
+    assert document_free_view_days({}) == 0
+    assert document_free_view_days({"documentFreeViewDays": 7}) == 7
+    assert document_free_view_days({"documentFreeViewDays": "3"}) == 3
+    # junk or out-of-range values never open links for good
+    assert document_free_view_days({"documentFreeViewDays": "x"}) == 0
+    assert document_free_view_days({"documentFreeViewDays": -5}) == 0
+    assert document_free_view_days({"documentFreeViewDays": 10_000}) == DOCUMENT_FREE_VIEW_MAX_DAYS
+
+
+def test_code_free_window_runs_from_the_issue_date() -> None:
+    issued = datetime(2026, 10, 30, 9, 0, tzinfo=UTC)
+    assert public_free_until(issued, 0) is None
+    assert public_free_until(issued, 3) == issued + timedelta(days=3)
+    # 0 days: a code is always needed
+    assert public_code_free(issued, 0, issued) is None
+    # inside the window the link opens directly; the last second still counts, the end itself does not
+    assert public_code_free(issued, 3, issued + timedelta(days=2)) == issued + timedelta(days=3)
+    assert public_code_free(issued, 3, issued + timedelta(days=3, seconds=-1)) is not None
+    assert public_code_free(issued, 3, issued + timedelta(days=3)) is None
+    assert public_code_free(issued, 7, issued + timedelta(days=30)) is None

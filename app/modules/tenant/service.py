@@ -45,6 +45,7 @@ from app.modules.tenant.schemas import (
     SmsTemplates,
     SmsTestOut,
     TelegramSettingsIn,
+    document_free_view_days,
 )
 
 log = logging.getLogger("tenant")
@@ -96,6 +97,7 @@ def company_out(company: Company, branch_count: int, employee_count: int, names:
         ),
         telegram=CompanyTelegramOut(bot_username=company.telegram_bot_username, connected=bool(company.telegram_bot_token_enc)),
         sms_templates=SmsTemplates.model_validate(settings_.get("smsTemplates") or {}),
+        document_free_view_days=document_free_view_days(settings_),
         branch_count=branch_count,
         employee_count=employee_count,
         created_at=company.created_at,
@@ -245,6 +247,7 @@ def _company_snapshot(company: Company) -> dict[str, Any]:
         "smsProvider": company.sms_provider,
         "smsApiKeyMasked": company.sms_api_key_masked,
         "telegramBotUsername": company.telegram_bot_username,
+        "documentFreeViewDays": document_free_view_days(company.settings),
     }
 
 
@@ -305,6 +308,9 @@ async def update_company(session: AsyncSession, company_id: uuid.UUID, body: Com
         _apply_sms(company, body.sms)
     if body.sms_templates is not None:
         _apply_sms_templates(company, body.sms_templates)
+    if body.document_free_view_days is not None:
+        # read live by every public-link request: shortening it (or 0) closes the code-free links at once
+        company.settings = {**(company.settings or {}), "documentFreeViewDays": body.document_free_view_days}  # reassign → JSONB change is tracked
     await session.flush()
     await session.refresh(company, ["updated_at"])
     await audit(session, actor_type="staff", actor_id=staff.id, company_id=company.id, action="update", entity="company", entity_id=company.id, before=before, after=_company_snapshot(company), ip=meta.ip, request_id=meta.request_id)

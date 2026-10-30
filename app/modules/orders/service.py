@@ -94,6 +94,7 @@ from app.modules.orders.schemas import (
 )
 from app.modules.templates import service as templates_svc
 from app.modules.templates.renderer.context import build_render_context, item_status_label, to_render_item
+from app.modules.tenant.schemas import document_free_view_days
 
 log = logging.getLogger("app.orders")
 
@@ -1639,18 +1640,70 @@ async def _otp_sms_branch(session: AsyncSession, company: Company | None, order:
     return messaging.sms_branch_for(company, *branches)
 
 
+def public_free_until(issued_at: datetime, days: int) -> datetime | None:
+    """End of a result link's code-free window: `days` after the result was issued; None = a code is always needed."""
+    return issued_at + timedelta(days=days) if days > 0 else None
+
+
+def public_code_free(issued_at: datetime, days: int, now: datetime) -> datetime | None:
+    """The window's end while it still runs at `now`, else None (the PDF needs an SMS code)."""
+    until = public_free_until(issued_at, days)
+    return until if until is not None and now < until else None
+
+
 async def public_document_info(session: AsyncSession, token: str) -> PublicDocumentInfoOut:
     """Public verification info for a result link (QR / SMS): who issued it, when, and that it is authentic.
 
-    Scanned any number of times — nothing is consumed. The PDF itself is always behind an SMS code."""
+    Scanned any number of times — nothing is consumed. The PDF itself is behind an SMS code, except during the
+    clinic's code-free window (`documentFreeViewDays` after issue): then `otpRequired` is false and `freeUntil` says
+    until when the link opens it directly."""
     doc = await _public_document(session, token)
     company = await repo.get_company(session, doc.company_id)
+    free_until = public_code_free(doc.created_at, document_free_view_days(company.settings if company else None), utcnow())
     return PublicDocumentInfoOut(
         id=str(doc.id),
         title=doc.title,
         company_name=company.name if company else "",
         issued_at=iso_z(doc.created_at),
+        otp_required=free_until is None,
+        free_until=iso_z(free_until) if free_until else None,
     )
+
+
+async def public_document_open(session: AsyncSession, token: str, meta: RequestMeta) -> tuple[bytes, str]:
+    """The PDF straight from the SMS link — only inside the clinic's code-free window (`documentFreeViewDays` days
+    after the result was issued); otherwise 403 `otp_required` and the page falls back to the SMS code.
+
+    The window is read from the current setting on every request, so shortening it (or 0) closes the links at once."""
+    doc = await _public_document(session, token)
+    ip = meta.ip or "?"
+    await rate_limit.enforce(f"rl:docopen:ip:{ip}", settings.auth_rate_limit_per_minute, 60)
+    await rate_limit.enforce(f"rl:docopen:token:{token}", 30, 3600, "Juda ko'p urinish. Keyinroq qayta urinib ko'ring.")
+    company = await session.get(Company, doc.company_id)
+    now = utcnow()
+    free_until = public_code_free(doc.created_at, document_free_view_days(company.settings if company else None), now)
+    if free_until is None:
+        raise ForbiddenError("Hujjatni ochish uchun SMS kod kerak", code="otp_required")
+    patient = await session.get(Patient, doc.patient_id)
+    if not patient or patient.deleted_at is not None:
+        raise NotFoundError("Bemor topilmadi")
+    await repo.mark_public_viewed(session, doc.id, now)
+    await mark_document_viewed(session, doc)
+    pdf = await ensure_document_pdf(session, doc)
+    await audit(
+        session,
+        actor_type="patient",
+        actor_id=patient.id,
+        company_id=doc.company_id,
+        action="document_public_open",
+        entity="result_document",
+        entity_id=doc.id,
+        after={"via": "link", "freeUntil": iso_z(free_until)},
+        ip=meta.ip,
+        request_id=meta.request_id,
+    )
+    await session.flush()
+    return pdf, pdf_filename(doc)
 
 
 def mask_name(full_name: str | None) -> str:

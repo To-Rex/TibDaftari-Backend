@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,6 +14,19 @@ from app.core.schemas import CamelModel
 SmsProvider = Literal["xabarchi", "none"]
 SmsPriority = Literal["urgent", "transactional", "bulk"]
 Locale = Literal["uz", "ru", "en"]
+
+#: upper bound of `companies.settings.documentFreeViewDays` — a result link never stays open without a code for good
+DOCUMENT_FREE_VIEW_MAX_DAYS = 90
+
+
+def document_free_view_days(company_settings: Mapping[str, Any] | None) -> int:
+    """`companies.settings.documentFreeViewDays`: for how many days after a result is issued its SMS link opens the
+    PDF without an SMS code. 0 (the default) = a code is always needed; anything unreadable counts as 0."""
+    try:
+        days = int((company_settings or {}).get("documentFreeViewDays") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(days, DOCUMENT_FREE_VIEW_MAX_DAYS))
 
 
 class CompanySmsOut(CamelModel):
@@ -110,6 +124,8 @@ class CompanyOut(CamelModel):
     sms: CompanySmsOut
     telegram: CompanyTelegramOut
     sms_templates: SmsTemplates
+    #: days after issue during which the result's SMS link opens the PDF without a code (0 = always a code)
+    document_free_view_days: int = 0
     branch_count: int
     employee_count: int
     created_at: datetime
@@ -150,6 +166,7 @@ class CompanyUpdateIn(CamelModel):
     is_active: bool | None = None
     sms: CompanySmsIn | None = None
     sms_templates: SmsTemplates | None = None
+    document_free_view_days: int | None = Field(default=None, ge=0, le=DOCUMENT_FREE_VIEW_MAX_DAYS)
 
 
 class BranchOut(CamelModel):

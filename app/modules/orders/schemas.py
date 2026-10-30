@@ -349,6 +349,10 @@ class PublicDocumentInfoOut(CamelModel):
     title: str
     company_name: str
     issued_at: str
+    # the clinic's code-free window (`documentFreeViewDays` after issue): while it runs the PDF opens straight away
+    # (`POST /d/{token}/open`) and `freeUntil` says until when; afterwards an SMS code is needed again
+    otp_required: bool = True
+    free_until: str | None = None
 
 
 class PublicDocumentVerifyOut(CamelModel):

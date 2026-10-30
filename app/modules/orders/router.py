@@ -67,7 +67,7 @@ def _pdf_response(pdf: bytes, filename: str, *, public: bool = False) -> Respons
         media_type="application/pdf",
         headers={
             "Content-Disposition": f'inline; filename="{filename}"',
-            # public links are gated after the first open — never let the browser replay the PDF
+            # public links are gated (SMS code / the clinic's code-free window) — never let the browser replay the PDF
             "Cache-Control": "no-store" if public else "private, max-age=3600",
         },
     )
@@ -321,7 +321,8 @@ async def document_pdf(document_id: uuid.UUID, staff: Staff, session: DbSession)
 
 @router.get("/d/{token}", response_model=PublicDocumentInfoOut, summary="Public result info by unguessable token (SMS / Telegram links)")
 async def public_document_info(token: str, session: DbSession) -> PublicDocumentInfoOut:
-    """The SMS link's landing card — public metadata only; the PDF itself needs an SMS code."""
+    """The SMS link's landing card — public metadata only; the PDF itself needs an SMS code, except during the
+    clinic's code-free window (`otpRequired: false`, `freeUntil`)."""
     return await service.public_document_info(session, token)
 
 
@@ -329,6 +330,13 @@ async def public_document_info(token: str, session: DbSession) -> PublicDocument
 async def public_document_verify(token: str, session: DbSession) -> PublicDocumentVerifyOut:
     """What a scanned QR shows: genuine or withdrawn, issuer, date, numbers, masked holder — never the results."""
     return await service.public_document_verify(session, token)
+
+
+@router.post("/d/{token}/open", summary="Public result PDF without a code — only inside the clinic's code-free window")
+async def public_document_open(token: str, session: DbSession, meta: Meta) -> StarletteResponse:
+    """403 `otp_required` once the window is over (or the clinic needs a code always) — the page asks for the SMS code."""
+    pdf, filename = await service.public_document_open(session, token, meta)
+    return _pdf_response(pdf, filename, public=True)
 
 
 @router.post("/d/{token}/otp/request", response_model=PublicDocumentOtpOut, summary="Send an SMS code for a public result link")

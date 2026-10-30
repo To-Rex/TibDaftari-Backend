@@ -402,6 +402,23 @@ def test_full_workflow_create_pay_worklist_values_submit_approve(env: dict[str, 
     finally:
         settings.otp_dev_mode = True
     assert c.get(f"{API}/d/{'x' * 32}").status_code == 404
+    # the clinic's code-free window: by default (0) a code is always needed and `open` refuses
+    assert info["otpRequired"] is True and info["freeUntil"] is None
+    r = c.post(f"{API}/d/{token}/open")
+    assert r.status_code == 403 and r.json()["error"]["code"] == "otp_required", r.text
+    r = c.put(f"{API}/companies/{env['co_a']}", json={"documentFreeViewDays": 3}, headers=h)
+    assert r.status_code == 200 and r.json()["documentFreeViewDays"] == 3, r.text
+    try:
+        free = c.get(f"{API}/d/{token}").json()
+        assert free["otpRequired"] is False and free["freeUntil"].endswith("Z")
+        r = c.post(f"{API}/d/{token}/open")
+        assert r.status_code == 200 and r.content == FAKE_PDF and r.headers["cache-control"] == "no-store"
+        assert c.put(f"{API}/companies/{env['co_a']}", json={"documentFreeViewDays": 91}, headers=h).status_code == 422
+    finally:
+        assert c.put(f"{API}/companies/{env['co_a']}", json={"documentFreeViewDays": 0}, headers=h).status_code == 200
+    # back to 0: closed again at once
+    assert c.get(f"{API}/d/{token}").json()["otpRequired"] is True
+    assert c.post(f"{API}/d/{token}/open").status_code == 403
 
     # the QR has its own link (`/v/…`): authenticity only — it never opens the PDF nor sends an SMS code
     qr_link = doc["verifyLink"]

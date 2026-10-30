@@ -27,6 +27,7 @@ verbatim in the UI.
 | 401 | otp_invalid | Kod noto‘g‘ri |
 | 403 | inactive | Hisob faol emas |
 | 403 | forbidden | Ruxsat yo‘q |
+| 403 | otp_required | Hujjatni ochish uchun SMS kod kerak |
 | 404 | not_found | Kompaniya topilmadi · Filial topilmadi · Xodim topilmadi · Rol topilmadi · Bemor topilmadi · Bu raqam bilan bemor topilmadi. Klinikaga murojaat qiling. · Kategoriya topilmadi · Xizmat topilmadi · Sxema topilmadi · Shablon topilmadi · Chek topilmadi · Tahlil topilmadi · Bemor yoki filial topilmadi · Hujjat topilmadi |
 | 409 | conflict | Bu login band |
 | 409 | in_use | Bu rol xodimlarga biriktirilgan · Kategoriyada xizmatlar bor · Bu xizmat bo‘yicha buyurtmalar bor — o‘chirish o‘rniga nofaol qiling |
@@ -147,6 +148,14 @@ if status != cancelled: status = completed if (active and all approved) else ope
   real remaining `retryAfter`. The OTP outbox row carries the cheque (`order_id`) and the sending branch.
   `POST /d/{token}/otp/verify` returns the PDF and counts the view (`viewed_at`, `public_view_count`). Revoked
   documents answer 410 `revoked` on every endpoint.
+* **Code-free window (2026-10-30):** `companies.settings.documentFreeViewDays` (0–90, default 0 = a code is always
+  needed — the rule above). For that many days after a document is issued (`created_at`) its SMS link opens the PDF
+  without a code: `GET /d/{token}` answers `otpRequired: false` + `freeUntil`, and `POST /d/{token}/open` returns the
+  PDF (no-store; counts the view like the OTP path; audit `document_public_open`; rate-limited per IP and per token).
+  Outside the window `open` answers 403 `otp_required` and the page falls back to the SMS code. The window is
+  computed from the current setting on every request — lowering it (or 0) closes the links immediately. Set on the
+  SMS settings page (`PUT /companies/{id}` `documentFreeViewDays`, allowed with admin.settings.write). The QR page
+  (`/v/`) is not affected: it never opens the PDF.
 * **QR authenticity check (2026-10-29):** every issued document gets a second token, `verify_token`, of its own; the
   QR element renders `{doc.link}` = `<web app>/v/{verify_token}`, frozen into the render snapshot at approval
   (RENDERER_SPEC §3.9). `GET /v/{token}` answers only whether the paper is genuine — `status` `valid` | `revoked`
