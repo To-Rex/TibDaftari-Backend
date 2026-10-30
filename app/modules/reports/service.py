@@ -40,12 +40,13 @@ from app.modules.reports.schemas import (
 
 DASHBOARD_TTL_SECONDS = 30
 MAX_RANGE_DAYS = 366 * 3
-#: staff with `reports.finance.recent` (the registrar desk) see revenue for the last 7 days only
+#: staff with `reports.finance.recent` but not `reports.finance.read` see revenue for the last 7 days only
+#: (the registrar role has both since 2026-10-31 — the cap applies when an admin takes finance.read away)
 RECENT_WINDOW_DAYS = 7
 
 
 def _recent_only(staff: StaffPrincipal | None) -> bool:
-    """Registrar-style finance: revenue is visible, but only within the last 7 days."""
+    """Recent-only finance: revenue is visible, but only within the last 7 days."""
     return staff is not None and not staff.has("reports.finance.read") and staff.has("reports.finance.recent")
 
 

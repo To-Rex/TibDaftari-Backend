@@ -54,7 +54,10 @@ DEFAULT_COMPANY_ROLES: tuple[dict, ...] = (
         "permissions": [
             "reception.patient.read", "reception.patient.write", "reception.order.create", "reception.order.cancel",
             "reception.order.delete",
-            "reception.payment.create", "reports.operations.read", "reports.finance.recent", "messaging.send",
+            "reception.payment.create", "reports.operations.read", "messaging.send",
+            # reports like the admin's: full revenue (no 7-day cap) + CSV / Excel export — still confined to the
+            # employee's branches; `reports.finance.recent` stays as the fallback if an admin takes finance.read away
+            "reports.finance.read", "reports.export", "reports.finance.recent",
             # approved results: view, print and re-send the SMS (no approving, nothing unapproved)
             "confirm.result.view", "confirm.result.resend",
         ],

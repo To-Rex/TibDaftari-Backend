@@ -55,6 +55,11 @@ verbatim in the UI.
   (any other status needs `lab.worklist.read`), items / orders / documents / the patient, print, and the SMS re-send
   (`POST /documents/{id}/sms` takes approve | messaging.send | confirm.result.resend). Migration a3b4c5d6e7f8 adds it
   and `confirm.result.resend` to every company's `registrator` role.
+* Registrar reports (2026-10-31): the `registrator` role gets `reports.finance.read` + `reports.export` — the same
+  reports as the admin (revenue without the 7-day cap, CSV / Excel export), still confined to the employee's
+  branches (`branch_scope`). Migration c1d2e3f4a5b6 grants them to every registrar role that still sees reports
+  (`reports.operations.read` or `reports.finance.recent`). `reports.finance.recent` stays on the role: if an admin
+  takes `reports.finance.read` away, the 7-day cap applies again.
   Effective = role.permissions ∪ overrides.allow − overrides.deny (deny wins).
 * System roles: `superadmin` (companyId null, all 31), `admin` (per company, all except platform.*), plus registrator/laborant/vrach/rahbar (seed).
 * **StaffSession** `{actor:'staff', employeeId, companyId, branchId, isSuperAdmin, roleKey, fullName, permissions[], accessToken, expiresAt}`; `branchId = branchIds[0] if len==1 else null`; `isSuperAdmin = employee.is_super_admin` (**FIX**: not derived from a client-editable role key); `roleKey = role.key`; staff token TTL 12h (fixed - the JWT `exp` is immutable and the SPA keeps the login token; `staffMe` only records `lastSeenAt`).

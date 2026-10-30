@@ -25,6 +25,18 @@ def test_registrar_role_gets_approved_results() -> None:
     assert "confirm.result.view" in PERMISSION_SET
 
 
+def test_registrar_role_gets_the_admins_reports() -> None:
+    """Reports like the admin's: full revenue (no 7-day cap) and the CSV / Excel export; recent stays as a fallback."""
+    from app.modules.reports.service import _recent_only
+
+    reg = next(r for r in DEFAULT_COMPANY_ROLES if r["key"] == "registrator")
+    assert {"reports.operations.read", "reports.finance.read", "reports.export", "reports.finance.recent"} <= set(reg["permissions"])
+    assert set(reg["permissions"]) <= PERMISSION_SET
+    assert not _recent_only(principal(*reg["permissions"]))
+    # an admin who takes finance.read away from the role puts the 7-day cap back
+    assert _recent_only(principal(*(p for p in reg["permissions"] if p != "reports.finance.read")))
+
+
 class _ReachedServiceError(Exception):
     pass
 
