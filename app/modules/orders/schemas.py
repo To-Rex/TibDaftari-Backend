@@ -192,6 +192,8 @@ class OrderBundleOut(CamelModel):
 class OrderItemsOut(CamelModel):
     order: OrderOut
     items: list[OrderItemOut]
+    # removing a service from a paid cheque: the amount given back to the patient (0 otherwise)
+    refunded: int = 0
 
 
 class OrderPaymentsOut(CamelModel):

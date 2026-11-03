@@ -294,9 +294,7 @@ def test_full_workflow_create_pay_worklist_values_submit_approve(env: dict[str, 
         and paid["payments"][0]["method"] == "card"
         and paid["payments"][0]["refundedAt"] is None
     )
-    # remove item on a paid order → 409 paid
-    r = c.delete(f"{API}/orders/{order['id']}/items/{it2['id']}", headers=h)
-    assert r.status_code == 409 and r.json()["error"]["code"] == "paid"
+    # (a pending service can leave a paid cheque too — see test_remove_from_paid_cheque_gives_the_difference_back)
 
     # worklist now shows the schema item with join columns
     wl = c.get(
@@ -469,6 +467,33 @@ def test_full_workflow_create_pay_worklist_values_submit_approve(env: dict[str, 
     assert check["status"] == "revoked" and check["revokedAt"] and check["id"] == doc["id"]
 
 
+def test_remove_from_paid_cheque_gives_the_difference_back(env: dict[str, Any]) -> None:
+    """A service added by mistake can leave a paid cheque: the excess is refunded, the rest stays paid (same method)."""
+    c: TestClient = env["client"]
+    h = env["h_a"]
+    created = _create(env, [env["st1"], env["st2"]], note="adashib")
+    order, items = created["order"], created["items"]
+    total = order["total"]
+    r = c.post(f"{API}/orders/{order['id']}/pay", json={"amount": total, "method": "cash", "sendSms": False}, headers=h)
+    assert r.status_code == 200 and r.json()["order"]["payment"] == "paid", r.text
+    r = c.delete(f"{API}/orders/{order['id']}/items/{items[1]['id']}", params={"reason": "adashib qo'shildi"}, headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    new_total = body["order"]["total"]
+    assert new_total < total and body["refunded"] == total - new_total
+    assert body["order"]["paidAmount"] == new_total and body["order"]["payment"] == "paid"
+    assert [i["id"] for i in body["items"]] == [items[0]["id"]]
+    pays = c.get(f"{API}/orders/{order['id']}", headers=h).json()["payments"]
+    gone = [p for p in pays if p["refundedAt"]]
+    live = [p for p in pays if not p["refundedAt"]]
+    assert len(gone) == 1 and gone[0]["amount"] == total
+    assert len(live) == 1 and live[0]["amount"] == new_total and live[0]["method"] == "cash"
+    # the last service as well: everything goes back, the cheque is unpaid again
+    r = c.delete(f"{API}/orders/{order['id']}/items/{items[0]['id']}", headers=h)
+    assert r.status_code == 200 and r.json()["refunded"] == new_total, r.text
+    assert r.json()["order"]["paidAmount"] == 0 and r.json()["order"]["payment"] == "unpaid" and r.json()["items"] == []
+
+
 def test_remove_cancel_and_closed(env: dict[str, Any]) -> None:
     c: TestClient = env["client"]
     h = env["h_a"]
@@ -480,6 +505,7 @@ def test_remove_cancel_and_closed(env: dict[str, Any]) -> None:
         r.status_code == 200
         and [i["id"] for i in r.json()["items"]] == [items[0]["id"]]
         and r.json()["order"]["total"] == 90000
+        and r.json()["refunded"] == 0
     )
     # item of another order → 404
     assert c.delete(f"{API}/orders/{order['id']}/items/{uuid.uuid4()}", headers=h).status_code == 404

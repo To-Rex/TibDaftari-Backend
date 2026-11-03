@@ -141,13 +141,18 @@ async def add_items(
 @router.delete(
     "/orders/{order_id}/items/{item_id}",
     response_model=OrderItemsOut,
-    summary="Remove a pending service from an unpaid order",
+    summary="Remove a pending service (added by mistake); a paid cheque gives the difference back (`refunded`)",
 )
 async def remove_item(
-    order_id: uuid.UUID, item_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta
+    order_id: uuid.UUID,
+    item_id: uuid.UUID,
+    staff: Staff,
+    session: DbSession,
+    meta: Meta,
+    reason: Annotated[str | None, Query(max_length=300)] = None,
 ) -> OrderItemsOut:
     staff.require("reception.order.create")
-    return await service.remove_item(session, order_id, item_id, staff, meta)
+    return await service.remove_item(session, order_id, item_id, staff, meta, reason)
 
 
 @router.post("/orders/{order_id}/pay", response_model=OrderPaymentsOut, summary="Record a payment")

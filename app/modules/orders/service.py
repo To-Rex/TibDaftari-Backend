@@ -671,23 +671,78 @@ async def add_items(
     return await _order_items_out(session, order)
 
 
+def plan_overpayment_return(payments: list[Payment], excess: int) -> tuple[list[Payment], int]:
+    """What a cheque gives back once a service left it: the newest live payments are refunded until `excess` is
+    covered; returns them (newest first) and the part of the last one that stays paid (re-entered by the caller)."""
+    picked: list[Payment] = []
+    covered = 0
+    for p in sorted(payments, key=lambda p: (p.created_at, str(p.id)), reverse=True):
+        if covered >= excess:
+            break
+        picked.append(p)
+        covered += int(p.amount)
+    return picked, max(0, covered - excess)
+
+
+async def _return_overpayment(session: AsyncSession, order: Order, staff: StaffPrincipal, now: datetime, reason: str) -> tuple[int, list[Payment]]:
+    """After a service left a (partly) paid cheque: what is now paid over the new total goes back to the patient.
+
+    Payments are refunded whole (the existing refund semantics every list, report and the cash desk already know); the
+    part of the last refunded payment that stays paid is re-entered with its method, cashier and original time, so the
+    day it was taken shows the net amount. The patient's total spent drops by the refund."""
+    excess = int(order.paid_amount) - int(order.total)
+    if excess <= 0:
+        return 0, []
+    live = [p for p in await repo.payments_of_order(session, order.id) if p.refunded_at is None]
+    refunded, keep = plan_overpayment_return(live, excess)
+    for p in refunded:
+        p.refunded_at = now
+        p.refund_reason = reason
+        _touch(p, now)
+    if keep > 0:
+        last = refunded[-1]
+        session.add(
+            Payment(
+                company_id=order.company_id,
+                order_id=order.id,
+                branch_id=last.branch_id,
+                amount=keep,
+                method=last.method,
+                employee_id=last.employee_id,
+                note=f"Qayta hisoblandi — {reason}",
+                created_at=last.created_at,
+                updated_at=now,
+                created_by=staff.id,
+            )
+        )
+    await recompute(session, order, now)
+    patient = await repo.get_patient(session, order.patient_id, order.company_id)
+    if patient:
+        await repo.bump_patient_stats(session, patient.id, spent=-excess, now=now)
+    return excess, refunded
+
+
 async def remove_item(
-    session: AsyncSession, order_id: uuid.UUID, item_id: uuid.UUID, staff: StaffPrincipal, meta: RequestMeta
+    session: AsyncSession, order_id: uuid.UUID, item_id: uuid.UUID, staff: StaffPrincipal, meta: RequestMeta, reason: str | None = None
 ) -> OrderItemsOut:
-    """Soft-delete a pending item of an unpaid cheque."""
+    """Soft-delete a service added by mistake — only while it is pending (the lab has not started on it).
+
+    Paid or not: on a (partly) paid cheque whatever is now paid over the new total goes back to the patient
+    (`_return_overpayment`) and the response says how much (`refunded`; 0 when the remaining debt just shrinks)."""
     order = await get_order_or_404(session, order_id, scope_company(staff), for_update=True, staff=staff)
     item = await repo.get_item(session, item_id, order.company_id)
     if not item or item.order_id != order.id:
         raise NotFoundError(ITEM_NOT_FOUND)
     if item.status != "pending":
         raise ConflictError("Laboratoriya boshlagan tahlilni o‘chirib bo‘lmaydi", code="in_progress")
-    if order.payment != "unpaid":
-        raise ConflictError("To‘langan chekdan xizmat o‘chirib bo‘lmaydi", code="paid")
     now = utcnow()
+    reason = (reason or "").strip() or None
     item.deleted_at = now
     item.deleted_by = staff.id
     _touch(item, now)
     await recompute(session, order, now)
+    refund_reason = f"«{item.service_name}» chekdan o‘chirildi" + (f": {reason}" if reason else "")
+    refunded, payments = await _return_overpayment(session, order, staff, now, refund_reason)
     await audit(
         session,
         actor_type="staff",
@@ -697,10 +752,12 @@ async def remove_item(
         entity="order_item",
         entity_id=item.id,
         before={"serviceName": item.service_name, "price": item.price},
+        after={"orderId": str(order.id), "total": order.total, "reason": reason, "refunded": refunded, "refundedPaymentIds": [str(p.id) for p in payments]},
         ip=meta.ip,
         request_id=meta.request_id,
     )
-    return await _order_items_out(session, order)
+    out = await _order_items_out(session, order)
+    return out.model_copy(update={"refunded": refunded})
 
 
 # ----------------------------------------------------------------------------- payments
