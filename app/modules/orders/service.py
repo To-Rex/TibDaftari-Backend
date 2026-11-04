@@ -505,8 +505,10 @@ async def recompute(session: AsyncSession, order: Order, now: datetime | None = 
 async def list_orders(session: AsyncSession, company_id: uuid.UUID, q: OrderListQuery, staff: StaffPrincipal | None = None) -> Page[OrderOut]:
     """Paged company orders, confined to the caller's branch scope."""
     rows, total = await repo.list_orders(session, company_id, q, staff.branch_scope(q.branch_id) if staff else None)
-    paid = await repo.payments_by_order(session, [o.id for o in rows])
-    return page_of([_with_methods(order_out(o), paid.get(o.id, {})) for o in rows], q, total)
+    ids = [o.id for o in rows]
+    paid = await repo.payments_by_order(session, ids)
+    first = await repo.first_payment_at_by_order(session, ids)
+    return page_of([_with_methods(order_out(o), paid.get(o.id, {})).model_copy(update={"first_paid_at": first.get(o.id)}) for o in rows], q, total)
 
 
 def _with_methods(dto: OrderOut, by_method: dict[str, int]) -> OrderOut:
@@ -671,6 +673,24 @@ async def add_items(
     return await _order_items_out(session, order)
 
 
+#: reception may change a payment (refund it, give it back for a removed service, delete it with the cheque) only this
+#: long after it was taken; later only `reception.payment.late_edit` (admin and rahbar roles; superadmin always)
+PAYMENT_EDIT_WINDOW = timedelta(hours=24)
+LATE_EDIT = "reception.payment.late_edit"
+PAYMENT_LOCKED = "To‘lovga 1 kundan ko‘p vaqt o‘tgan — uni faqat administrator yoki rahbar o‘zgartira oladi"
+
+
+def payment_locked(created_at: datetime, now: datetime) -> bool:
+    """Whether a payment taken at `created_at` is past the reception's edit window."""
+    return now - created_at >= PAYMENT_EDIT_WINDOW
+
+
+def ensure_payments_editable(staff: StaffPrincipal, payments: list[Payment], now: datetime) -> None:
+    """403 payment_locked when any of `payments` is older than a day and the caller lacks `late_edit`."""
+    if not staff.has(LATE_EDIT) and any(payment_locked(p.created_at, now) for p in payments):
+        raise ForbiddenError(PAYMENT_LOCKED, code="payment_locked")
+
+
 def plan_overpayment_return(payments: list[Payment], excess: int) -> tuple[list[Payment], int]:
     """What a cheque gives back once a service left it: the newest live payments are refunded until `excess` is
     covered; returns them (newest first) and the part of the last one that stays paid (re-entered by the caller)."""
@@ -695,6 +715,8 @@ async def _return_overpayment(session: AsyncSession, order: Order, staff: StaffP
         return 0, []
     live = [p for p in await repo.payments_of_order(session, order.id) if p.refunded_at is None]
     refunded, keep = plan_overpayment_return(live, excess)
+    # only the payments that give money back count — dropping a service that just shrinks the debt stays open
+    ensure_payments_editable(staff, refunded, now)
     for p in refunded:
         p.refunded_at = now
         p.refund_reason = reason
@@ -894,6 +916,7 @@ async def refund(
     if payment.refunded_at is not None:
         raise StateError("To‘lov allaqachon qaytarilgan", code="state")
     now = utcnow()
+    ensure_payments_editable(staff, [payment], now)
     payment.refunded_at = now
     payment.refund_reason = reason or None
     _touch(payment, now)
@@ -961,6 +984,8 @@ async def delete_order(session: AsyncSession, order_id: uuid.UUID, staff: StaffP
             raise ConflictError("Laboratoriya boshlagan tahlilni o‘chirib bo‘lmaydi", code="in_progress")
     payments = await repo.payments_of_order(session, order.id)
     now = utcnow()
+    # every payment (refunded ones too) leaves the reports with the cheque
+    ensure_payments_editable(staff, payments, now)
     order.deleted_at = now
     order.deleted_by = staff.id
     _touch(order, now)

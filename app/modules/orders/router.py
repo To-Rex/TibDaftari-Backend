@@ -151,7 +151,7 @@ async def remove_item(
     meta: Meta,
     reason: Annotated[str | None, Query(max_length=300)] = None,
 ) -> OrderItemsOut:
-    staff.require("reception.order.create")
+    staff.require("reception.order.create", service.LATE_EDIT)
     return await service.remove_item(session, order_id, item_id, staff, meta, reason)
 
 
@@ -165,7 +165,7 @@ async def pay(order_id: uuid.UUID, body: PayIn, staff: Staff, session: DbSession
 async def refund(
     payment_id: uuid.UUID, body: ReasonIn, staff: Staff, session: DbSession, meta: Meta
 ) -> OrderPaymentsOut:
-    staff.require("reception.payment.refund")
+    staff.require("reception.payment.refund", service.LATE_EDIT)
     return await service.refund(session, payment_id, staff, body.reason, meta)
 
 
@@ -177,7 +177,7 @@ async def cancel_order(order_id: uuid.UUID, body: ReasonIn, staff: Staff, sessio
 
 @router.delete("/orders/{order_id}", response_model=OrderOut, summary="Delete a cheque with no lab work started (paid or not)")
 async def delete_order(order_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta) -> OrderOut:
-    staff.require("reception.order.delete")
+    staff.require("reception.order.delete", service.LATE_EDIT)
     return await service.delete_order(session, order_id, staff, meta)
 
 

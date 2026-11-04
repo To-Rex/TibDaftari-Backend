@@ -8,6 +8,9 @@ PERMISSIONS: tuple[str, ...] = (
     "reception.patient.read", "reception.patient.write", "reception.order.create", "reception.order.cancel",
     "reception.order.delete",
     "reception.payment.create", "reception.payment.refund",
+    # change a payment more than a day after it was taken (refund, money back on a removed service, delete the
+    # cheque) — reception can only within the day; admin and rahbar any time
+    "reception.payment.late_edit",
     "lab.worklist.read", "lab.result.write", "lab.result.submit",
     # confirm.result.view = approved results only (view / print / re-send) — the registrar desk
     "confirm.result.read", "confirm.result.view", "confirm.result.approve", "confirm.result.resend",
@@ -76,6 +79,10 @@ DEFAULT_COMPANY_ROLES: tuple[dict, ...] = (
         "key": "rahbar",
         "name": "Rahbar",
         "is_system": False,
-        "permissions": ["reports.finance.read", "reports.operations.read", "reports.export", "reception.patient.read", "admin.employee.read"],
+        "permissions": [
+            "reports.finance.read", "reports.operations.read", "reports.export", "reception.patient.read", "admin.employee.read",
+            # corrects old payments on a cheque (remove a service with money back, delete the cheque)
+            "reception.payment.late_edit",
+        ],
     },
 )

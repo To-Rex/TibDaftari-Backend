@@ -249,6 +249,19 @@ def _chunks(ids: list[uuid.UUID], size: int = 2000) -> Iterable[list[uuid.UUID]]
         yield ids[i : i + size]
 
 
+async def first_payment_at_by_order(session: AsyncSession, order_ids: list[uuid.UUID]) -> dict[uuid.UUID, datetime]:
+    """order → time of its oldest alive payment (refunded or not)."""
+    out: dict[uuid.UUID, datetime] = {}
+    for part in _chunks(order_ids):
+        rows = (
+            await session.execute(
+                select(Payment.order_id, func.min(Payment.created_at)).where(Payment.order_id.in_(part), alive(Payment)).group_by(Payment.order_id)
+            )
+        ).all()
+        out.update({oid: at for oid, at in rows})
+    return out
+
+
 async def payments_by_order(session: AsyncSession, order_ids: list[uuid.UUID]) -> dict[uuid.UUID, dict[str, int]]:
     """order → {method: Σ non-refunded payments}."""
     out: dict[uuid.UUID, dict[str, int]] = {}

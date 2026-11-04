@@ -60,6 +60,8 @@ class OrderOut(CamelModel):
     created_by: str | None = None
     #: non-refunded payments by method (filled in the cheque list)
     payments_by_method: list[MethodSumOut] = Field(default_factory=list)
+    #: oldest payment, refunded or not (cheque list) — a day later reception can no longer delete the cheque
+    first_paid_at: datetime | None = None
 
 
 class ItemEventOut(CamelModel):
