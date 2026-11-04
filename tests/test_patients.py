@@ -169,7 +169,7 @@ def test_create_shape_and_normalisation(env: dict[str, Any]) -> None:
     assert p["birthDate"] == "1990-05-17"
     assert p["address"] == {"regionId": env["region"], "districtId": env["d1"], "street": "Navoiy 1"}
     assert p["stats"] == {"orders": 0, "lastVisitAt": None, "totalSpent": 0}
-    assert p["portal"] == {"linked": False, "telegramChatId": None}
+    assert p["portal"] == {"linked": False, "telegramChatId": None, "login": None, "loginSetAt": None}
     assert p["tags"] == [] and p["note"] == "vip"
     assert p["createdAt"].endswith("Z")
     env["p1"] = p

@@ -1,7 +1,8 @@
 """Patient portal — read-only self-service surface (DOMAIN_RULES section 11).
 
 Identity: a patient may be registered in several clinics under the same phone; the portal
-principal therefore owns every alive patient row sharing its phone (computed once per request).
+principal therefore owns every alive patient row sharing its phone (computed once per request) —
+except a session opened with a portal login + password, which owns its own patient row only.
 Ownership checks answer 404 (never 403) so foreign ids do not leak existence.
 Item results are redacted: `values`/`labNote` are exposed only for approved items.
 """
@@ -104,7 +105,12 @@ def item_out(i: OrderItem) -> OrderItemOut:
 
 
 async def identity_ids(session: AsyncSession, principal: PatientPrincipal) -> list[uuid.UUID]:
-    """All patient ids the principal may act for (same phone across clinics); always includes itself."""
+    """All patient ids the principal may act for (same phone across clinics); always includes itself.
+
+    A session opened with a portal login is that one patient only: relatives sharing a phone each get their
+    own login and must not see each other's results."""
+    if principal.own_only:
+        return [principal.id]
     ids = await repo.patient_ids_by_phone(session, principal.patient.phone)
     if principal.id not in ids:
         ids.append(principal.id)

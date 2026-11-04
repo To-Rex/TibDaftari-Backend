@@ -28,8 +28,10 @@ verbatim in the UI.
 | 403 | inactive | Hisob faol emas |
 | 403 | forbidden | Ruxsat yo‘q |
 | 403 | otp_required | Hujjatni ochish uchun SMS kod kerak |
+| 403 | login_session_only | Parolni login bilan kirganda o‘zgartirish mumkin |
 | 404 | not_found | Kompaniya topilmadi · Filial topilmadi · Xodim topilmadi · Rol topilmadi · Bemor topilmadi · Bu raqam bilan bemor topilmadi. Klinikaga murojaat qiling. · Kategoriya topilmadi · Xizmat topilmadi · Sxema topilmadi · Shablon topilmadi · Chek topilmadi · Tahlil topilmadi · Bemor yoki filial topilmadi · Hujjat topilmadi |
 | 409 | conflict | Bu login band |
+| 409 | login_taken | Bu login band  (patient portal login) |
 | 409 | in_use | Bu rol xodimlarga biriktirilgan · Kategoriyada xizmatlar bor · Bu xizmat bo‘yicha buyurtmalar bor — o‘chirish o‘rniga nofaol qiling |
 | 409 | has_children | Avval ichki kategoriyalarni o‘chiring |
 | 409 | active | Faol shablonni o‘chirib bo‘lmaydi — avval arxivlang |
@@ -42,6 +44,8 @@ verbatim in the UI.
 | 409 | state | Avval natijalarni saqlang · Faqat yuborilgan natijani tasdiqlash mumkin · Tasdiqlash uchun yuborilgan tahlil yo‘q · Faqat yuborilgan natijani qaytarish mumkin |
 | 409 | duplicate_passport / duplicate_pinfl / duplicate_phone | Bu passport raqami bilan bemor mavjud · Bu JSHSHIR bilan bemor mavjud · Bu telefon raqami bilan bemor mavjud |
 | 422 | invalid_phone | Telefon raqam noto‘g‘ri |
+| 422 | invalid_login / invalid_password | Login 3–40 belgi: lotin harflari, raqamlar va . _ - (harf yoki raqam bilan boshlanadi) · Parol bo‘sh joy bilan boshlanmasin va tugamasin |
+| 422 | wrong_password / same_password | Joriy parol noto‘g‘ri · Yangi parol joriysidan farq qilsin |
 | 422 | empty | Kamida bitta maydon kerak · Bo‘sh shablonni faollashtirib bo‘lmaydi · Chekda xizmat yo‘q |
 | 422 | amount | Summa 1 – {remaining} oralig‘ida bo‘lishi kerak  (raw integer, en dash) |
 | 422 | required | To‘ldirilmagan: {labels joined ', '} |
@@ -67,6 +71,25 @@ verbatim in the UI.
 * `staffMe(token)`: rebuild session from DB each call (role changes apply immediately); revoked/expired → 401 "Sessiya tugagan".
 * Patient OTP: `requestPatientOtp(phone)`: digits; 9 digits → prefix 998; must match `^998\d{9}$` else 422 invalid_phone; find patient by phone across all companies (first by created_at) else 404 "Bu raqam bilan bemor topilmadi. Klinikaga murojaat qiling."; challenge TTL 5 min; code random N digits (settings.otp_length; **dev mode: returned as devCode**), delivered as SMS via the patient's company outbox (kind otp) when the company has an SMS provider; resend cooldown 60s per phone (429).
   `verifyPatientOtp(challengeId, code, phone)`: unknown/expired → 401 otp_expired; wrong → 401 otp_invalid (max 3 attempts then expired); success → consume, patient.portal.linked = true, session TTL 30 days.
+* Patient portal login (2026-11-04, migration d2e3f4a5b6c7) — an extra way in, phone + SMS code is unchanged:
+  * Reception (`reception.patient.write`, company-scoped like the patient update): `PUT /patients/{id}/portal-access`
+    `{login?, password?, sendSms?, branchId?}` issues or renews it. Login: trimmed, lower-case, `^[a-z0-9][a-z0-9._-]{2,39}$`
+    (422 invalid_login), unique among alive patients of every clinic (one portal form; 409 login_taken); empty → the
+    current one, else `<first word of the name in Latin><4 digits>`. Password: given (6–128, no outer spaces) or
+    generated (8 chars, no look-alikes). Every call sets a new password, clears the lockout and ends the patient's
+    login sessions. The answer `{login, password, sms, patient}` is the only time the password is shown (argon2 hash
+    stored). `sendSms` → kind `portal_access` to the patient's phone through the working branch's SMS account
+    (`branchId` when it is the employee's and the clinic's, else the patient's branch); the outbox shows the text with
+    the password masked, the real text travels encrypted (as OTP); `sms` = queued | not_configured | invalid_phone.
+    `DELETE /patients/{id}/portal-access` clears login + password and ends the login sessions (idempotent).
+    Audited (`portal_access_set` / `portal_access_remove`, never the password). `patient.portal.login` / `loginSetAt`.
+  * `POST /auth/patient/login {login, password}`: login case-insensitive; same rate limits and lockout as the staff
+    login (settings.login_max_attempts / login_lock_minutes → 429); wrong either → 401 "Login yoki parol noto‘g‘ri".
+    Success → portal.linked = true, session TTL 30 days, `via: 'login'` in the session and the token, `login`.
+  * A login session acts for **its own patient only** (relatives sharing one phone each see their own results); an
+    SMS-code session keeps acting for every patient of the phone. `sessions.method` = otp | login (NULL: older rows).
+  * `POST /auth/patient/password {currentPassword, newPassword}` (login sessions only, else 403 login_session_only):
+    wrong current → 422 wrong_password; same → 422 same_password; the other login sessions end, this one stays.
 * `logout(token)`: revoke jti (Redis + sessions.revoked_at). Idempotent.
 
 ## 3. Tenant / staff
@@ -207,6 +230,8 @@ if status != cancelled: status = completed if (active and all approved) else ope
   is an allowed CORS origin), else FRONTEND_URL; the app page `/d/:token` opens the PDF from `GET /api/v1/d/{token}`.
   Available in company overrides of `result_ready` too.
 * otp: `Sizning tasdiqlash kodingiz: {code}` (uz) — Telegram bot uses its own per-language text.
+* portal_access (2026-11-04): `{company} shaxsiy kabinetiga kirish: {link} Login: {login} Parol: {password}`, `{link}` =
+  `<web app>/login`; stored masked (`Parol: ••••••`), sent from the encrypted payload; not kept without an SMS provider.
 * Optional per-company overrides in `companies.settings.smsTemplates` `{payment_receipt, result_ready, reminder}` with placeholders `{patient} {order} {service} {company} {branch}` — when set, they win. The payment receipt also has
   `{amount}` (this payment), `{total}` (the cheque total) and `{remaining}` (still to pay after it), money as `120 000`.
 * Per-branch texts (2026-10): `branches.settings.smsTemplates`. A branch that saved its own texts uses only those (an
@@ -216,6 +241,8 @@ if status != cancelled: status = completed if (active and all approved) else ope
   `applyToAll` (superadmin / company admin) writes the same texts to every branch and to the company (new branches).
 
 ## 11. Portal (patient token)
+* Identity: an SMS-code session acts for every alive patient sharing its phone (all clinics); a portal-login session
+  (§2, `via=login`) for its own patient only — ownership checks of orders / documents use that set.
 * `overview`: patient projection (no note/discount/tags/pinfl), orders (all companies, non-cancelled, newest first), documents of those orders (newest first), companies [{id,name}].
 * `order(id)`: order must belong to patient else 404 (**FIX**: no existence leak); items (all statuses) but `values`/`labNote` only for approved items (**FIX**), documents.
 * `document(id)`: {document, template, item?, order, items (covered), schemas, serviceCodes{stId: code|id}, category?}; PDF at `/portal/documents/{id}/pdf`.

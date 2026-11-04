@@ -9,7 +9,7 @@ from fastapi import APIRouter, Query
 
 from app.api.deps import DbSession, Meta, Staff
 from app.core.schemas import Page, PageQuery
-from app.modules.patients import service
+from app.modules.patients import portal_login, service
 from app.modules.patients.schemas import (
     CountryOut,
     DistrictOut,
@@ -17,6 +17,8 @@ from app.modules.patients.schemas import (
     PatientOut,
     PatientPatchIn,
     PatientUpsertIn,
+    PortalAccessIn,
+    PortalAccessOut,
     RegionOut,
 )
 
@@ -85,6 +87,24 @@ async def update_patient(
 ) -> PatientOut:
     staff.require("reception.patient.write")
     return await service.update_patient(session, patient_id, staff, body, meta)
+
+
+@router.put(
+    "/patients/{patient_id}/portal-access",
+    response_model=PortalAccessOut,
+    summary="Issue / renew the patient's portal login + password (the password is returned once)",
+)
+async def set_portal_access(
+    patient_id: uuid.UUID, body: PortalAccessIn, staff: Staff, session: DbSession, meta: Meta
+) -> PortalAccessOut:
+    staff.require("reception.patient.write")
+    return await portal_login.set_portal_access(session, patient_id, staff, body, meta)
+
+
+@router.delete("/patients/{patient_id}/portal-access", response_model=PatientOut, summary="Switch the portal login off")
+async def remove_portal_access(patient_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta) -> PatientOut:
+    staff.require("reception.patient.write")
+    return await portal_login.remove_portal_access(session, patient_id, staff, meta)
 
 
 @router.get("/countries", response_model=list[CountryOut], summary="Countries (public reference data)")

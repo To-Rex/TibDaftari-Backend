@@ -12,7 +12,7 @@ from app.core.schemas import CamelModel, PageQuery
 
 MessageChannel = Literal["sms", "telegram", "portal"]
 MessageStatus = Literal["scheduled", "queued", "sent", "delivered", "failed"]
-MessageKind = Literal["payment_receipt", "result_ready", "reminder", "broadcast", "otp"]
+MessageKind = Literal["payment_receipt", "result_ready", "reminder", "broadcast", "otp", "portal_access"]
 NotificationKind = Literal["info", "success", "warning"]
 
 

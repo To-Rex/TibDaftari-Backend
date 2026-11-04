@@ -125,6 +125,8 @@ class Session(Base):
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True)  # jti
     actor: Mapped[str] = mapped_column(String(10), nullable=False)  # staff | patient
+    # how a patient signed in: otp (phone + SMS code; NULL on older rows) | login (portal login + password)
+    method: Mapped[str | None] = mapped_column(String(10))
     subject_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     company_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)

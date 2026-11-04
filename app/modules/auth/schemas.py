@@ -46,6 +46,18 @@ class PatientOtpVerifyIn(CamelModel):
     challenge_id: str = Field(min_length=8, max_length=64)
 
 
+class PatientLoginIn(CamelModel):
+    """Portal login + password issued at reception."""
+
+    login: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class PatientPasswordChangeIn(CamelModel):
+    current_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=6, max_length=128)
+
+
 class PatientSessionOut(CamelModel):
     actor: Literal["patient"] = "patient"
     patient_id: str
@@ -53,3 +65,6 @@ class PatientSessionOut(CamelModel):
     full_name: str
     access_token: str
     expires_at: datetime
+    # otp = phone + SMS code (every patient of the phone); login = portal login + password (this patient only)
+    via: Literal["otp", "login"] = "otp"
+    login: str | None = None

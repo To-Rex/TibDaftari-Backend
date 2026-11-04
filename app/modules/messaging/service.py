@@ -40,6 +40,8 @@ DEFAULT_TEMPLATES: dict[str, str] = {
     "result_ready_order": "{service}: {count} ta tahlil natijasi tayyor: {link} {company}",
     "reminder": "Hurmatli {patient}! Sizni {company} klinikasida kutamiz. Chek: {order}",
     "otp": "Sizning tasdiqlash kodingiz: {code}",
+    # portal login issued at reception; {link} = the portal sign-in page
+    "portal_access": "{company} shaxsiy kabinetiga kirish: {link} Login: {login} Parol: {password}",
 }
 
 
@@ -90,6 +92,10 @@ def result_ready_order_text(company: Company, template_name: str, count: int, pa
 
 def otp_text(company: Company | None, code: str) -> str:
     return render_text(company, "otp", code=code)
+
+
+def portal_access_text(company: Company | None, login: str, password: str, link: str) -> str:
+    return render_text(company, "portal_access", login=login, password=password, link=link)
 
 
 # ----------------------------------------------------------------------------- outbox
@@ -216,13 +222,16 @@ async def enqueue_sms_if_configured(session: AsyncSession, company: Company, **k
     branch_id = kwargs.get("branch_id")
     branch = await session.get(Branch, branch_id) if branch_id else None
     configured = sms_account(company, branch) is not None
-    if kwargs.get("kind") == "otp":
-        # OTP codes must never be readable from the outbox: the visible text is masked and the
+    # what the outbox may show instead of a secret text (a portal password); OTP codes are masked by pattern
+    masked = kwargs.pop("masked_text", None)
+    if kwargs.get("kind") in SECRET_KINDS:
+        # OTP codes / passwords must never be readable from the outbox: the visible text is masked and the
         # real text travels encrypted in the payload; nothing is persisted without a provider.
         if not configured:
             return None
         text = str(kwargs.get("text") or "")
-        kwargs = {**kwargs, "text": mask_otp_text(text), "payload": {**(kwargs.get("payload") or {}), SECRET_TEXT_KEY: encrypt(text)}}
+        visible = str(masked) if masked is not None else mask_otp_text(text)
+        kwargs = {**kwargs, "text": visible, "payload": {**(kwargs.get("payload") or {}), SECRET_TEXT_KEY: encrypt(text)}}
     msg = await enqueue(session, company_id=company.id, channel="sms", **{**kwargs, "to": to})
     if not configured:
         msg.status = "failed"
@@ -232,6 +241,8 @@ async def enqueue_sms_if_configured(session: AsyncSession, company: Company, **k
 
 
 SECRET_TEXT_KEY = "secretText"
+#: kinds whose text is a credential: masked in the outbox, the real text encrypted, never stored without a provider
+SECRET_KINDS = frozenset({"otp", "portal_access"})
 
 
 def mask_otp_text(text: str) -> str:

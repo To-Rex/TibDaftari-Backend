@@ -162,10 +162,16 @@ class PatientPrincipal:
     patient: PatientModel
     jti: str
     token_exp: datetime
+    #: "otp" = phone + SMS code (acts for every patient of the phone); "login" = portal login + password (this patient only)
+    via: str = "otp"
 
     @property
     def id(self) -> uuid.UUID:
         return self.patient.id
+
+    @property
+    def own_only(self) -> bool:
+        return self.via == "login"
 
 
 def _bearer(authorization: str | None) -> str:
@@ -295,7 +301,8 @@ async def current_patient(session: DbSession, authorization: Annotated[str | Non
     patient = (await session.execute(select(PatientModel).where(PatientModel.id == uuid.UUID(claims["sub"]), PatientModel.deleted_at.is_(None)))).scalar_one_or_none()
     if not patient:
         raise AuthError("Sessiya tugagan")
-    return PatientPrincipal(patient=patient, jti=claims["jti"], token_exp=datetime.fromtimestamp(claims["exp"], tz=UTC))
+    via = "login" if claims.get("via") == "login" else "otp"
+    return PatientPrincipal(patient=patient, jti=claims["jti"], token_exp=datetime.fromtimestamp(claims["exp"], tz=UTC), via=via)
 
 
 Staff = Annotated[StaffPrincipal, Depends(current_staff)]

@@ -27,6 +27,9 @@ class PatientStatsOut(CamelModel):
 class PatientPortalOut(CamelModel):
     linked: bool
     telegram_chat_id: str | None = None
+    # portal login issued at reception (the password itself is never returned)
+    login: str | None = None
+    login_set_at: datetime | None = None
 
 
 class PatientOut(CamelModel):
@@ -97,6 +100,27 @@ class PatientDuplicatesIn(CamelModel):
     phone: str | None = Field(default=None, max_length=30)
     passport_number: str | None = Field(default=None, max_length=20)
     pinfl: str | None = Field(default=None, max_length=20)
+
+
+class PortalAccessIn(CamelModel):
+    """Issue / renew the portal login: an empty login keeps the current one (or picks a free one), an empty
+    password is generated. Every call sets a new password."""
+
+    login: str | None = Field(default=None, max_length=40)
+    password: str | None = Field(default=None, min_length=6, max_length=128)
+    send_sms: bool = False
+    # the branch the employee works in (top bar) — its SMS account sends the text; default: the patient's branch
+    branch_id: str | None = None
+
+
+class PortalAccessOut(CamelModel):
+    """The credentials, shown to the employee once (only the hash is stored)."""
+
+    login: str
+    password: str
+    # None = no SMS asked for
+    sms: Literal["queued", "not_configured", "invalid_phone"] | None = None
+    patient: PatientOut
 
 
 class CountryOut(CamelModel):

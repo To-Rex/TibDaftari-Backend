@@ -75,6 +75,13 @@ class Patient(PKMixin, AuditMixin, SoftDeleteMixin, TenantMixin, Base):
     portal_linked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     telegram_chat_id: Mapped[str | None] = mapped_column(String(32))
     portal_last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # portal login + password issued by the clinic (optional, besides phone + SMS code); a session opened
+    # with them sees this patient only, not every patient sharing the phone. Login is global (one portal form).
+    portal_login: Mapped[str | None] = mapped_column(String(40))
+    portal_password_hash: Mapped[str | None] = mapped_column(Text)
+    portal_password_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    portal_failed_logins: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0, server_default=text("0"))
+    portal_locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         Index("ix_patients_company_branch", "company_id", "branch_id"),
@@ -102,6 +109,12 @@ class Patient(PKMixin, AuditMixin, SoftDeleteMixin, TenantMixin, Base):
         Index("ix_patients_company_phone", "company_id", "phone"),
         Index("ix_patients_company_created", "company_id", "created_at"),
         Index("ix_patients_telegram_chat", "telegram_chat_id"),
+        Index(
+            "uq_patients_portal_login_alive",
+            text("lower(portal_login)"),
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL AND portal_login IS NOT NULL"),
+        ),
         # trigram search on name/phone (created in migration: GIN gin_trgm_ops)
     )
 

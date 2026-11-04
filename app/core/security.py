@@ -3,7 +3,7 @@
 * Passwords — argon2id (memory-hard, side-channel resistant), auto-rehash on
   parameter upgrades.
 * Access tokens — signed JWT carrying only `sub`, `act` (staff|patient), `jti`,
-  `exp`. The `jti` is looked up in Redis (session allow-list) so logout /
+  `exp` (+ `via` on patient tokens opened with a portal login). The `jti` is looked up in Redis (session allow-list) so logout /
   revocation is immediate even though the token itself is stateless.
 * OTP / API-key style secrets are stored as SHA-256 digests only.
 """
@@ -15,7 +15,7 @@ import hmac
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 import jwt
 from argon2 import PasswordHasher
@@ -35,6 +35,8 @@ class TokenClaims(TypedDict):
     jti: str
     exp: int
     iat: int
+    # patient tokens only: how the patient signed in ("login" = portal login + password; absent = phone + SMS code)
+    via: NotRequired[str]
 
 
 def hash_password(raw: str) -> str:
@@ -71,6 +73,18 @@ def random_digits(length: int) -> str:
     return "".join(secrets.choice("0123456789") for _ in range(length))
 
 
+#: no look-alikes (0/o, 1/l/i) — the password is read off a screen or an SMS and typed on a phone
+_PASSWORD_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
+
+
+def random_password(length: int = 8) -> str:
+    """Readable random password with at least one letter and one digit."""
+    while True:
+        out = "".join(secrets.choice(_PASSWORD_ALPHABET) for _ in range(length))
+        if any(c.isdigit() for c in out) and any(c.isalpha() for c in out):
+            return out
+
+
 def random_token(nbytes: int = 32) -> str:
     return secrets.token_urlsafe(nbytes)
 
@@ -84,12 +98,14 @@ def mask_secret(value: str, keep: int = 4) -> str:
     return f"{head}{'•' * 8}{value[-keep:]}"
 
 
-def issue_token(subject: uuid.UUID | str, actor: Actor, ttl: timedelta) -> tuple[str, str, datetime]:
+def issue_token(subject: uuid.UUID | str, actor: Actor, ttl: timedelta, via: str | None = None) -> tuple[str, str, datetime]:
     """Returns (token, jti, expires_at)."""
     now = datetime.now(UTC)
     exp = now + ttl
     jti = uuid.uuid4().hex
     claims: TokenClaims = {"sub": str(subject), "act": actor, "jti": jti, "exp": int(exp.timestamp()), "iat": int(now.timestamp())}
+    if via:
+        claims["via"] = via
     token = jwt.encode(dict(claims), settings.jwt_secret, algorithm=settings.jwt_algorithm)
     return token, jti, exp
 

@@ -24,6 +24,13 @@ def fold(s: str | None) -> str:
     return _WS.sub(" ", out).strip()
 
 
+def latin_lower(s: str | None) -> str:
+    """Lower-case Latin spelling (the fold() letter table, apostrophes dropped, but `h` kept) — e.g. for logins."""
+    if not s:
+        return ""
+    return _APOS.sub("", "".join(_CYR.get(ch, ch) for ch in s.lower()))
+
+
 def matches(hay: str | None, needle: str | None) -> bool:
     if not needle:
         return True

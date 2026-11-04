@@ -1,4 +1,4 @@
-"""Authentication: staff login (argon2 + lockout), patient OTP, session allow-list, logout."""
+"""Authentication: staff login (argon2 + lockout), patient OTP, patient portal login (argon2 + lockout), session allow-list, logout."""
 
 from __future__ import annotations
 
@@ -10,10 +10,17 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import SESSION_KEY, RequestMeta, StaffPrincipal, build_staff_principal, invalidate_session_cache
+from app.api.deps import (
+    SESSION_KEY,
+    PatientPrincipal,
+    RequestMeta,
+    StaffPrincipal,
+    build_staff_principal,
+    invalidate_session_cache,
+)
 from app.core.audit import audit
 from app.core.config import settings
-from app.core.exceptions import AuthError, NotFoundError, RateLimitedError, ValidationError
+from app.core.exceptions import AuthError, ForbiddenError, NotFoundError, RateLimitedError, ValidationError
 from app.core.security import (
     decode_token,
     hash_password,
@@ -30,6 +37,7 @@ from app.infrastructure.redis import rate_limit
 from app.infrastructure.redis.client import get_redis
 from app.modules.auth.schemas import PatientOtpRequestOut, PatientSessionOut, StaffSessionOut
 from app.modules.messaging import service as messaging
+from app.modules.patients.portal_login import login_owner, norm_login, revoke_login_sessions
 
 log = logging.getLogger("auth")
 
@@ -37,9 +45,10 @@ log = logging.getLogger("auth")
 # ----------------------------------------------------------------------------- sessions
 
 
-async def _open_session(session: AsyncSession, *, actor: str, subject_id: uuid.UUID, company_id: uuid.UUID | None, ttl: timedelta, meta: RequestMeta | None) -> tuple[str, datetime]:
-    token, jti, exp = issue_token(subject_id, actor, ttl)  # type: ignore[arg-type]
-    session.add(SessionModel(id=jti, actor=actor, subject_id=subject_id, company_id=company_id, expires_at=exp, ip=meta.ip if meta else None, user_agent=meta.user_agent if meta else None))
+async def _open_session(session: AsyncSession, *, actor: str, subject_id: uuid.UUID, company_id: uuid.UUID | None, ttl: timedelta, meta: RequestMeta | None, method: str | None = None) -> tuple[str, datetime]:
+    """`method` (patients): otp | login — a login token carries `via=login`, which confines it to its own patient."""
+    token, jti, exp = issue_token(subject_id, actor, ttl, via="login" if method == "login" else None)  # type: ignore[arg-type]
+    session.add(SessionModel(id=jti, actor=actor, method=method, subject_id=subject_id, company_id=company_id, expires_at=exp, ip=meta.ip if meta else None, user_agent=meta.user_agent if meta else None))
     try:
         await get_redis().set(SESSION_KEY.format(jti=jti), "1", ex=int(ttl.total_seconds()))
     except Exception:  # pragma: no cover
@@ -105,8 +114,6 @@ async def staff_login(session: AsyncSession, login: str, password: str, meta: Re
         await session.commit()
         raise AuthError("Login yoki parol noto‘g‘ri")
     if emp.status != "active":
-        from app.core.exceptions import ForbiddenError
-
         raise ForbiddenError("Hisob faol emas", code="inactive")
     if needs_rehash(emp.password_hash or ""):
         emp.password_hash = hash_password(password)
@@ -179,7 +186,9 @@ async def request_patient_otp(session: AsyncSession, phone_raw: str, meta: Reque
     return PatientOtpRequestOut(challenge_id=str(challenge.id), dev_code=code if settings.otp_dev_mode else None, expires_in=settings.otp_ttl_seconds)
 
 
-def patient_session_out(p: Patient, token: str, exp: datetime) -> PatientSessionOut:
+def patient_session_out(p: Patient, token: str, exp: datetime, via: str = "otp") -> PatientSessionOut:
+    if via == "login":
+        return PatientSessionOut(patient_id=str(p.id), phone=p.phone, full_name=p.full_name, access_token=token, expires_at=exp, via="login", login=p.portal_login)
     return PatientSessionOut(patient_id=str(p.id), phone=p.phone, full_name=p.full_name, access_token=token, expires_at=exp)
 
 
@@ -210,17 +219,74 @@ async def verify_patient_otp(session: AsyncSession, challenge_id: str, code: str
     patient.portal_linked = True
     patient.portal_last_login_at = now
     ttl = timedelta(hours=settings.patient_token_ttl_hours)
-    token, exp = await _open_session(session, actor="patient", subject_id=patient.id, company_id=patient.company_id, ttl=ttl, meta=meta)
+    token, exp = await _open_session(session, actor="patient", subject_id=patient.id, company_id=patient.company_id, ttl=ttl, meta=meta, method="otp")
     await audit(session, actor_type="patient", actor_id=patient.id, company_id=patient.company_id, action="login", entity="patient", entity_id=patient.id, ip=meta.ip, request_id=meta.request_id)
     return patient_session_out(patient, token, exp)
 
 
-async def patient_me(session: AsyncSession, patient: Patient, jti: str, token: str, exp: datetime) -> PatientSessionOut:
+# ----------------------------------------------------------------------------- patient portal login
+
+
+async def patient_password_login(session: AsyncSession, login: str, password: str, meta: RequestMeta) -> PatientSessionOut:
+    """Portal login + password (issued at reception): same rate limits and lockout as the staff login.
+    The session sees this patient only (`via=login`), not every patient of the phone."""
+    login_norm = norm_login(login)
+    ip = meta.ip or "?"
+    await rate_limit.enforce(f"rl:plogin:ip:{ip}", settings.auth_rate_limit_per_minute, 60)
+    await rate_limit.enforce(f"rl:plogin:user:{login_norm}", settings.auth_rate_limit_per_minute, 60)
+
+    p = await login_owner(session, login_norm) if login_norm else None
+    now = datetime.now(UTC)
+    if p and p.portal_locked_until and p.portal_locked_until > now:
+        raise RateLimitedError("Hisob vaqtincha bloklangan. Keyinroq urinib ko‘ring.", details={"retryAfter": int((p.portal_locked_until - now).total_seconds())})
+    ok = verify_password(password, p.portal_password_hash if p else None)
+    if not p or not ok:
+        if p:
+            p.portal_failed_logins = (p.portal_failed_logins or 0) + 1
+            if p.portal_failed_logins >= settings.login_max_attempts:
+                p.portal_locked_until = now + timedelta(minutes=settings.login_lock_minutes)
+                p.portal_failed_logins = 0
+                log.warning("patient %s portal login locked after repeated failures", p.id)
+        await audit(session, actor_type="patient", actor_id=p.id if p else None, company_id=p.company_id if p else None, action="login_failed", entity="patient", entity_id=p.id if p else login_norm[:64], after={"via": "login"}, ip=meta.ip, request_id=meta.request_id)
+        # persist the counter and the audit row: the request session is rolled back on the exception below
+        await session.commit()
+        raise AuthError("Login yoki parol noto‘g‘ri")
+    if needs_rehash(p.portal_password_hash or ""):
+        p.portal_password_hash = hash_password(password)
+    p.portal_failed_logins = 0
+    p.portal_locked_until = None
+    p.portal_linked = True
+    p.portal_last_login_at = now
+    ttl = timedelta(hours=settings.patient_token_ttl_hours)
+    token, exp = await _open_session(session, actor="patient", subject_id=p.id, company_id=p.company_id, ttl=ttl, meta=meta, method="login")
+    await audit(session, actor_type="patient", actor_id=p.id, company_id=p.company_id, action="login", entity="patient", entity_id=p.id, after={"via": "login"}, ip=meta.ip, request_id=meta.request_id)
+    return patient_session_out(p, token, exp, via="login")
+
+
+async def change_patient_password(session: AsyncSession, principal: PatientPrincipal, current: str, new: str, meta: RequestMeta) -> None:
+    """The patient changes the password of a login session; the other login sessions end (this one stays)."""
+    if not principal.own_only:
+        raise ForbiddenError("Parolni login bilan kirganda o‘zgartirish mumkin", code="login_session_only")
+    p = principal.patient
+    await rate_limit.enforce(f"rl:ppass:{p.id}", 10, 3600)
+    if not verify_password(current, p.portal_password_hash):
+        raise ValidationError("Joriy parol noto‘g‘ri", code="wrong_password")
+    if new != new.strip():
+        raise ValidationError("Parol bo‘sh joy bilan boshlanmasin va tugamasin", code="invalid_password")
+    if new == current:
+        raise ValidationError("Yangi parol joriysidan farq qilsin", code="same_password")
+    p.portal_password_hash = hash_password(new)
+    p.portal_password_set_at = datetime.now(UTC)
+    ended = await revoke_login_sessions(session, p.id, keep_jti=principal.jti)
+    await audit(session, actor_type="patient", actor_id=p.id, company_id=p.company_id, action="password_change", entity="patient", entity_id=p.id, after={"endedSessions": ended}, ip=meta.ip, request_id=meta.request_id)
+
+
+async def patient_me(session: AsyncSession, patient: Patient, jti: str, token: str, exp: datetime, via: str = "otp") -> PatientSessionOut:
     row = await session.get(SessionModel, jti)
     if row:
         row.last_seen_at = datetime.now(UTC)
         exp = row.expires_at
-    return patient_session_out(patient, token, exp)
+    return patient_session_out(patient, token, exp, via)
 
 
 async def logout(session: AsyncSession, authorization: str | None) -> None:

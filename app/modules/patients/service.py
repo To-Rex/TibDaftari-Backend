@@ -81,7 +81,12 @@ def patient_out(p: Patient, stats: tuple[int, datetime | None, int] | None = Non
         note=p.note,
         tags=list(p.tags or []),
         stats=PatientStatsOut(orders=orders, last_visit_at=last_visit, total_spent=spent),
-        portal=PatientPortalOut(linked=p.portal_linked, telegram_chat_id=p.telegram_chat_id),
+        portal=PatientPortalOut(
+            linked=p.portal_linked,
+            telegram_chat_id=p.telegram_chat_id,
+            login=p.portal_login if p.portal_password_hash else None,
+            login_set_at=p.portal_password_set_at if p.portal_password_hash else None,
+        ),
         created_at=p.created_at,
         updated_at=p.updated_at,
         created_by=str(p.created_by) if p.created_by else None,
