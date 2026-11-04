@@ -118,6 +118,19 @@ class WorklistItemOut(OrderItemOut):
     patient_birth_date: date | None = None
 
 
+class PaymentCorrectionOut(CamelModel):
+    """One method correction of a payment (what it was before)."""
+
+    at: str
+    by_id: str | None = None
+    by_name: str | None = None
+    from_method: PaymentMethod
+    from_amount: int
+    reason: str | None = None
+    #: set on a row split off another payment (its id)
+    split_from: str | None = None
+
+
 class PaymentOut(CamelModel):
     id: str
     order_id: str
@@ -131,6 +144,8 @@ class PaymentOut(CamelModel):
     created_at: datetime
     updated_at: datetime
     created_by: str | None = None
+    #: method corrections, oldest first (empty = never changed)
+    corrections: list[PaymentCorrectionOut] = Field(default_factory=list)
 
 
 class DocumentDeliveryOut(CamelModel):
@@ -232,6 +247,14 @@ class AddItemsIn(CamelModel):
 class PayPartIn(CamelModel):
     method: PaymentMethod
     amount: int = Field(gt=0)
+
+
+class PaymentMethodIn(CamelModel):
+    """A taken payment's method corrected — the amount stays. One part = just another method; several = the payment
+    split over them (their sum must equal the payment's amount)."""
+
+    parts: list[PayPartIn] = Field(min_length=1, max_length=4)
+    reason: str = Field(default="", max_length=300)
 
 
 class PayIn(CamelModel):

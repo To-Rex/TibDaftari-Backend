@@ -100,6 +100,9 @@ class Payment(PKMixin, AuditMixin, SoftDeleteMixin, TenantMixin, Base):
     note: Mapped[str | None] = mapped_column(Text)
     refunded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     refund_reason: Mapped[str | None] = mapped_column(Text)
+    #: method corrections, oldest first: {at, byId, byName, fromMethod, fromAmount, reason, splitFrom?} — see
+    #: `orders.service.change_payment_method`
+    corrections: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
 
     __table_args__ = (Index("ix_payments_company_created", "company_id", "created_at"),)
 

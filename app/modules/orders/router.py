@@ -27,6 +27,7 @@ from app.modules.orders.schemas import (
     OrderPaymentsOut,
     OrderSummaryOut,
     PayIn,
+    PaymentMethodIn,
     PrintedOut,
     PublicDocumentInfoOut,
     PublicDocumentOtpOut,
@@ -167,6 +168,18 @@ async def refund(
 ) -> OrderPaymentsOut:
     staff.require("reception.payment.refund", service.LATE_EDIT)
     return await service.refund(session, payment_id, staff, body.reason, meta)
+
+
+@router.put(
+    "/payments/{payment_id}/method",
+    response_model=OrderPaymentsOut,
+    summary="Correct a payment's method, or split it over several — the amount stays (reception within a day)",
+)
+async def change_payment_method(
+    payment_id: uuid.UUID, body: PaymentMethodIn, staff: Staff, session: DbSession, meta: Meta
+) -> OrderPaymentsOut:
+    staff.require("reception.payment.create", service.LATE_EDIT)
+    return await service.change_payment_method(session, payment_id, staff, body, meta)
 
 
 @router.post("/orders/{order_id}/cancel", response_model=OrderOut, summary="Cancel an unpaid order")

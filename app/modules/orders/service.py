@@ -78,6 +78,8 @@ from app.modules.orders.schemas import (
     OrderPaymentsOut,
     OrderSummaryOut,
     PayIn,
+    PaymentCorrectionOut,
+    PaymentMethodIn,
     PaymentOut,
     ProgressOut,
     PublicDocumentInfoOut,
@@ -249,6 +251,7 @@ def payment_out(p: Payment) -> PaymentOut:
         created_at=p.created_at,
         updated_at=p.updated_at,
         created_by=_s(p.created_by),
+        corrections=[PaymentCorrectionOut.model_validate(c) for c in p.corrections or []],
     )
 
 
@@ -933,6 +936,83 @@ async def refund(
         entity="payment",
         entity_id=payment.id,
         after={"orderId": str(order.id), "amount": payment.amount, "reason": reason, "payment": order.payment},
+        ip=meta.ip,
+        request_id=meta.request_id,
+    )
+    return await _order_payments_out(session, order)
+
+
+def method_change_parts(current: str, amount: int, body: PaymentMethodIn) -> list[tuple[str, int]]:
+    """Validated new (method, amount) parts of a payment: same method summed, the part that stays on the payment's
+    own row first (its current method when kept, else the first given). 422 parts / same_method."""
+    merged: dict[str, int] = {}
+    for part in body.parts:
+        merged[part.method] = merged.get(part.method, 0) + part.amount
+    if sum(merged.values()) != amount:
+        raise ValidationError("Qismlar yig‘indisi to‘lov summasiga teng bo‘lishi kerak", code="parts")
+    if list(merged) == [current]:
+        raise ValidationError("To‘lov usuli o‘zgarmadi", code="same_method")
+    parts = list(merged.items())
+    return sorted(parts, key=lambda p: p[0] != current)
+
+
+async def change_payment_method(
+    session: AsyncSession, payment_id: uuid.UUID, staff: StaffPrincipal, body: PaymentMethodIn, meta: RequestMeta
+) -> OrderPaymentsOut:
+    """Correct how a payment was taken (e.g. card typed as cash) — the amount, time, cashier and branch stay.
+
+    One part: the row just gets the new method. Several: the row keeps the first part and the rest become new rows
+    with the same time / cashier / branch, so the day and the cashier of the money don't move; every touched row
+    records what it was (`corrections`). Refunded → 409 state; reception only within a day (`late_edit` any time)."""
+    payment = await repo.get_payment(session, payment_id, scope_company(staff))
+    if not payment:
+        raise NotFoundError("To‘lov topilmadi")
+    order = await get_order_or_404(session, payment.order_id, payment.company_id, for_update=True, staff=staff)
+    await session.refresh(payment)
+    if payment.refunded_at is not None:
+        raise StateError("Qaytarilgan to‘lovni o‘zgartirib bo‘lmaydi", code="state")
+    parts = method_change_parts(payment.method, int(payment.amount), body)
+    now = utcnow()
+    ensure_payments_editable(staff, [payment], now)
+    reason = body.reason.strip() or None
+    entry = {
+        "at": iso_z(now), "byId": str(staff.id), "byName": staff.employee.full_name,
+        "fromMethod": payment.method, "fromAmount": int(payment.amount), "reason": reason,
+    }
+    before = {"method": payment.method, "amount": int(payment.amount)}
+    (method, amount), rest = parts[0], parts[1:]
+    payment.method, payment.amount = method, amount
+    payment.corrections = [*(payment.corrections or []), entry]
+    flag_modified(payment, "corrections")
+    _touch(payment, now)
+    split_off = [
+        Payment(
+            company_id=payment.company_id,
+            order_id=payment.order_id,
+            branch_id=payment.branch_id,
+            amount=part_amount,
+            method=part_method,
+            employee_id=payment.employee_id,
+            note=payment.note,
+            corrections=[{**entry, "splitFrom": str(payment.id)}],
+            created_at=payment.created_at,
+            updated_at=now,
+            created_by=staff.id,
+        )
+        for part_method, part_amount in rest
+    ]
+    session.add_all(split_off)
+    await recompute(session, order, now)
+    await audit(
+        session,
+        actor_type="staff",
+        actor_id=staff.id,
+        company_id=order.company_id,
+        action="payment.method_change",
+        entity="payment",
+        entity_id=payment.id,
+        before=before,
+        after={"orderId": str(order.id), "parts": [{"method": m, "amount": a} for m, a in parts], "reason": reason, "newPaymentIds": [str(p.id) for p in split_off]},
         ip=meta.ip,
         request_id=meta.request_id,
     )
