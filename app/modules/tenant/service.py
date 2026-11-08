@@ -37,6 +37,7 @@ from app.modules.tenant.schemas import (
     BranchSmsTemplatesOut,
     BranchUpdateIn,
     CompanyCreateIn,
+    CompanyListQuery,
     CompanyOut,
     CompanySmsIn,
     CompanySmsOut,
@@ -151,7 +152,7 @@ async def _company_dto(session: AsyncSession, company: Company) -> CompanyOut:
 # ----------------------------------------------------------------------------- companies
 
 
-async def list_companies(session: AsyncSession, q: PageQuery) -> Page[CompanyOut]:
+async def list_companies(session: AsyncSession, q: PageQuery | CompanyListQuery) -> Page[CompanyOut]:
     """Platform list (superadmin) with computed branch/employee counts."""
     rows, total = await repo.list_companies(session, q)
     names = await repo.geo_names(session, [c for c, _, _ in rows])

@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.core.schemas import CamelModel
+from app.core.schemas import CamelModel, PageQuery
 
 SmsProvider = Literal["xabarchi", "none"]
 SmsPriority = Literal["urgent", "transactional", "bulk"]
@@ -147,6 +147,17 @@ class CompanyCreateIn(CamelModel):
     is_active: bool = True
     sms: CompanySmsIn | None = None
     sms_templates: SmsTemplates | None = None
+
+
+class CompanyListQuery(PageQuery):
+    """Platform list filters. A territory matches a clinic located there itself or with a live branch there;
+    `unlocated` = clinics that carry no district anywhere (invisible to the regional view)."""
+
+    country_id: str | None = None
+    region_id: str | None = None
+    district_id: str | None = None
+    is_active: bool | None = None
+    unlocated: bool | None = None
 
 
 class CompanyUpdateIn(CamelModel):

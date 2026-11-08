@@ -11,6 +11,7 @@ from app.modules.health.router import router as health_router
 from app.modules.messaging.router import router as messaging_router
 from app.modules.orders.router import router as orders_router
 from app.modules.patients.router import router as patients_router
+from app.modules.platform.router import router as platform_router
 from app.modules.portal.router import router as portal_router
 from app.modules.reports.router import router as reports_router
 from app.modules.staff.router import router as staff_router
@@ -29,6 +30,7 @@ api_router.include_router(templates_router, tags=["templates"])
 api_router.include_router(orders_router, tags=["orders"])
 api_router.include_router(messaging_router, tags=["messaging"])
 api_router.include_router(reports_router, tags=["reports"])
+api_router.include_router(platform_router, tags=["platform"])
 api_router.include_router(portal_router, prefix="/portal", tags=["portal"])
 api_router.include_router(files_router, tags=["files"])
 api_router.include_router(telegram_router, tags=["telegram"])

@@ -13,6 +13,7 @@ from app.core.schemas import PageQuery
 from app.core.textutil import fold
 from app.infrastructure.db.base import alive
 from app.infrastructure.db.models import Branch, Company, Country, District, Employee, Region
+from app.modules.tenant.schemas import CompanyListQuery
 
 
 def _branch_count() -> Select:
@@ -23,8 +24,22 @@ def _employee_count() -> Select:
     return select(func.count()).where(Employee.company_id == Company.id, alive(Employee)).correlate(Company).scalar_subquery()
 
 
-async def list_companies(session: AsyncSession, q: PageQuery) -> tuple[list[tuple[Company, int, int]], int]:
-    """Page of `(company, branchCount, employeeCount)`; search on name/legalName via fold_text."""
+def _in_territory(column: str, value: uuid.UUID):
+    """The clinic itself, or one of its live branches, is in that country / region / district."""
+    branch_there = select(Branch.id).where(Branch.company_id == Company.id, alive(Branch), getattr(Branch, column) == value).correlate(Company).exists()
+    return (getattr(Company, column) == value) | branch_there
+
+
+def _parse_uuid(value: str | None) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(value) if value else None
+    except ValueError:
+        return uuid.UUID(int=0)  # a malformed id matches nothing
+
+
+async def list_companies(session: AsyncSession, q: PageQuery | CompanyListQuery) -> tuple[list[tuple[Company, int, int]], int]:
+    """Page of `(company, branchCount, employeeCount)`; search on name/legalName via fold_text; territory / activity
+    filters of `CompanyListQuery`."""
     bc = _branch_count().label("branch_count")
     ec = _employee_count().label("employee_count")
     stmt = select(Company, bc, ec).where(alive(Company))
@@ -32,6 +47,16 @@ async def list_companies(session: AsyncSession, q: PageQuery) -> tuple[list[tupl
     if needle:
         like = f"%{needle}%"
         stmt = stmt.where(func.fold_text(Company.name).like(like) | func.fold_text(func.coalesce(Company.legal_name, "")).like(like))
+    if isinstance(q, CompanyListQuery):
+        for column in ("country_id", "region_id", "district_id"):
+            value = _parse_uuid(getattr(q, column))
+            if value:
+                stmt = stmt.where(_in_territory(column, value))
+        if q.is_active is not None:
+            stmt = stmt.where(Company.is_active.is_(q.is_active))
+        if q.unlocated:
+            located_branch = select(Branch.id).where(Branch.company_id == Company.id, alive(Branch), Branch.district_id.is_not(None)).correlate(Company).exists()
+            stmt = stmt.where(Company.district_id.is_(None), ~located_branch)
     order = sort_clause(
         q.sort_by,
         q.sort_dir,

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Query
 
 from app.api.deps import DbSession, Meta, Staff
 from app.core.exceptions import ValidationError
-from app.core.schemas import Page, PageQuery
+from app.core.schemas import Page
 from app.modules.tenant import reset, service
 from app.modules.tenant.schemas import (
     BranchCreateIn,
@@ -20,6 +20,7 @@ from app.modules.tenant.schemas import (
     BranchSmsTemplatesOut,
     BranchUpdateIn,
     CompanyCreateIn,
+    CompanyListQuery,
     CompanyOut,
     CompanyUpdateIn,
     ResetIn,
@@ -35,7 +36,7 @@ router = APIRouter()
 
 
 @router.get("/companies", response_model=Page[CompanyOut], summary="List companies (platform admin)")
-async def list_companies(q: Annotated[PageQuery, Query()], staff: Staff, session: DbSession) -> Page[CompanyOut]:
+async def list_companies(q: Annotated[CompanyListQuery, Query()], staff: Staff, session: DbSession) -> Page[CompanyOut]:
     staff.require("platform.company.manage")
     return await service.list_companies(session, q)
 
