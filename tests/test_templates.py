@@ -1,9 +1,9 @@
 """Templates module: renderer unit tests (pure), a legacy-template render smoke test, and API tests
-against the real dev DB (fixture rows prefixed T-templates-)."""
+against the test database (fixture rows prefixed T-templates-). Templates are owned by a unit of the tree and
+usable in its subtree (optionally narrowed to some units by `unitIds`)."""
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import mimetypes
@@ -12,21 +12,8 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from app.core.config import settings
-from app.core.permissions import COMPANY_ADMIN_PERMISSIONS
-from app.core.security import hash_password
-from app.infrastructure.db.models import (
-    AttributeSchema,
-    Branch,
-    Category,
-    Company,
-    Employee,
-    Order,
-    OrderItem,
-    Patient,
-    Role,
-)
-from app.infrastructure.db.session import engine, session_scope
+from app.infrastructure.db.models import AttributeSchema, Category, District, Order, OrderItem, Patient
+from app.infrastructure.db.session import session_scope
 from app.modules.files.service import decode_data_url
 from app.modules.templates import service as tpl_service
 from app.modules.templates.renderer import build_render_context, render
@@ -34,8 +21,7 @@ from app.modules.templates.renderer import expressions as ex
 from app.modules.templates.service import sample_values
 from fastapi.testclient import TestClient
 
-settings.workers_enabled = False
-settings.telegram_enabled = False
+from tests.helpers import API, COUNTRY_ID, app_instance, bearer, make_employee, make_role, make_tree, seed, staff_token
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "tests" / "out"
@@ -202,185 +188,193 @@ def test_render_all_element_types_and_broken_bits() -> None:
 # ----------------------------------------------------------------------------- API
 
 
-async def _seed() -> dict[str, str]:
-    async with session_scope() as s:
-        a = Company(name=f"T-templates-A-{SFX}", slug=f"t-templates-a-{SFX}", phone="998712000000", address="Urganch")
-        b = Company(name=f"T-templates-B-{SFX}", slug=f"t-templates-b-{SFX}")
-        s.add_all([a, b])
-        await s.flush()
-        admin_a = Role(company_id=a.id, key="admin", name="Admin", permissions=list(COMPANY_ADMIN_PERMISSIONS), is_system=True)
-        admin_b = Role(company_id=b.id, key="admin", name="Admin", permissions=list(COMPANY_ADMIN_PERMISSIONS), is_system=True)
-        viewer_a = Role(company_id=a.id, key="viewer", name="Viewer", permissions=["reception.patient.read"], is_system=False)
-        s.add_all([admin_a, admin_b, viewer_a])
-        await s.flush()
-        pw = hash_password(PASSWORD)
-        s.add_all(
-            [
-                Employee(company_id=a.id, full_name="T-templates Admin A", login=f"t-templates-admin-a-{SFX}", password_hash=pw, role_id=admin_a.id),
-                Employee(company_id=b.id, full_name="T-templates Admin B", login=f"t-templates-admin-b-{SFX}", password_hash=pw, role_id=admin_b.id),
-                Employee(company_id=a.id, full_name="T-templates Viewer A", login=f"t-templates-viewer-a-{SFX}", password_hash=pw, role_id=viewer_a.id),
-            ]
-        )
-        ids = {"a": str(a.id), "b": str(b.id)}
-    await engine.dispose()
-    return ids
-
-
 @pytest.fixture(scope="module")
-def ctx() -> Iterator[dict[str, object]]:
-    ids = asyncio.run(_seed())
-    from app.main import app
+def ctx() -> Iterator[dict]:
+    async def rows(s):
+        a = await make_tree(s)
+        b = await make_tree(s)
+        a.region.phone = "998712000000"
+        a.region.address = "Urganch"
+        spare = District(region_id=a.geo_region.id, name=f"T-{a.tag}2 tumani", sort_order=2, kind="district")
+        s.add(spare)
+        viewer = await make_role(s, a.region, "viewer", "T-templates Viewer", ["reception.patient.read"])
+        await make_employee(s, None, super_admin=True, login=f"t-templates-super-{SFX}", password=PASSWORD)
+        await make_employee(s, a.region, "admin", login=f"t-templates-admin-a-{SFX}", password=PASSWORD)
+        await make_employee(s, b.region, "admin", login=f"t-templates-admin-b-{SFX}", password=PASSWORD)
+        await make_employee(s, a.facility, role=viewer, login=f"t-templates-viewer-a-{SFX}", password=PASSWORD)
+        await s.flush()
+        return {
+            "a": {k: str(getattr(a, k).id) for k in ("country", "region", "district", "facility")},
+            "b": {k: str(getattr(b, k).id) for k in ("country", "region", "district", "facility")},
+            "tag": a.tag,
+            "code_a": a.facility.code,
+            "spare_district": str(spare.id),
+        }
 
-    with TestClient(app) as client:
-        tokens = {}
-        for who in ("admin-a", "admin-b", "viewer-a"):
-            r = client.post("/api/v1/auth/staff/login", json={"login": f"t-templates-{who}-{SFX}", "password": PASSWORD})
-            assert r.status_code == 200, r.text
-            tokens[who] = r.json()["accessToken"]
-        yield {"client": client, "ids": ids, "tokens": tokens}
+    data = seed(rows)
+    with TestClient(app_instance()) as client:
+        data["client"] = client
+        data["tokens"] = {who: staff_token(client, f"t-templates-{who}-{SFX}", PASSWORD) for who in ("super", "admin-a", "admin-b", "viewer-a")}
+        yield data
 
 
 def h(ctx: dict, who: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {ctx['tokens'][who]}"}
+    return bearer(ctx["tokens"][who])
 
 
-TEMPLATE_KEYS = {"id", "companyId", "name", "description", "status", "version", "serviceTypeIds", "categoryIds",
-    "branchIds", "scope", "language", "doc", "thumbnailUrl", "usage", "createdAt", "updatedAt"}
+TEMPLATE_KEYS = {"id", "ownerUnitId", "name", "description", "status", "version", "serviceTypeIds", "categoryIds",
+    "unitIds", "scope", "language", "doc", "thumbnailUrl", "usage", "createdAt", "updatedAt"}
 
 
 def test_templates_api_lifecycle(ctx: dict) -> None:
     c: TestClient = ctx["client"]
-    cid = ctx["ids"]["a"]
+    a, b = ctx["a"], ctx["b"]
+    region, fac = a["region"], a["facility"]
     st_id = str(uuid.uuid4())
     # create with defaults
-    r = c.post(f"/api/v1/companies/{cid}/templates", json={}, headers=h(ctx, "admin-a"))
+    r = c.post(f"{API}/units/{region}/templates", json={}, headers=h(ctx, "admin-a"))
     assert r.status_code == 201, r.text
     t = r.json()
     assert set(t) == TEMPLATE_KEYS
     assert t["name"] == "Yangi shablon" and t["status"] == "draft" and t["version"] == 1 and t["scope"] == "item" and t["language"] == "uz"
     assert t["doc"] == {"paper": "A4", "orientation": "portrait", "background": "#ffffff", "margin": 40, "elements": []} and t["usage"] == 0
-    assert t["companyId"] == cid and t["createdAt"].endswith("Z")
-    # create bound template with a doc; permission checks
+    assert t["ownerUnitId"] == region and t["unitIds"] == [] and t["createdAt"].endswith("Z")
+    # create bound template with a doc; permission checks; unit bindings must lie in the owner's subtree
     doc = {"paper": "A4", "orientation": "portrait", "background": "#ffffff", "margin": 40, "elements": [{"id": "e1", "type": "text", "x": 40, "y": 40, "w": 300, "h": 24, "text": "Bemor: {patient.fullName}", "style": {"fontFamily": "sans", "fontSize": 13, "fontWeight": 600, "color": "#14201d", "align": "left"}}]}
-    r = c.post(f"/api/v1/companies/{cid}/templates", json={"name": "T-templates Bound", "serviceTypeIds": [st_id], "doc": doc, "scope": "item"}, headers=h(ctx, "admin-a"))
+    r = c.post(f"{API}/units/{region}/templates", json={"name": "T-templates Bound", "serviceTypeIds": [st_id], "doc": doc, "scope": "item", "unitIds": [fac]}, headers=h(ctx, "admin-a"))
     assert r.status_code == 201, r.text
     bound = r.json()
-    assert bound["serviceTypeIds"] == [st_id]
-    assert c.post(f"/api/v1/companies/{cid}/templates", json={}, headers=h(ctx, "viewer-a")).status_code == 403
-    assert c.post(f"/api/v1/companies/{cid}/templates", json={}, headers=h(ctx, "admin-b")).status_code == 403
-    r = c.post(f"/api/v1/companies/{cid}/templates", json={"doc": {"paper": "A3", "elements": []}}, headers=h(ctx, "admin-a"))
+    assert bound["serviceTypeIds"] == [st_id] and bound["unitIds"] == [fac]
+    r = c.post(f"{API}/units/{region}/templates", json={"name": "x", "unitIds": [b["facility"]]}, headers=h(ctx, "admin-a"))
+    assert r.status_code == 404 and r.json()["error"]["message"] == "Birlik topilmadi"
+    assert c.post(f"{API}/units/{region}/templates", json={}, headers=h(ctx, "viewer-a")).status_code == 403
+    assert c.post(f"{API}/units/{region}/templates", json={}, headers=h(ctx, "admin-b")).status_code == 403
+    r = c.post(f"{API}/units/{region}/templates", json={"doc": {"paper": "A3", "elements": []}}, headers=h(ctx, "admin-a"))
     assert r.status_code == 422 and r.json()["error"]["code"] == "validation_error"
-    r = c.post(f"/api/v1/companies/{cid}/templates", json={"doc": {"paper": "A4", "elements": [{"id": "x", "type": "text"}]}}, headers=h(ctx, "admin-a"))
+    r = c.post(f"{API}/units/{region}/templates", json={"doc": {"paper": "A4", "elements": [{"id": "x", "type": "text"}]}}, headers=h(ctx, "admin-a"))
     assert r.status_code == 422
-    # list: viewer sees all (sorted updatedAt desc), filters status / serviceTypeId (bound OR generic) / search
-    lst = c.get(f"/api/v1/companies/{cid}/templates", headers=h(ctx, "viewer-a"))
+    # list: the viewer at the facility sees the inherited templates (sorted updatedAt desc); filters status /
+    # serviceTypeId (bound OR generic) / unitId (usable there) / search; the other tree is forbidden
+    lst = c.get(f"{API}/units/{fac}/templates", headers=h(ctx, "viewer-a"))
     assert lst.status_code == 200 and [x["id"] for x in lst.json()][:2] == [bound["id"], t["id"]]
     ids = lambda r: {x["id"] for x in r.json()}  # noqa: E731
-    assert ids(c.get(f"/api/v1/companies/{cid}/templates", params={"serviceTypeId": st_id}, headers=h(ctx, "admin-a"))) == {bound["id"], t["id"]}
-    assert ids(c.get(f"/api/v1/companies/{cid}/templates", params={"serviceTypeId": str(uuid.uuid4())}, headers=h(ctx, "admin-a"))) == {t["id"]}
-    assert ids(c.get(f"/api/v1/companies/{cid}/templates", params={"search": "боунд"}, headers=h(ctx, "admin-a"))) == {bound["id"]}
-    assert c.get(f"/api/v1/companies/{cid}/templates", headers=h(ctx, "admin-b")).status_code == 403
-    # get + tenant isolation
-    assert c.get(f"/api/v1/templates/{bound['id']}", headers=h(ctx, "viewer-a")).json()["doc"] == doc
-    r = c.get(f"/api/v1/templates/{bound['id']}", headers=h(ctx, "admin-b"))
+    assert ids(c.get(f"{API}/units/{region}/templates", params={"serviceTypeId": st_id}, headers=h(ctx, "admin-a"))) == {bound["id"], t["id"]}
+    assert ids(c.get(f"{API}/units/{region}/templates", params={"serviceTypeId": str(uuid.uuid4())}, headers=h(ctx, "admin-a"))) == {t["id"]}
+    assert ids(c.get(f"{API}/units/{region}/templates", params={"search": "боунд"}, headers=h(ctx, "admin-a"))) == {bound["id"]}
+    assert ids(c.get(f"{API}/units/{region}/templates", params={"unitId": fac}, headers=h(ctx, "admin-a"))) == {bound["id"], t["id"]}
+    assert ids(c.get(f"{API}/units/{region}/templates", params={"unitId": a["district"]}, headers=h(ctx, "admin-a"))) == {t["id"]}  # bound to the facility only
+    assert ids(c.get(f"{API}/units/{region}/templates", params={"unitId": b["facility"]}, headers=h(ctx, "admin-a"))) == set()
+    assert c.get(f"{API}/units/{region}/templates", headers=h(ctx, "admin-b")).status_code == 403
+    assert not ({bound["id"], t["id"]} & ids(c.get(f"{API}/units/{b['region']}/templates", headers=h(ctx, "admin-b"))))
+    # get + isolation
+    assert c.get(f"{API}/templates/{bound['id']}", headers=h(ctx, "viewer-a")).json()["doc"] == doc
+    r = c.get(f"{API}/templates/{bound['id']}", headers=h(ctx, "admin-b"))
+    assert r.status_code == 403 and r.json()["error"]["message"] == "Ruxsat yo‘q"
+    r = c.get(f"{API}/templates/{uuid.uuid4()}", headers=h(ctx, "admin-a"))
     assert r.status_code == 404 and r.json()["error"]["message"] == "Shablon topilmadi"
     # status: empty → 422 empty; bound → active; then doc update bumps version, non-doc update does not
-    r = c.post(f"/api/v1/templates/{t['id']}/status", json={"status": "active"}, headers=h(ctx, "admin-a"))
+    r = c.post(f"{API}/templates/{t['id']}/status", json={"status": "active"}, headers=h(ctx, "admin-a"))
     assert r.status_code == 422 and r.json()["error"]["code"] == "empty" and r.json()["error"]["message"] == "Bo‘sh shablonni faollashtirib bo‘lmaydi"
-    assert c.post(f"/api/v1/templates/{bound['id']}/status", json={"status": "active"}, headers=h(ctx, "viewer-a")).status_code == 403
-    r = c.post(f"/api/v1/templates/{bound['id']}/status", json={"status": "active"}, headers=h(ctx, "admin-a"))
+    assert c.post(f"{API}/templates/{bound['id']}/status", json={"status": "active"}, headers=h(ctx, "viewer-a")).status_code == 403
+    r = c.post(f"{API}/templates/{bound['id']}/status", json={"status": "active"}, headers=h(ctx, "admin-a"))
     assert r.status_code == 200 and r.json()["status"] == "active" and r.json()["version"] == 1
-    r = c.put(f"/api/v1/templates/{bound['id']}", json={"description": "desc", "categoryIds": [st_id]}, headers=h(ctx, "admin-a"))
-    assert r.status_code == 200 and r.json()["version"] == 1 and r.json()["description"] == "desc" and r.json()["categoryIds"] == [st_id]
-    r = c.put(f"/api/v1/templates/{bound['id']}", json={"doc": doc}, headers=h(ctx, "admin-a"))
+    r = c.put(f"{API}/templates/{bound['id']}", json={"description": "desc", "categoryIds": [st_id], "unitIds": []}, headers=h(ctx, "admin-a"))
+    assert r.status_code == 200 and r.json()["version"] == 1 and r.json()["description"] == "desc" and r.json()["categoryIds"] == [st_id] and r.json()["unitIds"] == []
+    r = c.put(f"{API}/templates/{bound['id']}", json={"doc": doc}, headers=h(ctx, "admin-a"))
     assert r.status_code == 200 and r.json()["version"] == 2
-    assert c.put(f"/api/v1/templates/{bound['id']}", json={"name": "hack"}, headers=h(ctx, "admin-b")).status_code == 404
-    lst = c.get(f"/api/v1/companies/{cid}/templates", params={"status": "active"}, headers=h(ctx, "admin-a")).json()
+    assert c.put(f"{API}/templates/{bound['id']}", json={"unitIds": [b["facility"]]}, headers=h(ctx, "admin-a")).status_code == 404
+    assert c.put(f"{API}/templates/{bound['id']}", json={"name": "hack"}, headers=h(ctx, "admin-b")).status_code == 403
+    lst = c.get(f"{API}/units/{region}/templates", params={"status": "active"}, headers=h(ctx, "admin-a")).json()
     assert {x["id"] for x in lst} == {bound["id"]}
     # receipt template: its own scope + paper; previews with a sample cheque; never offered for results
-    r = c.post(f"/api/v1/companies/{cid}/templates", json={"name": f"T-templates Chek {SFX}", "scope": "receipt", "doc": {"paper": "Receipt80", "orientation": "portrait", "background": "#ffffff", "margin": 8, "elements": [{"id": "t1", "type": "text", "x": 8, "y": 8, "w": 280, "h": 20, "text": "{company.name} {order.number} {order.total} {cashier.name}", "style": {"fontFamily": "sans", "fontSize": 12, "fontWeight": 400, "color": "#000000", "align": "left"}}]}}, headers=h(ctx, "admin-a"))
+    r = c.post(f"{API}/units/{region}/templates", json={"name": f"T-templates Chek {SFX}", "scope": "receipt", "doc": {"paper": "Receipt80", "orientation": "portrait", "background": "#ffffff", "margin": 8, "elements": [{"id": "t1", "type": "text", "x": 8, "y": 8, "w": 280, "h": 20, "text": "{org.name} {unit.name} {order.number} {order.total} {cashier.name}", "style": {"fontFamily": "sans", "fontSize": 12, "fontWeight": 400, "color": "#000000", "align": "left"}}]}}, headers=h(ctx, "admin-a"))
     assert r.status_code == 201, r.text
     receipt = r.json()
     assert receipt["scope"] == "receipt" and receipt["doc"]["paper"] == "Receipt80"
-    r = c.post(f"/api/v1/templates/{receipt['id']}/preview.pdf", headers=h(ctx, "admin-a"))
+    r = c.post(f"{API}/templates/{receipt['id']}/preview.pdf", headers=h(ctx, "admin-a"))
     assert r.status_code == 200 and r.content[:4] == b"%PDF"
-    assert c.post(f"/api/v1/companies/{cid}/templates", json={"name": "x", "scope": "receipt", "doc": {"paper": "B5", "orientation": "portrait", "background": "#fff", "margin": 0, "elements": []}}, headers=h(ctx, "admin-a")).status_code == 422
+    assert c.post(f"{API}/units/{region}/templates", json={"name": "x", "scope": "receipt", "doc": {"paper": "B5", "orientation": "portrait", "background": "#fff", "margin": 0, "elements": []}}, headers=h(ctx, "admin-a")).status_code == 422
+    assert c.delete(f"{API}/templates/{receipt['id']}", headers=h(ctx, "admin-a")).status_code == 204
     # duplicate
-    r = c.post(f"/api/v1/templates/{bound['id']}/duplicate", headers=h(ctx, "admin-a"))
+    r = c.post(f"{API}/templates/{bound['id']}/duplicate", headers=h(ctx, "admin-a"))
     assert r.status_code == 201, r.text
     dup = r.json()
     assert dup["name"] == "T-templates Bound (nusxa)" and dup["status"] == "draft" and dup["version"] == 1 and dup["usage"] == 0 and dup["serviceTypeIds"] == [st_id] and dup["doc"] == doc
-    # a branch imports another branch's template: same doc/bindings, its own name and branch
-    bid = str(uuid.uuid4())
-    r = c.post(f"/api/v1/templates/{bound['id']}/duplicate", json={"name": "T-templates Filial nusxasi", "branchIds": [bid]}, headers=h(ctx, "admin-a"))
+    # a unit takes over another unit's template as its own copy: same doc / bindings, its own name and units
+    r = c.post(f"{API}/templates/{bound['id']}/duplicate", json={"name": "T-templates Muassasa nusxasi", "unitIds": [fac]}, headers=h(ctx, "admin-a"))
     assert r.status_code == 201, r.text
     imported = r.json()
-    assert imported["name"] == "T-templates Filial nusxasi" and imported["branchIds"] == [bid] and imported["doc"] == doc and imported["status"] == "draft"
-    assert c.delete(f"/api/v1/templates/{imported['id']}", headers=h(ctx, "admin-a")).status_code == 204
+    assert imported["name"] == "T-templates Muassasa nusxasi" and imported["unitIds"] == [fac] and imported["doc"] == doc and imported["status"] == "draft" and imported["ownerUnitId"] == region
+    r = c.post(f"{API}/templates/{bound['id']}/duplicate", json={"unitIds": [str(uuid.uuid4())]}, headers=h(ctx, "admin-a"))
+    assert r.status_code == 404 and r.json()["error"]["message"] == "Birlik topilmadi"
+    assert c.delete(f"{API}/templates/{imported['id']}", headers=h(ctx, "admin-a")).status_code == 204
     # delete: active → 409; draft ok (soft) and gone
-    r = c.delete(f"/api/v1/templates/{bound['id']}", headers=h(ctx, "admin-a"))
+    r = c.delete(f"{API}/templates/{bound['id']}", headers=h(ctx, "admin-a"))
     assert r.status_code == 409 and r.json()["error"]["code"] == "active" and r.json()["error"]["message"] == "Faol shablonni o‘chirib bo‘lmaydi — avval arxivlang"
-    assert c.delete(f"/api/v1/templates/{dup['id']}", headers=h(ctx, "admin-b")).status_code == 404
-    assert c.delete(f"/api/v1/templates/{dup['id']}", headers=h(ctx, "admin-a")).status_code == 204
-    assert c.get(f"/api/v1/templates/{dup['id']}", headers=h(ctx, "admin-a")).status_code == 404
-    # preview: any staff of the company; unsaved doc override; PDF bytes
-    r = c.post(f"/api/v1/templates/{bound['id']}/preview.pdf", headers=h(ctx, "viewer-a"))
+    assert c.delete(f"{API}/templates/{dup['id']}", headers=h(ctx, "admin-b")).status_code == 403
+    assert c.delete(f"{API}/templates/{dup['id']}", headers=h(ctx, "admin-a")).status_code == 204
+    assert c.get(f"{API}/templates/{dup['id']}", headers=h(ctx, "admin-a")).status_code == 404
+    # preview: any staff of the subtree; unsaved doc override; PDF bytes
+    r = c.post(f"{API}/templates/{bound['id']}/preview.pdf", headers=h(ctx, "viewer-a"))
     assert r.status_code == 200 and r.headers["content-type"].startswith("application/pdf") and r.content[:5] == b"%PDF-"
-    r = c.post(f"/api/v1/templates/{bound['id']}/preview.pdf", json={"doc": {**doc, "paper": "A5"}}, headers=h(ctx, "admin-a"))
+    r = c.post(f"{API}/templates/{bound['id']}/preview.pdf", json={"doc": {**doc, "paper": "A5"}}, headers=h(ctx, "admin-a"))
     assert r.status_code == 200 and r.content[:5] == b"%PDF-"
-    assert c.post(f"/api/v1/templates/{bound['id']}/preview.pdf", headers=h(ctx, "admin-b")).status_code == 404
+    assert c.post(f"{API}/templates/{bound['id']}/preview.pdf", headers=h(ctx, "admin-b")).status_code == 403
 
 
 def test_assets_api(ctx: dict) -> None:
     c: TestClient = ctx["client"]
-    cid = ctx["ids"]["a"]
+    a, b = ctx["a"], ctx["b"]
+    region, fac = a["region"], a["facility"]
     data_url = "data:image/png;base64," + base64.b64encode(PNG_1PX).decode()
-    r = c.post(f"/api/v1/companies/{cid}/assets", json={"kind": "logo", "name": "T-templates logo", "url": data_url, "width": 0, "height": 0}, headers=h(ctx, "admin-a"))
+    r = c.post(f"{API}/units/{region}/assets", json={"kind": "logo", "name": "T-templates logo", "url": data_url, "width": 0, "height": 0}, headers=h(ctx, "admin-a"))
     assert r.status_code == 201, r.text
-    a = r.json()
-    assert set(a) == {"id", "companyId", "kind", "name", "url", "width", "height", "employeeId"}
-    assert a["url"].startswith("/api/v1/files/") and a["width"] == 1 and a["height"] == 1 and a["employeeId"] is None and a["companyId"] == cid
-    assert c.post(f"/api/v1/companies/{cid}/assets", json={"kind": "logo", "name": "x", "url": data_url}, headers=h(ctx, "viewer-a")).status_code == 403
-    r = c.post(f"/api/v1/companies/{cid}/assets", json={"kind": "logo", "name": "bad", "url": "data:text/plain;base64,aGVsbG8="}, headers=h(ctx, "admin-a"))
+    asset = r.json()
+    assert set(asset) == {"id", "ownerUnitId", "kind", "name", "url", "width", "height", "employeeId"}
+    assert asset["url"].startswith("/api/v1/files/") and asset["width"] == 1 and asset["height"] == 1 and asset["employeeId"] is None and asset["ownerUnitId"] == region
+    assert c.post(f"{API}/units/{region}/assets", json={"kind": "logo", "name": "x", "url": data_url}, headers=h(ctx, "viewer-a")).status_code == 403
+    r = c.post(f"{API}/units/{region}/assets", json={"kind": "logo", "name": "bad", "url": "data:text/plain;base64,aGVsbG8="}, headers=h(ctx, "admin-a"))
     assert r.status_code == 422
-    lst = c.get(f"/api/v1/companies/{cid}/assets", headers=h(ctx, "viewer-a"))
-    assert lst.status_code == 200 and a["id"] in {x["id"] for x in lst.json()}
-    assert c.get(f"/api/v1/companies/{cid}/assets", headers=h(ctx, "admin-b")).status_code == 403
-    assert a["id"] not in {x["id"] for x in c.get(f"/api/v1/companies/{ctx['ids']['b']}/assets", headers=h(ctx, "admin-b")).json()}
+    # visible from the facility below (inherited), not from the other tree
+    lst = c.get(f"{API}/units/{fac}/assets", headers=h(ctx, "viewer-a"))
+    assert lst.status_code == 200 and asset["id"] in {x["id"] for x in lst.json()}
+    assert c.get(f"{API}/units/{region}/assets", headers=h(ctx, "admin-b")).status_code == 403
+    assert asset["id"] not in {x["id"] for x in c.get(f"{API}/units/{b['region']}/assets", headers=h(ctx, "admin-b")).json()}
     # the stored file is publicly served
-    f = c.get(a["url"])
+    f = c.get(asset["url"])
     assert f.status_code == 200 and f.content == PNG_1PX
     # a template using the asset renders it in the preview
-    doc = {"paper": "A4", "orientation": "portrait", "background": "#ffffff", "margin": 40, "elements": [{"id": "img", "type": "image", "x": 40, "y": 40, "w": 100, "h": 100, "fit": "contain", "assetId": a["id"]}]}
-    r = c.post(f"/api/v1/companies/{cid}/templates", json={"name": "T-templates With asset", "doc": doc}, headers=h(ctx, "admin-a"))
+    doc = {"paper": "A4", "orientation": "portrait", "background": "#ffffff", "margin": 40, "elements": [{"id": "img", "type": "image", "x": 40, "y": 40, "w": 100, "h": 100, "fit": "contain", "assetId": asset["id"]}]}
+    r = c.post(f"{API}/units/{region}/templates", json={"name": "T-templates With asset", "doc": doc}, headers=h(ctx, "admin-a"))
     assert r.status_code == 201
-    r = c.post(f"/api/v1/templates/{r.json()['id']}/preview.pdf", headers=h(ctx, "admin-a"))
+    r = c.post(f"{API}/templates/{r.json()['id']}/preview.pdf", headers=h(ctx, "admin-a"))
     assert r.status_code == 200 and r.content[:5] == b"%PDF-"
-    # delete: viewer forbidden, admin can, gone from the list, second delete → 404
-    assert c.delete(f"/api/v1/companies/{cid}/assets/{a['id']}", headers=h(ctx, "viewer-a")).status_code == 403
-    assert c.delete(f"/api/v1/companies/{cid}/assets/{a['id']}", headers=h(ctx, "admin-a")).status_code == 204
-    assert a["id"] not in {x["id"] for x in c.get(f"/api/v1/companies/{cid}/assets", headers=h(ctx, "viewer-a")).json()}
-    assert c.delete(f"/api/v1/companies/{cid}/assets/{a['id']}", headers=h(ctx, "admin-a")).status_code == 404
+    # delete: viewer forbidden, admin can (from the owner or a unit below), gone from the list, second delete → 404
+    assert c.delete(f"{API}/units/{fac}/assets/{asset['id']}", headers=h(ctx, "viewer-a")).status_code == 403
+    assert c.delete(f"{API}/units/{b['region']}/assets/{asset['id']}", headers=h(ctx, "admin-b")).status_code == 404
+    assert c.delete(f"{API}/units/{fac}/assets/{asset['id']}", headers=h(ctx, "admin-a")).status_code == 204
+    assert asset["id"] not in {x["id"] for x in c.get(f"{API}/units/{fac}/assets", headers=h(ctx, "viewer-a")).json()}
+    assert c.get(f"{API}/units/{region}/assets", headers=h(ctx, "viewer-a")).status_code == 403  # the viewer's scope is the facility
+    assert c.delete(f"{API}/units/{region}/assets/{asset['id']}", headers=h(ctx, "admin-a")).status_code == 404
 
 
-async def _snapshot_roundtrip(company_id: str, template_id: str) -> tuple[list[str], dict, bytes]:
+async def _snapshot_roundtrip(facility_id: str, district_id: str, template_id: str, code: str) -> tuple[list[str], dict, bytes]:
     """Internal API used by orders/portal: active-list cache, snapshot build from (transient) rows, PDF."""
     async with session_scope() as s:
-        cid = uuid.UUID(company_id)
-        active = await tpl_service.list_active_templates(s, cid)
-        active_again = await tpl_service.list_active_templates(s, cid)  # cache hit → transient rows
+        fid = uuid.UUID(facility_id)
+        active = await tpl_service.list_active_templates(s, fid)
+        active_again = await tpl_service.list_active_templates(s, fid)  # cache hit → transient rows
         assert [t.id for t in active] == [t.id for t in active_again]
-        template = await tpl_service.get_template_or_404(s, uuid.UUID(template_id), cid)
-        company = await s.get(Company, cid)
+        template = await tpl_service.get_template_or_404(s, uuid.UUID(template_id))
         st_id = uuid.uuid4()
-        schema = AttributeSchema(id=uuid.uuid4(), company_id=cid, name="T-templates schema", version=1, status="published", fields=SCHEMA["fields"])
-        patient = Patient(id=uuid.uuid4(), company_id=cid, full_name="T-templates Bemor", phone="998901112233", gender="male", birth_date=None, street="Ko‘cha 1")
-        order = Order(id=uuid.uuid4(), company_id=cid, branch_id=uuid.uuid4(), number="TT-000007", patient_id=patient.id, patient_name=patient.full_name, patient_phone=patient.phone, created_by_employee_id=uuid.uuid4())
+        schema = AttributeSchema(id=uuid.uuid4(), owner_unit_id=uuid.UUID(district_id), name="T-templates schema", version=1, status="published", fields=SCHEMA["fields"])
+        patient = Patient(id=uuid.uuid4(), country_id=COUNTRY_ID, registered_unit_id=fid, full_name="T-templates Bemor", phone="998901112233", gender="male", birth_date=None, street="Ko‘cha 1")
+        order = Order(id=uuid.uuid4(), unit_id=fid, number=f"{code}-000007", patient_id=patient.id, patient_name=patient.full_name, patient_phone=patient.phone, created_by_employee_id=uuid.uuid4())
         order.created_at = tpl_service.utcnow()
-        item = OrderItem(id=uuid.uuid4(), company_id=cid, order_id=order.id, branch_id=order.branch_id, service_type_id=st_id, service_name="UQT", category_id=uuid.uuid4(), category_name="Lab", schema_id=schema.id, values={"hb": 99, "res": "pos"}, status="submitted", technician_name="Lab")
+        item = OrderItem(id=uuid.uuid4(), order_id=order.id, unit_id=fid, service_type_id=st_id, service_name="UQT", category_id=uuid.uuid4(), category_name="Lab", schema_id=schema.id, values={"hb": 99, "res": "pos"}, status="submitted", technician_name="Lab")
         snap = await tpl_service.build_document_snapshot(
-            s, template=template, order=order, patient=patient, company=company, branch=Branch(name="Filial", code="TT", company_id=cid), category=Category(name="Gematologiya", company_id=cid, phone="12"),
-            primary_item=item, items=[item], schemas={schema.id: schema}, service_codes={st_id: "UQT-1"}, district_name="Urganch", approved_at=tpl_service.utcnow(),
+            s, template=template, order=order, patient=patient, category=Category(name="Gematologiya", owner_unit_id=fid, phone="12"),
+            primary_item=item, items=[item], schemas={schema.id: schema}, service_codes={st_id: "UQT-1"}, district_name="Urganch", approved_at=tpl_service.utcnow(), unit_id=fid,
         )
         pdf = await tpl_service.render_snapshot_pdf(s, snap)
         return [str(t.id) for t in active], snap, pdf
@@ -388,53 +382,60 @@ async def _snapshot_roundtrip(company_id: str, template_id: str) -> tuple[list[s
 
 def test_snapshot_and_internal_api(ctx: dict) -> None:
     c: TestClient = ctx["client"]
-    cid = ctx["ids"]["a"]
+    a = ctx["a"]
+    region, fac = a["region"], a["facility"]
     doc = {"paper": "A4", "orientation": "portrait", "background": "#ffffff", "margin": 40, "elements": [
-        {"id": "e1", "type": "text", "x": 40, "y": 40, "w": 400, "h": 24, "text": "{patient.fullName} · {patient.gender} · {order.number} · {values.hb}", "style": {"fontFamily": "sans", "fontSize": 13, "fontWeight": 400, "color": "#14201d", "align": "left"}},
+        {"id": "e1", "type": "text", "x": 40, "y": 40, "w": 400, "h": 24, "text": "{patient.fullName} · {patient.gender} · {order.number} · {values.hb} · {org.name} / {unit.code}", "style": {"fontFamily": "sans", "fontSize": 13, "fontWeight": 400, "color": "#14201d", "align": "left"}},
         {"id": "f1", "type": "field", "x": 40, "y": 80, "w": 400, "h": 24, "fieldKey": "hb", "showLabel": True, "showUnit": True, "showReference": True, "highlightAbnormal": True, "style": {"fontFamily": "sans", "fontSize": 12, "fontWeight": 400, "color": "#000", "align": "left"}},
     ]}
-    r = c.post(f"/api/v1/companies/{cid}/templates", json={"name": "T-templates Snapshot", "doc": doc, "language": "ru"}, headers=h(ctx, "admin-a"))
+    r = c.post(f"{API}/units/{region}/templates", json={"name": "T-templates Snapshot", "doc": doc, "language": "ru"}, headers=h(ctx, "admin-a"))
     assert r.status_code == 201, r.text
     tid = r.json()["id"]
-    assert c.post(f"/api/v1/templates/{tid}/status", json={"status": "active"}, headers=h(ctx, "admin-a")).status_code == 200
-    active_ids, snap, pdf = c.portal.call(_snapshot_roundtrip, cid, tid)  # run inside the app's event loop
+    assert c.post(f"{API}/templates/{tid}/status", json={"status": "active"}, headers=h(ctx, "admin-a")).status_code == 200
+    active_ids, snap, pdf = c.portal.call(_snapshot_roundtrip, fac, a["district"], tid, ctx["code_a"])  # run inside the app's event loop
     assert tid in active_ids
     assert snap["version"] == 1 and snap["language"] == "ru" and snap["templateId"] == tid and snap["doc"] == doc and snap["assets"] == {}
     p = snap["context"]["patient"]
     assert p["fullName"] == "T-templates Bemor" and p["gender"] == "Мужской" and p["genderRaw"] == "male" and p["birthDate"] == "—" and p["age"] == "" and p["address"] == "Urganch, Ko‘cha 1"
-    assert snap["context"]["order"]["number"] == "TT-000007" and snap["context"]["item"]["approvedAt"] and snap["context"]["schema"]["fields"] == SCHEMA["fields"]
+    assert snap["context"]["order"]["number"] == f"{ctx['code_a']}-000007" and snap["context"]["item"]["approvedAt"] and snap["context"]["schema"]["fields"] == SCHEMA["fields"]
     assert "items" not in snap["context"] and snap["context"]["values"] == {"hb": 99, "res": "pos"}
+    # the organisation is the nearest unit above facility level (the district node), the unit is the facility itself;
+    # `company` / `branch` are their aliases for documents written before the tree
+    ctx_org, ctx_unit = snap["context"]["org"], snap["context"]["unit"]
+    assert ctx_org["name"] == f"T-{ctx['tag']} tumani" and ctx_unit["name"] == f"T-{ctx['tag']} SES" and ctx_unit["code"] == ctx["code_a"] and ctx_unit["timezone"] == "Asia/Tashkent"
+    assert snap["context"]["company"] == ctx_org and snap["context"]["branch"] == ctx_unit
     assert json.dumps(snap)  # JSON-serialisable
     assert pdf[:5] == b"%PDF-"
     # archived → no longer in the active list (cache invalidated on write)
-    assert c.post(f"/api/v1/templates/{tid}/status", json={"status": "archived"}, headers=h(ctx, "admin-a")).status_code == 200
-    active_ids, _, _ = c.portal.call(_snapshot_roundtrip, cid, tid)
+    assert c.post(f"{API}/templates/{tid}/status", json={"status": "archived"}, headers=h(ctx, "admin-a")).status_code == 200
+    active_ids, _, _ = c.portal.call(_snapshot_roundtrip, fac, a["district"], tid, ctx["code_a"])
     assert tid not in active_ids
 
 
 def test_default_receipt_template(ctx: dict) -> None:
-    """The standard cheque: created on demand (draft, receipt scope, grow tables) and seeded with a company's first branch."""
+    """The standard cheque: created on demand (draft, receipt scope, grow tables) and seeded with an organisation's first facility."""
     c: TestClient = ctx["client"]
-    cid = ctx["ids"]["a"]
-    r = c.post(f"/api/v1/companies/{cid}/templates/default-receipt", json={"language": "ru", "paper": "Receipt58"}, headers=h(ctx, "admin-a"))
+    a = ctx["a"]
+    region = a["region"]
+    r = c.post(f"{API}/units/{region}/templates/default-receipt", json={"language": "ru", "paper": "Receipt58"}, headers=h(ctx, "admin-a"))
     assert r.status_code == 201, r.text
     t = r.json()
-    assert t["scope"] == "receipt" and t["status"] == "draft" and t["name"] == "Стандартный чек" and t["doc"]["paper"] == "Receipt58"
+    assert t["scope"] == "receipt" and t["status"] == "draft" and t["name"] == "Стандартный чек" and t["doc"]["paper"] == "Receipt58" and t["ownerUnitId"] == region
     tables = [e for e in t["doc"]["elements"] if e["type"] == "table"]
     assert [e["id"] for e in tables] == ["items", "payments"] and all(e["grow"] for e in tables)
-    r = c.post(f"/api/v1/templates/{t['id']}/preview.pdf", headers=h(ctx, "admin-a"))
+    r = c.post(f"{API}/templates/{t['id']}/preview.pdf", headers=h(ctx, "admin-a"))
     assert r.status_code == 200 and r.content[:4] == b"%PDF"
-    assert c.post(f"/api/v1/companies/{cid}/templates/default-receipt", headers=h(ctx, "admin-b")).status_code in (403, 404)
-    assert c.delete(f"/api/v1/templates/{t['id']}", headers=h(ctx, "admin-a")).status_code == 204
-    # a new company gets the standard cheque together with its first branch (bound to that branch)
-    r = c.post("/api/v1/companies", json={"name": f"T-templates-default-{SFX}"}, headers=h(ctx, "super"))
+    assert c.post(f"{API}/units/{region}/templates/default-receipt", headers=h(ctx, "admin-b")).status_code == 403
+    assert c.delete(f"{API}/templates/{t['id']}", headers=h(ctx, "admin-a")).status_code == 204
+    # a new district of the region gets the standard cheque together with its first facility (bound to that facility)
+    r = c.post(f"{API}/units", json={"parentId": region, "districtId": ctx["spare_district"], "name": f"T-{ctx['tag']}2 tumani"}, headers=h(ctx, "admin-a"))
     assert r.status_code == 201, r.text
-    new_cid = r.json()["id"]
-    assert c.get(f"/api/v1/companies/{new_cid}/templates", headers=h(ctx, "super")).json() == []
-    r = c.post(f"/api/v1/companies/{new_cid}/branches", json={"name": "Markaz", "code": "M1"}, headers=h(ctx, "super"))
+    district2 = r.json()["id"]
+    assert [x for x in c.get(f"{API}/units/{district2}/templates", headers=h(ctx, "admin-a")).json() if x["scope"] == "receipt"] == []
+    r = c.post(f"{API}/units", json={"parentId": district2, "name": f"T-{ctx['tag']}2 Markaz", "kind": "clinic", "code": f"T{ctx['tag']}M1"}, headers=h(ctx, "admin-a"))
     assert r.status_code == 201, r.text
-    bid = r.json()["id"]
-    lst = c.get(f"/api/v1/companies/{new_cid}/templates", headers=h(ctx, "super")).json()
-    assert len(lst) == 1 and lst[0]["scope"] == "receipt" and lst[0]["status"] == "draft" and lst[0]["branchIds"] == [bid] and lst[0]["name"] == "Standart chek"
-    r = c.post(f"/api/v1/companies/{new_cid}/branches", json={"name": "Ikkinchi", "code": "M2"}, headers=h(ctx, "super"))
-    assert r.status_code == 201 and len(c.get(f"/api/v1/companies/{new_cid}/templates", headers=h(ctx, "super")).json()) == 1
+    fid = r.json()["id"]
+    lst = [x for x in c.get(f"{API}/units/{district2}/templates", headers=h(ctx, "admin-a")).json() if x["scope"] == "receipt"]
+    assert len(lst) == 1 and lst[0]["status"] == "draft" and lst[0]["unitIds"] == [fid] and lst[0]["name"] == "Standart chek" and lst[0]["ownerUnitId"] == district2
+    r = c.post(f"{API}/units", json={"parentId": district2, "name": f"T-{ctx['tag']}2 Ikkinchi", "kind": "clinic", "code": f"T{ctx['tag']}M2"}, headers=h(ctx, "admin-a"))
+    assert r.status_code == 201 and len([x for x in c.get(f"{API}/units/{district2}/templates", headers=h(ctx, "admin-a")).json() if x["scope"] == "receipt"]) == 1

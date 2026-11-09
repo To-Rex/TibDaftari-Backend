@@ -18,7 +18,7 @@ from app.api.deps import RequestMeta, StaffPrincipal, invalidate_principal_cache
 from app.core.audit import audit
 from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from app.core.pagination import page_of
-from app.core.permissions import PLATFORM_PERMISSIONS, SUPERADMIN_ROLE_KEY, invalid_permission_keys
+from app.core.permissions import PLATFORM_PERMISSIONS, SUPERADMIN_ROLE_KEY, invalid_permission_keys, normalize_key
 from app.core.schemas import Page
 from app.core.scope import UnitScope, ancestor_ids, ids_of, narrow_to
 from app.core.security import hash_password
@@ -140,12 +140,18 @@ def _parse_ids(values: Iterable[str], label: str) -> list[uuid.UUID]:
 
 
 def _reject_platform_keys(keys: list[str], staff: StaffPrincipal) -> None:
-    """`platform.*` permissions are granted only by superadmins (never through unit roles/overrides)."""
+    """`platform.*` permissions are granted only by superadmins (never through unit roles/overrides) — under their
+    old (v1) names too."""
     if staff.is_super_admin:
         return
-    bad = [k for k in keys if k in PLATFORM_PERMISSIONS]
+    bad = [k for k in keys if normalize_key(k) in PLATFORM_PERMISSIONS]
     if bad:
         raise ForbiddenError("Ruxsat yo‘q")
+
+
+def _normalized(keys: Iterable[str]) -> list[str]:
+    """Permission keys as stored: v1 names mapped to their v2 names, duplicates dropped, order kept."""
+    return list(dict.fromkeys(normalize_key(k) for k in keys))
 
 
 def _validate_overrides(ov: PermissionOverrides, staff: StaffPrincipal) -> dict[str, list[str]]:
@@ -153,7 +159,7 @@ def _validate_overrides(ov: PermissionOverrides, staff: StaffPrincipal) -> dict[
     if bad:
         raise ValidationError("Noma’lum ruxsat kaliti: " + ", ".join(bad), code="invalid_permission", details={"keys": bad})
     _reject_platform_keys(list(ov.allow), staff)
-    return {"allow": list(dict.fromkeys(ov.allow)), "deny": list(dict.fromkeys(ov.deny))}
+    return {"allow": _normalized(ov.allow), "deny": _normalized(ov.deny)}
 
 
 def _guard_super_admin_target(emp: Employee, staff: StaffPrincipal) -> None:
@@ -478,7 +484,7 @@ def _validate_permissions(keys: list[str], staff: StaffPrincipal) -> list[str]:
     if bad:
         raise ValidationError("Noma’lum ruxsat kaliti: " + ", ".join(bad), code="invalid_permission", details={"keys": bad})
     _reject_platform_keys(keys, staff)
-    return list(dict.fromkeys(keys))
+    return _normalized(keys)
 
 
 async def create_role(session: AsyncSession, scope: UnitScope, body: RoleCreateIn, staff: StaffPrincipal, meta: RequestMeta) -> RoleOut:

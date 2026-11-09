@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from app.api.deps import StaffPrincipal
 from app.core.exceptions import ForbiddenError
-from app.core.permissions import COMPANY_ADMIN_PERMISSIONS, DEFAULT_COMPANY_ROLES, PERMISSION_SET
+from app.core.permissions import PERMISSION_SET, SYSTEM_ROLES, UNIT_ADMIN_PERMISSIONS
 from app.modules.orders import router as orders_router
 from app.modules.orders.schemas import ReasonIn
 from app.modules.orders.service import (
@@ -26,7 +26,7 @@ REGISTRAR = ("reception.order.create", "reception.order.delete", "reception.paym
 
 
 def principal(*perms: str, super_admin: bool = False) -> StaffPrincipal:
-    emp = SimpleNamespace(id=uuid.uuid4(), company_id=uuid.uuid4(), is_super_admin=super_admin, branch_ids=[])
+    emp = SimpleNamespace(id=uuid.uuid4(), unit_id=uuid.uuid4(), is_super_admin=super_admin)
     return StaffPrincipal(employee=emp, role=SimpleNamespace(key="registrator"), permissions=list(perms), jti="t", token_exp=0)  # type: ignore[arg-type]
 
 
@@ -75,8 +75,8 @@ def test_removed_service_checks_only_the_payments_given_back() -> None:
 
 
 def test_roles() -> None:
-    roles = {r["key"]: set(r["permissions"]) for r in DEFAULT_COMPANY_ROLES}
-    assert LATE_EDIT in PERMISSION_SET and LATE_EDIT in COMPANY_ADMIN_PERMISSIONS
+    roles = {r["key"]: set(r["permissions"]) for r in SYSTEM_ROLES}
+    assert LATE_EDIT in PERMISSION_SET and LATE_EDIT in UNIT_ADMIN_PERMISSIONS
     assert LATE_EDIT in roles["admin"] and LATE_EDIT in roles["rahbar"]
     assert LATE_EDIT not in roles["registrator"] and LATE_EDIT not in roles["laborant"] and LATE_EDIT not in roles["vrach"]
 

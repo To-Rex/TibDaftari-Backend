@@ -8,15 +8,15 @@ from app.modules.orders.repository import ORDER_SORTABLE, order_conditions
 from app.modules.orders.schemas import OrderListQuery
 from sqlalchemy.dialects import postgresql
 
-CID = uuid.uuid4()
+UNITS = [uuid.uuid4()]
 
 
 def _sql(q: OrderListQuery) -> list[str]:
-    return [str(c.compile(dialect=postgresql.dialect())) for c in order_conditions(CID, q)]
+    return [str(c.compile(dialect=postgresql.dialect())) for c in order_conditions(UNITS, q)]
 
 
 def test_old_queries_build_the_same_conditions() -> None:
-    assert len(_sql(OrderListQuery())) == 2  # company + alive
+    assert len(_sql(OrderListQuery())) == 2  # facilities + alive
     old = OrderListQuery(status="open", payment="unpaid", date_from="2026-10-01", date_to="2026-10-02", search="UR-1")
     assert len(_sql(old)) == 2 + 4 + 1  # + status, payment, from, to + search
 

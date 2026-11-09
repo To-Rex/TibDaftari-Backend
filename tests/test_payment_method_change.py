@@ -17,11 +17,13 @@ from app.modules.orders.schemas import PaymentMethodIn, PaymentOut
 from pydantic import ValidationError as PydanticValidationError
 
 TAKEN = datetime(2026, 11, 4, 9, 0, tzinfo=UTC)
+#: the facility the payment was taken in — the principal may act there
+UNIT = uuid.uuid4()
 
 
 def principal(*perms: str) -> StaffPrincipal:
-    emp = SimpleNamespace(id=uuid.uuid4(), company_id=uuid.uuid4(), is_super_admin=False, branch_ids=[], full_name="Aliyeva Nodira")
-    return StaffPrincipal(employee=emp, role=SimpleNamespace(key="registrator"), permissions=list(perms), jti="t", token_exp=0)  # type: ignore[arg-type]
+    emp = SimpleNamespace(id=uuid.uuid4(), unit_id=UNIT, is_super_admin=False, full_name="Aliyeva Nodira")
+    return StaffPrincipal(employee=emp, role=SimpleNamespace(key="registrator"), permissions=list(perms), jti="t", token_exp=0, unit_ids=[UNIT], allowed_unit_ids=frozenset({UNIT}))  # type: ignore[arg-type]
 
 
 def body(*parts: tuple[str, int], reason: str = "") -> PaymentMethodIn:
@@ -62,18 +64,17 @@ class FakeSession:
 @pytest.fixture
 def world(monkeypatch):
     """One 100 000 cash payment taken at 09:00 on a paid cheque; the database calls of the service faked."""
-    company = uuid.uuid4()
-    order = SimpleNamespace(id=uuid.uuid4(), company_id=company, branch_id=uuid.uuid4())
+    order = SimpleNamespace(id=uuid.uuid4(), unit_id=UNIT, first_paid_at=None)
     pay = Payment(
-        id=uuid.uuid4(), company_id=company, order_id=order.id, branch_id=order.branch_id, amount=100_000, method="cash",
+        id=uuid.uuid4(), order_id=order.id, unit_id=order.unit_id, amount=100_000, method="cash",
         employee_id=uuid.uuid4(), note=None, refunded_at=None, corrections=[], created_at=TAKEN, updated_at=TAKEN,
     )
     audits: list[dict] = []
 
-    async def get_payment(_s, pid, _c):
+    async def get_payment(_s, pid):
         return pay if pid == pay.id else None
 
-    async def get_order(_s, _oid, _cid, **_k):
+    async def get_order(_s, _oid, _staff, **_k):
         return order
 
     async def noop(*_a, **_k):
@@ -114,14 +115,14 @@ async def test_change_method_in_place(world, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_split_keeps_time_cashier_and_branch(world, monkeypatch) -> None:
+async def test_split_keeps_time_cashier_and_facility(world, monkeypatch) -> None:
     at(monkeypatch, 5)
     staff, s = principal("reception.payment.create"), FakeSession()
     await service.change_payment_method(s, world.pay.id, staff, body(("card", 40_000), ("cash", 60_000)), world.meta)  # type: ignore[arg-type]
     p = world.pay
     assert (p.method, p.amount) == ("cash", 60_000)
     [extra] = s.added
-    assert (extra.method, extra.amount, extra.created_at, extra.employee_id, extra.branch_id, extra.order_id) == ("card", 40_000, TAKEN, p.employee_id, p.branch_id, p.order_id)
+    assert (extra.method, extra.amount, extra.created_at, extra.employee_id, extra.unit_id, extra.order_id) == ("card", 40_000, TAKEN, p.employee_id, p.unit_id, p.order_id)
     assert extra.created_by == staff.id
     assert extra.corrections[0]["splitFrom"] == str(p.id) and extra.corrections[0]["fromAmount"] == 100_000
     assert "splitFrom" not in p.corrections[0]
@@ -129,6 +130,17 @@ async def test_split_keeps_time_cashier_and_branch(world, monkeypatch) -> None:
     # a second correction is appended, the first kept
     await service.change_payment_method(s, world.pay.id, staff, body(("transfer", 60_000)), world.meta)  # type: ignore[arg-type]
     assert [c["fromMethod"] for c in p.corrections] == ["cash", "cash"] and p.method == "transfer"
+
+
+@pytest.mark.asyncio
+async def test_other_facility_is_forbidden(world, monkeypatch) -> None:
+    """A payment of a facility outside the caller's units: 403 before anything is read or changed."""
+    at(monkeypatch, 2)
+    emp = SimpleNamespace(id=uuid.uuid4(), unit_id=uuid.uuid4(), is_super_admin=False, full_name="X")
+    stranger = StaffPrincipal(employee=emp, role=SimpleNamespace(key="registrator"), permissions=["reception.payment.create"], jti="t", token_exp=0, unit_ids=[emp.unit_id], allowed_unit_ids=frozenset({emp.unit_id}))  # type: ignore[arg-type]
+    with pytest.raises(ForbiddenError):
+        await service.change_payment_method(FakeSession(), world.pay.id, stranger, body(("card", 100_000)), world.meta)  # type: ignore[arg-type]
+    assert world.pay.method == "cash"
 
 
 @pytest.mark.asyncio

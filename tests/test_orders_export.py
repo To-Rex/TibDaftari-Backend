@@ -29,7 +29,7 @@ def _xml(data: bytes) -> tuple[str, str]:
 
 def test_workbook_rows_methods_totals() -> None:
     a, b, c = _order("UR-1", 150000, 120000), _order("UR-2", 50000, 50000), _order("UR-3", 70000, 0, status="cancelled")
-    rows = [SimpleNamespace(Order=o, creator="Kassir", branch="Markaziy") for o in (a, b, c)]
+    rows = [SimpleNamespace(Order=o, creator="Kassir", unit="Markaziy") for o in (a, b, c)]
     payments = {a.id: {"cash": 100000, "card": 20000}, b.id: {"card": 50000}}
     data = build_xlsx(rows, payments, {a.id: ["Qon tahlili", "Siydik"]}, lang="uz", caption="Davr: bugun · To‘lov: Naqd", generated_at=datetime(2026, 10, 10, 6, 0, tzinfo=UTC))
     sheet, strings = _xml(data)
@@ -51,7 +51,7 @@ def test_languages_and_empty() -> None:
 
 def test_export_query_and_new_filters() -> None:
     q = OrderExportQuery.model_validate({"lang": "en", "caption": "x", "results": "partial", "minItems": 2, "maxItems": 5, "refunded": True, "sortBy": "completedAt"})
-    sql = " ".join(str(c.compile(dialect=postgresql.dialect())) for c in order_conditions(uuid.uuid4(), q))
+    sql = " ".join(str(c.compile(dialect=postgresql.dialect())) for c in order_conditions([uuid.uuid4()], q))
     assert "order_items.status = " in sql and "order_items.status != " in sql and "orders.item_count >=" in sql and "payments.refunded_at IS NOT NULL" in sql
     assert {"completedAt", "discountPercent"} <= set(ORDER_SORTABLE)
-    assert len(order_conditions(uuid.uuid4(), OrderListQuery())) == 2  # nothing new unless asked
+    assert len(order_conditions([uuid.uuid4()], OrderListQuery())) == 2  # nothing new unless asked

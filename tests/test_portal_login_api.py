@@ -1,105 +1,70 @@
-"""API tests for the patient portal login against the real dev DB (fixture rows prefixed `T-plogin-`).
+"""API tests for the patient portal login against the test database (fixture rows prefixed `T-plogin-`).
 
-Fixture: two relatives sharing one phone in clinic A (told apart by passport), one order each; a staff member of A
-with reception.patient.write and one of clinic B (tenant isolation).
+Fixture: two relatives sharing one phone registered at facility A (told apart by passport), one order each; a staff
+member of A with reception.patient.write and one of facility B (unit isolation).
 """
 
 from __future__ import annotations
 
-import asyncio
-import random
 import uuid
 from collections.abc import Iterator
 from typing import Any
 
 import pytest
 from app.core.config import settings
-from app.core.security import hash_password
-from app.infrastructure.db.models import Company, Employee, Order, Patient, Role
-from app.infrastructure.db.session import dispose_engine, session_scope
-from app.infrastructure.redis.client import close_redis
+from app.infrastructure.db.models import Order, OrgUnit, Patient
 from fastapi.testclient import TestClient
 
+from tests.helpers import API, COUNTRY_ID, app_instance, bearer, make_employee, make_tree, phone, seed, staff_token
+
 RUN = uuid.uuid4().hex[:8]
-API = "/api/v1"
-PERMS = ["reception.patient.read", "reception.patient.write"]
 
 
-def _phone() -> str:
-    return "99894" + "".join(random.choice("0123456789") for _ in range(7))
-
-
-def _order(co: uuid.UUID, patient: Patient, number: str) -> Order:
+def _order(facility: OrgUnit, patient: Patient, number: str, employee_id: uuid.UUID) -> Order:
     return Order(
-        company_id=co,
-        branch_id=uuid.uuid4(),
+        unit_id=facility.id,
         number=number,
         patient_id=patient.id,
         patient_name=patient.full_name,
         patient_phone=patient.phone,
-        created_by_employee_id=uuid.uuid4(),
+        created_by_employee_id=employee_id,
     )
 
 
-def _fixture_rows() -> dict[str, Any]:
-    async def _run() -> dict[str, Any]:
-        async with session_scope() as s:
-            phone = _phone()
-            co_a = Company(name=f"T-plogin-A-{RUN}", slug=f"t-plogin-a-{RUN}")
-            co_b = Company(name=f"T-plogin-B-{RUN}", slug=f"t-plogin-b-{RUN}")
-            s.add_all([co_a, co_b])
-            await s.flush()
-            role_a = Role(company_id=co_a.id, key="registrator", name="T-plogin", permissions=PERMS)
-            role_b = Role(company_id=co_b.id, key="registrator", name="T-plogin", permissions=PERMS)
-            s.add_all([role_a, role_b])
-            await s.flush()
-            pw = hash_password("secret123")
-            emp_a = Employee(company_id=co_a.id, full_name="T-plogin A", login=f"t-plogin-a-{RUN}", password_hash=pw, role_id=role_a.id)
-            emp_b = Employee(company_id=co_b.id, full_name="T-plogin B", login=f"t-plogin-b-{RUN}", password_hash=pw, role_id=role_b.id)
-            mother = Patient(company_id=co_a.id, full_name=f"Karimova T-plogin {RUN}", phone=phone, passport_number=f"AA{RUN[:7]}", tags=[])
-            son = Patient(company_id=co_a.id, full_name=f"Karimov T-plogin {RUN}", phone=phone, passport_number=f"AB{RUN[:7]}", tags=[])
-            s.add_all([emp_a, emp_b, mother, son])
-            await s.flush()
-            o_mother = _order(co_a.id, mother, f"T-PL-{RUN}-1")
-            o_son = _order(co_a.id, son, f"T-PL-{RUN}-2")
-            s.add_all([o_mother, o_son])
-            await s.flush()
-            return {
-                "phone": phone,
-                "login_a": emp_a.login,
-                "login_b": emp_b.login,
-                "mother": str(mother.id),
-                "son": str(son.id),
-                "o_mother": str(o_mother.id),
-                "o_son": str(o_son.id),
-            }
-
-    async def _main() -> dict[str, Any]:
-        try:
-            return await _run()
-        finally:
-            await close_redis()
-            await dispose_engine()
-
-    return asyncio.run(_main())
+async def _fixture_rows(s) -> dict[str, Any]:
+    shared = phone("99894")
+    a = await make_tree(s)
+    b = await make_tree(s)
+    emp_a = await make_employee(s, a.facility, "registrator", login=f"t-plogin-a-{RUN}", password="secret123")
+    emp_b = await make_employee(s, b.facility, "registrator", login=f"t-plogin-b-{RUN}", password="secret123")
+    mother = Patient(country_id=COUNTRY_ID, registered_unit_id=a.facility.id, full_name=f"Karimova T-plogin {RUN}", phone=shared, passport_number=f"AA{RUN[:7]}", tags=[])
+    son = Patient(country_id=COUNTRY_ID, registered_unit_id=a.facility.id, full_name=f"Karimov T-plogin {RUN}", phone=shared, passport_number=f"AB{RUN[:7]}", tags=[])
+    s.add_all([mother, son])
+    await s.flush()
+    o_mother = _order(a.facility, mother, f"{a.facility.code}-000001", emp_a.id)
+    o_son = _order(a.facility, son, f"{a.facility.code}-000002", emp_a.id)
+    s.add_all([o_mother, o_son])
+    await s.flush()
+    return {
+        "phone": shared,
+        "login_a": emp_a.login,
+        "login_b": emp_b.login,
+        "mother": str(mother.id),
+        "son": str(son.id),
+        "o_mother": str(o_mother.id),
+        "o_son": str(o_son.id),
+    }
 
 
 @pytest.fixture(scope="module")
 def env() -> Iterator[dict[str, Any]]:
-    settings.workers_enabled = False
-    settings.telegram_enabled = False
-    settings.otp_dev_mode = True
     mp = pytest.MonkeyPatch()
     mp.setattr(settings, "login_max_attempts", 3)
     mp.setattr(settings, "auth_rate_limit_per_minute", 1000)
-    data = _fixture_rows()
-    from app.main import app
-
-    with TestClient(app) as client:
+    data = seed(_fixture_rows)
+    with TestClient(app_instance()) as client:
         for key in ("a", "b"):
-            r = client.post(f"{API}/auth/staff/login", json={"login": data[f"login_{key}"], "password": "secret123"})
-            assert r.status_code == 200, r.text
-            data[f"h_{key}"] = {"Authorization": f"Bearer {r.json()['accessToken']}"}
+            data[f"h_{key}"] = bearer(staff_token(client, data[f"login_{key}"], "secret123"))
         data["client"] = client
         yield data
     mp.undo()
@@ -137,7 +102,7 @@ def test_relatives_on_one_phone_each_see_their_own_results(env: dict[str, Any]) 
     r = c.put(f"{API}/patients/{env['son']}/portal-access", json={"login": son_login.upper(), "password": "family-2026", "sendSms": True}, headers=env["h_a"])
     assert r.status_code == 200, r.text
     assert r.json()["login"] == son_login and r.json()["password"] == "family-2026"
-    assert r.json()["sms"] == "not_configured"  # the fixture clinic has no SMS provider — nothing is stored
+    assert r.json()["sms"] == "not_configured"  # the fixture facility has no SMS provider — nothing is stored
     env["son_login"] = son_login
 
     as_mother = _login(c, mother["login"].upper(), mother["password"])
@@ -211,7 +176,7 @@ def test_reception_renews_and_switches_the_login_off(env: dict[str, Any]) -> Non
     assert reuse.status_code == 200
 
 
-def test_other_clinics_cannot_touch_the_login(env: dict[str, Any]) -> None:
+def test_other_facilities_cannot_touch_the_login(env: dict[str, Any]) -> None:
     c: TestClient = env["client"]
     assert c.put(f"{API}/patients/{env['son']}/portal-access", json={}, headers=env["h_b"]).status_code == 404
     assert c.delete(f"{API}/patients/{env['son']}/portal-access", headers=env["h_b"]).status_code == 404

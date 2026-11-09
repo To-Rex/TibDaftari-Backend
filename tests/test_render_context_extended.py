@@ -88,8 +88,10 @@ def test_extended_context_keys() -> None:
     assert ctx["item"]["serviceCode"] == "LG-1"
     assert ctx["item"]["statusLabel"] == "Tasdiqlangan"
     assert ctx["item"]["price"] == "100,000"
-    assert ctx["company"]["legalName"] == "Klinika MChJ"
-    assert ctx["branch"]["code"] == "M"
+    # `company` / `branch` are aliases of the organisation (`org`) and the facility (`unit`) blocks
+    assert ctx["org"]["legalName"] == "Klinika MChJ" and ctx["company"] is ctx["org"]
+    assert ctx["unit"]["code"] == "M" and ctx["branch"] is ctx["unit"]
+    assert ctx["org"]["shortName"] == "Klinika" and ctx["unit"]["phone"] == "+998 90 111-11-11"
     assert ctx["category"]["code"] == "LAB"
     assert ctx["now"]
 
@@ -101,3 +103,13 @@ def test_extended_context_keys() -> None:
     assert row["price"] == "100,000"
     assert row["approvedAt"] == "16.08.2026 12:00"
     assert ex.interpolate("{patient.pinfl}|{order.statusLabel}|{item.serviceCode}|{company.legalName}|{branch.code}|{category.code}", ctx) == "12345678901234|Yakunlangan|LG-1|Klinika MChJ|M|LAB"
+    assert ex.interpolate("{org.name} / {unit.name} = {company.name} / {branch.name}", ctx) == "Klinika / Markaziy = Klinika / Markaziy"
+
+
+def test_org_and_unit_are_the_primary_inputs() -> None:
+    ctx = build_render_context(org={"name": "Xorazm SES", "shortName": "XSES"}, unit={"name": "Bog‘ot SES", "code": "BGT"})
+    assert ctx["org"]["name"] == "Xorazm SES" and ctx["org"]["shortName"] == "XSES"
+    assert ctx["company"]["name"] == "Xorazm SES" and ctx["branch"]["code"] == "BGT"
+    # an explicit `org` wins over the alias input
+    both = build_render_context(org={"name": "New"}, company={"name": "Old"})
+    assert both["org"]["name"] == "New" and both["company"]["name"] == "New"

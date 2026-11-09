@@ -90,7 +90,7 @@ def test_login_session_sees_its_own_patient_only() -> None:
 def _patient(**kw: object) -> Patient:
     now = datetime.now(UTC)
     base: dict[str, object] = {
-        "id": uuid.uuid4(), "company_id": uuid.uuid4(), "full_name": "Aziz", "phone": "998901234567", "tags": [],
+        "id": uuid.uuid4(), "country_id": uuid.uuid4(), "full_name": "Aziz", "phone": "998901234567", "tags": [],
         "stats_orders": 0, "stats_total_spent": 0, "discount_percent": 0, "portal_linked": False,
         "created_at": now, "updated_at": now,
     }
@@ -124,11 +124,13 @@ def test_session_dto_defaults_to_the_sms_code_way_in() -> None:
 
 
 def test_credentials_sms_text_and_its_outbox_mask() -> None:
-    company = SimpleNamespace(name="Temo Lab", settings={})
-    text = messaging.portal_access_text(company, "aziz1234", "k7m2pqab", "https://temo.uz/login")  # type: ignore[arg-type]
+    # the default portal-access text, rendered for the organisation "Temo Lab" (no unit texts of its own)
+    text = messaging.render_text({}, "portal_access", org="Temo Lab", login="aziz1234", password="k7m2pqab", link="https://temo.uz/login")
     assert text == "Temo Lab shaxsiy kabinetiga kirish: https://temo.uz/login Login: aziz1234 Parol: k7m2pqab"
-    masked = messaging.portal_access_text(company, "aziz1234", "••••••", "https://temo.uz/login")  # type: ignore[arg-type]
+    masked = messaging.render_text({}, "portal_access", org="Temo Lab", login="aziz1234", password="••••••", link="https://temo.uz/login")
     assert "k7m2pqab" not in masked and "aziz1234" in masked
+    # `{company}` keeps working as an alias of `{org}` in texts written before the tree
+    assert messaging.render_text({"portal_access": "{company}: {login}"}, "portal_access", org="Temo Lab", login="aziz1234") == "Temo Lab: aziz1234"
     assert {"otp", "portal_access"} <= messaging.SECRET_KINDS
 
 

@@ -8,18 +8,18 @@ from types import SimpleNamespace
 import pytest
 from app.api.deps import StaffPrincipal
 from app.core.exceptions import ForbiddenError
-from app.core.permissions import DEFAULT_COMPANY_ROLES, PERMISSION_SET
+from app.core.permissions import PERMISSION_SET, SYSTEM_ROLES
 from app.modules.orders import router as orders_router
 from app.modules.orders.schemas import WorklistQuery
 
 
 def principal(*perms: str) -> StaffPrincipal:
-    emp = SimpleNamespace(id=uuid.uuid4(), company_id=uuid.uuid4(), is_super_admin=False, branch_ids=[])
+    emp = SimpleNamespace(id=uuid.uuid4(), unit_id=uuid.uuid4(), is_super_admin=False)
     return StaffPrincipal(employee=emp, role=SimpleNamespace(key="registrator"), permissions=list(perms), jti="t", token_exp=0)  # type: ignore[arg-type]
 
 
 def test_registrar_role_gets_approved_results() -> None:
-    reg = next(r for r in DEFAULT_COMPANY_ROLES if r["key"] == "registrator")
+    reg = next(r for r in SYSTEM_ROLES if r["key"] == "registrator")
     assert {"confirm.result.view", "confirm.result.resend", "messaging.send"} <= set(reg["permissions"])
     assert "confirm.result.read" not in reg["permissions"] and "confirm.result.approve" not in reg["permissions"]
     assert "confirm.result.view" in PERMISSION_SET
@@ -29,7 +29,7 @@ def test_registrar_role_gets_the_admins_reports() -> None:
     """Reports like the admin's: full revenue (no 7-day cap) and the CSV / Excel export; recent stays as a fallback."""
     from app.modules.reports.service import _recent_only
 
-    reg = next(r for r in DEFAULT_COMPANY_ROLES if r["key"] == "registrator")
+    reg = next(r for r in SYSTEM_ROLES if r["key"] == "registrator")
     assert {"reports.operations.read", "reports.finance.read", "reports.export", "reports.finance.recent"} <= set(reg["permissions"])
     assert set(reg["permissions"]) <= PERMISSION_SET
     assert not _recent_only(principal(*reg["permissions"]))
@@ -50,7 +50,7 @@ async def _worklist(staff: StaffPrincipal, statuses: list[str]) -> None:
     orig = orders_router.service.worklist
     orders_router.service.worklist = stop
     try:
-        await orders_router.worklist(staff.company_id, WorklistQuery(status=statuses), staff, None)  # type: ignore[arg-type]
+        await orders_router.worklist(None, WorklistQuery(status=statuses), staff, None)  # type: ignore[arg-type]
     finally:
         orders_router.service.worklist = orig
 

@@ -20,6 +20,7 @@ from app.core.exceptions import ConflictError, ExternalServiceError, ForbiddenEr
 from app.core.scope import UnitScope, invalidate_scope_cache, load_scope
 from app.core.security import mask_secret
 from app.core.textutil import is_valid_uz_phone, norm_phone
+from app.core.timeutil import utcnow
 from app.infrastructure.db.models import CHILD_LEVEL, MessagingAccount, OrgUnit, SmsTemplate
 from app.infrastructure.redis import cache
 from app.modules.messaging import xabarchi
@@ -469,6 +470,14 @@ async def get_sms(session: AsyncSession, unit_id: uuid.UUID, staff: StaffPrincip
     return sms_out(unit, scope.ancestor_ids, accounts, names)
 
 
+def _retire_account(acc: MessagingAccount, staff: StaffPrincipal) -> None:
+    """Drop a unit's own messaging account the way every business row goes: soft-deleted. Outbox rows already sent
+    with it keep pointing at it (`outbox_messages.account_id`); the resolvers only look at alive, active rows."""
+    acc.is_active = False
+    acc.deleted_at = utcnow()
+    acc.deleted_by = staff.id
+
+
 def _sms_snapshot(acc: MessagingAccount | None) -> dict[str, Any]:
     if acc is None:
         return {"mode": "inherited"}
@@ -483,7 +492,7 @@ async def set_sms(session: AsyncSession, unit_id: uuid.UUID, body: UnitSmsIn, st
     before = _sms_snapshot(own)
     if body.mode == "inherited":
         if own is not None:
-            await session.delete(own)
+            _retire_account(own, staff)
     else:
         if own is None:
             own = MessagingAccount(unit_id=unit.id, channel="sms", provider="none", created_by=staff.id)
@@ -653,7 +662,7 @@ async def set_telegram(session: AsyncSession, unit_id: uuid.UUID, body: Telegram
     else:
         if own is not None:
             account_id = own.id
-            await session.delete(own)
+            _retire_account(own, staff)
         action = "telegram_disconnect"
     await session.flush()
     await audit(session, actor_type="staff", actor_id=staff.id, unit_id=unit.id, country_id=unit.country_id, action=action, entity="unit", entity_id=unit.id, before=before, after={"botUsername": own.bot_username if token and own else None, "connected": bool(token)}, ip=meta.ip, request_id=meta.request_id)

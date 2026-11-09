@@ -1,4 +1,4 @@
-"""API tests for the orders module against the real dev DB (fixture rows prefixed `T-orders-`).
+"""API tests for the orders module against the test database (fixture rows prefixed `T-orders-`).
 
 Templates rendering is provided by another module; `build_document_snapshot` / `render_snapshot_pdf`
 are monkeypatched here (contract stubs) so approval can be exercised end-to-end.
@@ -6,8 +6,6 @@ are monkeypatched here (contract stubs) so approval can be exercised end-to-end.
 
 from __future__ import annotations
 
-import asyncio
-import random
 import re
 import uuid
 from collections.abc import Iterator
@@ -15,198 +13,104 @@ from typing import Any
 
 import pytest
 from app.core.config import settings
-from app.core.permissions import PERMISSIONS
-from app.core.security import hash_password
 from app.infrastructure.db.models import (
     AttributeSchema,
-    Branch,
     Category,
-    Company,
-    Employee,
     OutboxMessage,
     Patient,
     ResultDocument,
     ResultTemplate,
-    Role,
     ServiceType,
+    ServiceUnitSetting,
 )
-from app.infrastructure.db.session import dispose_engine, session_scope
-from app.infrastructure.redis.client import close_redis
 from app.modules.templates import service as templates_svc
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from tests.helpers import API, COUNTRY_ID, app_instance, bearer, db, make_employee, make_tree, phone, seed, staff_token
+
 RUN = uuid.uuid4().hex[:8]
-API = "/api/v1"
 FAKE_SNAPSHOT = {"version": 1, "doc": {}, "context": {}, "assets": {}, "language": "uz"}
 FAKE_PDF = b"%PDF-1.4 test"
 
 
-def _phone() -> str:
-    return "99897" + "".join(random.choice("0123456789") for _ in range(7))
-
-
-def _fixture_rows() -> dict[str, Any]:
-    async def _run() -> dict[str, Any]:
-        async with session_scope() as s:
-            co_a = Company(name=f"T-orders-A-{RUN}", slug=f"t-orders-a-{RUN}")
-            co_b = Company(name=f"T-orders-B-{RUN}", slug=f"t-orders-b-{RUN}")
-            s.add_all([co_a, co_b])
-            await s.flush()
-            perms = [p for p in PERMISSIONS if not p.startswith("platform.")]
-            role_a = Role(company_id=co_a.id, key="admin", name="T-orders", permissions=perms)
-            role_b = Role(company_id=co_b.id, key="admin", name="T-orders", permissions=perms)
-            s.add_all([role_a, role_b])
-            await s.flush()
-            pw = hash_password("secret123")
-            emp_a = Employee(
-                company_id=co_a.id,
-                full_name="T-orders Doctor",
-                login=f"t-orders-a-{RUN}",
-                password_hash=pw,
-                role_id=role_a.id,
-            )
-            emp_b = Employee(
-                company_id=co_b.id,
-                full_name="T-orders B",
-                login=f"t-orders-b-{RUN}",
-                password_hash=pw,
-                role_id=role_b.id,
-            )
-            branch = Branch(company_id=co_a.id, name=f"T-orders filial {RUN}", code=f"T{RUN[:4].upper()}", order_seq=0)
-            patient = Patient(
-                company_id=co_a.id,
-                full_name=f"T-orders Bemor {RUN}",
-                phone=_phone(),
-                gender="male",
-                discount_percent=10,
-                tags=[],
-                telegram_chat_id="123456",
-            )
-            cat = Category(company_id=co_a.id, name=f"T-orders Gematologiya {RUN}", order=1)
-            schema = AttributeSchema(
-                company_id=co_a.id,
-                name=f"T-orders sxema {RUN}",
-                version=3,
-                status="published",
-                fields=[
-                    {"key": "hb", "label": "Gemoglobin", "type": "number", "required": True, "order": 1},
-                    {
-                        "key": "tbl",
-                        "label": "Jadval",
-                        "type": "table",
-                        "required": False,
-                        "order": 2,
-                        "presetRows": [{"name": "WBC", "value": ""}],
-                    },
-                ],
-            )
-            s.add_all([emp_a, emp_b, branch, patient, cat, schema])
-            await s.flush()
-            st1 = ServiceType(
-                company_id=co_a.id,
-                category_id=cat.id,
-                name=f"T-orders Umumiy qon {RUN}",
-                code=f"TO{RUN[:5]}",
-                price=100000,
-                branch_prices={},
-                schema_id=schema.id,
-            )
-            st2 = ServiceType(
-                company_id=co_a.id,
-                category_id=cat.id,
-                name=f"T-orders Konsultatsiya {RUN}",
-                price=60000,
-                branch_prices={str(branch.id): 50000},
-            )
-            s.add_all([st1, st2])
-            await s.flush()
-            tpl_item = ResultTemplate(
-                company_id=co_a.id,
-                name=f"T-orders item tpl {RUN}",
-                status="active",
-                version=2,
-                service_type_ids=[st1.id],
-                category_ids=[],
-                scope="item",
-                doc={"elements": []},
-            )
-            tpl_order = ResultTemplate(
-                company_id=co_a.id,
-                name=f"T-orders panel {RUN}",
-                status="active",
-                version=1,
-                service_type_ids=[],
-                category_ids=[],
-                scope="order",
-                doc={"elements": []},
-            )
-            s.add_all([tpl_item, tpl_order])
-            await s.flush()
-            return {
-                "co_a": str(co_a.id),
-                "co_b": str(co_b.id),
-                "login_a": emp_a.login,
-                "login_b": emp_b.login,
-                "emp_a": str(emp_a.id),
-                "branch": str(branch.id),
-                "branch_code": branch.code,
-                "patient": str(patient.id),
-                "cat": str(cat.id),
-                "st1": str(st1.id),
-                "st2": str(st2.id),
-                "tpl_item": str(tpl_item.id),
-                "tpl_order": str(tpl_order.id),
-            }
-
-    async def _main() -> dict[str, Any]:
-        try:
-            return await _run()
-        finally:
-            await close_redis()
-            await dispose_engine()
-
-    return asyncio.run(_main())
-
-
-def _db(client: TestClient, fn: Any) -> Any:
-    """Run an async DB read on the app's own event loop (shares the engine pool with the app)."""
-
-    async def _main() -> Any:
-        async with session_scope() as s:
-            return await fn(s)
-
-    return client.portal.call(_main)
+async def _fixture_rows(s) -> dict[str, Any]:
+    a = await make_tree(s)
+    b = await make_tree(s)
+    emp_a = await make_employee(s, a.facility, "admin", login=f"t-orders-a-{RUN}", password="secret123", full_name="T-orders Doctor")
+    emp_b = await make_employee(s, b.facility, "admin", login=f"t-orders-b-{RUN}", password="secret123", full_name="T-orders B")
+    admin_a = await make_employee(s, a.region, "admin", login=f"t-orders-region-{RUN}", password="secret123", full_name="T-orders Region admin")
+    patient = Patient(
+        country_id=COUNTRY_ID,
+        registered_unit_id=a.facility.id,
+        full_name=f"T-orders Bemor {RUN}",
+        phone=phone("99897"),
+        gender="male",
+        discount_percent=10,
+        tags=[],
+        telegram_chat_id="123456",
+    )
+    cat = Category(owner_unit_id=a.region.id, name=f"T-orders Gematologiya {RUN}", sort_order=1)
+    schema = AttributeSchema(
+        owner_unit_id=a.region.id,
+        name=f"T-orders sxema {RUN}",
+        version=3,
+        status="published",
+        fields=[
+            {"key": "hb", "label": "Gemoglobin", "type": "number", "required": True, "order": 1},
+            {"key": "tbl", "label": "Jadval", "type": "table", "required": False, "order": 2, "presetRows": [{"name": "WBC", "value": ""}]},
+        ],
+    )
+    s.add_all([patient, cat, schema])
+    await s.flush()
+    st1 = ServiceType(owner_unit_id=a.region.id, category_id=cat.id, name=f"T-orders Umumiy qon {RUN}", code=f"TO{RUN[:5]}", price=100000, schema_id=schema.id)
+    st2 = ServiceType(owner_unit_id=a.region.id, category_id=cat.id, name=f"T-orders Konsultatsiya {RUN}", price=60000)
+    s.add_all([st1, st2])
+    await s.flush()
+    # the facility's own price for the consultation (the nearest level wins over the base price)
+    s.add(ServiceUnitSetting(service_type_id=st2.id, unit_id=a.facility.id, is_enabled=True, price=50000))
+    tpl_item = ResultTemplate(owner_unit_id=a.region.id, name=f"T-orders item tpl {RUN}", status="active", version=2, service_type_ids=[st1.id], category_ids=[], scope="item", doc={"elements": []})
+    tpl_order = ResultTemplate(owner_unit_id=a.region.id, name=f"T-orders panel {RUN}", status="active", version=1, service_type_ids=[], category_ids=[], scope="order", doc={"elements": []})
+    s.add_all([tpl_item, tpl_order])
+    await s.flush()
+    return {
+        "a": {k: str(getattr(a, k).id) for k in ("country", "region", "district", "facility")},
+        "b": {k: str(getattr(b, k).id) for k in ("country", "region", "district", "facility")},
+        "tag": a.tag,
+        "login_a": emp_a.login,
+        "login_b": emp_b.login,
+        "login_region": admin_a.login,
+        "emp_a": str(emp_a.id),
+        "facility": str(a.facility.id),
+        "code": a.facility.code,
+        "patient": str(patient.id),
+        "cat": str(cat.id),
+        "st1": str(st1.id),
+        "st2": str(st2.id),
+        "tpl_item": str(tpl_item.id),
+        "tpl_order": str(tpl_order.id),
+    }
 
 
 @pytest.fixture(scope="module")
 def env() -> Iterator[dict[str, Any]]:
-    settings.workers_enabled = False
-    settings.telegram_enabled = False
-    settings.otp_dev_mode = True
-    data = _fixture_rows()
+    data = seed(_fixture_rows)
     mp = pytest.MonkeyPatch()
 
-    async def _snapshot(*_: Any, **__: Any) -> dict[str, Any]:
-        return dict(FAKE_SNAPSHOT)
+    async def _snapshot(*_: Any, doc_link: str | None = None, **__: Any) -> dict[str, Any]:
+        # like the real builder, the stub freezes the QR link (`{doc.link}`) into the render context
+        return {**FAKE_SNAPSHOT, "context": {"doc": {"link": doc_link}} if doc_link else {}}
 
     async def _pdf(*_: Any, **__: Any) -> bytes:
         return FAKE_PDF
 
     mp.setattr(templates_svc, "build_document_snapshot", _snapshot)
     mp.setattr(templates_svc, "render_snapshot_pdf", _pdf)
-    from app.main import app
-
-    with TestClient(app) as client:
-        tok_a = client.post(f"{API}/auth/staff/login", json={"login": data["login_a"], "password": "secret123"}).json()[
-            "accessToken"
-        ]
-        tok_b = client.post(f"{API}/auth/staff/login", json={"login": data["login_b"], "password": "secret123"}).json()[
-            "accessToken"
-        ]
+    with TestClient(app_instance()) as client:
         data["client"] = client
-        data["h_a"] = {"Authorization": f"Bearer {tok_a}"}
-        data["h_b"] = {"Authorization": f"Bearer {tok_b}"}
+        data["h_a"] = bearer(staff_token(client, data["login_a"], "secret123"))
+        data["h_b"] = bearer(staff_token(client, data["login_b"], "secret123"))
+        data["h_region"] = bearer(staff_token(client, data["login_region"], "secret123"))
         yield data
     mp.undo()
 
@@ -214,8 +118,8 @@ def env() -> Iterator[dict[str, Any]]:
 def _create(env: dict[str, Any], service_type_ids: list[str], note: str | None = None) -> dict[str, Any]:
     c: TestClient = env["client"]
     r = c.post(
-        f"{API}/companies/{env['co_a']}/orders",
-        json={"patientId": env["patient"], "branchId": env["branch"], "serviceTypeIds": service_type_ids, "note": note},
+        f"{API}/units/{env['facility']}/orders",
+        json={"patientId": env["patient"], "serviceTypeIds": service_type_ids, "note": note},
         headers=env["h_a"],
     )
     assert r.status_code == 201, r.text
@@ -227,7 +131,8 @@ def test_full_workflow_create_pay_worklist_values_submit_approve(env: dict[str, 
     h = env["h_a"]
     created = _create(env, [env["st1"], env["st2"], str(uuid.uuid4()), "not-a-uuid"], note="tez")
     order, items = created["order"], created["items"]
-    assert re.fullmatch(rf"{env['branch_code']}-\d{{6}}", order["number"])
+    assert re.fullmatch(rf"{env['code']}-\d{{6}}", order["number"])
+    assert order["unitId"] == env["facility"] and order["unitName"] == f"T-{env['tag']} SES"
     assert order["status"] == "open" and order["payment"] == "unpaid"
     assert (
         order["discountPercent"] == 10
@@ -256,22 +161,27 @@ def test_full_workflow_create_pay_worklist_values_submit_approve(env: dict[str, 
     assert it2["price"] == 50000 and it2["finalPrice"] == 45000 and it2["schemaId"] is None and it2["values"] == {}
     assert it1["categoryName"].startswith("T-orders Gematologiya")
 
-    # tenant isolation
-    assert c.get(f"{API}/orders/{order['id']}", headers=env["h_b"]).status_code == 404
-    assert c.get(f"{API}/items/{it1['id']}", headers=env["h_b"]).status_code == 404
+    # unit isolation: the facility's rows are 403 for staff of another facility; the region administrator sees them
+    assert c.get(f"{API}/orders/{order['id']}", headers=env["h_b"]).status_code == 403
+    assert c.get(f"{API}/items/{it1['id']}", headers=env["h_b"]).status_code == 403
+    assert c.get(f"{API}/orders/{order['id']}", headers=env["h_region"]).status_code == 200
     bundle = c.get(f"{API}/orders/{order['id']}", headers=h).json()
     assert set(bundle) == {"order", "items", "payments"} and len(bundle["items"]) == 2 and bundle["payments"] == []
 
     # list + search by number / patient name
-    lst = c.get(f"{API}/companies/{env['co_a']}/orders", params={"search": order["number"].lower()}, headers=h).json()
+    lst = c.get(f"{API}/units/{env['facility']}/orders", params={"search": order["number"].lower()}, headers=h).json()
     assert [o["id"] for o in lst["items"]] == [order["id"]] and lst["totalPages"] == 1
     lst = c.get(
-        f"{API}/companies/{env['co_a']}/orders", params={"search": "bemor", "patientId": env["patient"]}, headers=h
+        f"{API}/units/{env['facility']}/orders", params={"search": "bemor", "patientId": env["patient"]}, headers=h
     ).json()
     assert order["id"] in [o["id"] for o in lst["items"]]
+    # the region sees the cheque too (everything under it), narrowed by unitId; another facility matches nothing
+    region_list = c.get(f"{API}/units/{env['a']['region']}/orders", params={"search": order["number"]}, headers=env["h_region"]).json()
+    assert [o["id"] for o in region_list["items"]] == [order["id"]] and region_list["items"][0]["unitName"] == f"T-{env['tag']} SES"
+    assert c.get(f"{API}/units/{env['a']['region']}/orders", params={"unitId": env["b"]["facility"]}, headers=env["h_region"]).json()["total"] == 0
 
     # worklist: unpaid orders are not there yet
-    wl = c.get(f"{API}/companies/{env['co_a']}/worklist", params={"categoryIds": [env["cat"]]}, headers=h).json()
+    wl = c.get(f"{API}/units/{env['facility']}/worklist", params={"categoryIds": [env["cat"]]}, headers=h).json()
     assert it1["id"] not in [r["id"] for r in wl["items"]]
 
     # pay: validation, partial
@@ -298,7 +208,7 @@ def test_full_workflow_create_pay_worklist_values_submit_approve(env: dict[str, 
 
     # worklist now shows the schema item with join columns
     wl = c.get(
-        f"{API}/companies/{env['co_a']}/worklist",
+        f"{API}/units/{env['facility']}/worklist",
         params={"categoryIds": [env["cat"]], "status": ["pending", "entered"], "search": "umumiy"},
         headers=h,
     ).json()
@@ -356,8 +266,9 @@ def test_full_workflow_create_pay_worklist_values_submit_approve(env: dict[str, 
     assert [d["channel"] for d in doc["deliveries"]] == ["portal", "sms"]
     r = c.get(doc["pdfUrl"], headers=h)
     assert r.status_code == 200 and r.headers["content-type"].startswith("application/pdf") and r.content == FAKE_PDF
-    assert c.get(f"{API}/documents/{doc['id']}", headers=env["h_b"]).status_code == 404
-    docs = c.get(f"{API}/companies/{env['co_a']}/documents", params={"orderId": order["id"]}, headers=h).json()
+    assert c.get(f"{API}/documents/{doc['id']}", headers=env["h_b"]).status_code == 403
+    assert doc["unitId"] == env["facility"] and doc["unitName"] == f"T-{env['tag']} SES"
+    docs = c.get(f"{API}/units/{env['facility']}/documents", params={"orderId": order["id"]}, headers=h).json()
     assert [d["id"] for d in docs] == [doc["id"]]
     # order still in progress (it2 pending)
     o = c.get(f"{API}/orders/{order['id']}", headers=h).json()["order"]
@@ -376,13 +287,13 @@ def test_full_workflow_create_pay_worklist_values_submit_approve(env: dict[str, 
         )
         return d.public_token, d.pdf_file_id, [(m.channel, m.kind) for m in msgs]
 
-    token, pdf_file_id, kinds = _db(c, _q)
+    token, pdf_file_id, kinds = db(c, _q)
     assert token and pdf_file_id
     assert ("sms", "payment_receipt") in kinds and ("telegram", "payment_receipt") in kinds
     assert ("sms", "result_ready") in kinds and ("telegram", "result_ready") in kinds
     # public verification link (the QR value): authenticity info, unlimited scans
     info = c.get(f"{API}/d/{token}").json()
-    assert info["id"] == doc["id"] and info["title"] and info["companyName"].startswith("T-orders")
+    assert info["id"] == doc["id"] and info["title"] and info["orgName"] == f"T-{env['tag']} tumani"  # the organisation above the facility
     assert info["issuedAt"].endswith("Z")
     assert c.get(f"{API}/d/{token}").status_code == 200
     # the PDF itself is behind an SMS code sent to the document's phone (dev mode returns it)
@@ -392,7 +303,7 @@ def test_full_workflow_create_pay_worklist_values_submit_approve(env: dict[str, 
     assert req["challengeId"] and req["phoneMasked"] and req["devCode"]
     r = c.post(f"{API}/d/{token}/otp/verify", json={"challengeId": req["challengeId"], "code": req["devCode"]})
     assert r.status_code == 200 and r.content == FAKE_PDF
-    # the fixture company has no SMS account: outside dev mode the request must say so instead of "code sent"
+    # the fixture facility has no SMS account: outside dev mode the request must say so instead of "code sent"
     settings.otp_dev_mode = False
     try:
         r = c.post(f"{API}/d/{token}/otp/request")
@@ -400,20 +311,20 @@ def test_full_workflow_create_pay_worklist_values_submit_approve(env: dict[str, 
     finally:
         settings.otp_dev_mode = True
     assert c.get(f"{API}/d/{'x' * 32}").status_code == 404
-    # the clinic's code-free window: by default (0) a code is always needed and `open` refuses
+    # the organisation's code-free window (inherited down the tree): by default (0) a code is always needed and `open` refuses
     assert info["otpRequired"] is True and info["freeUntil"] is None
     r = c.post(f"{API}/d/{token}/open")
     assert r.status_code == 403 and r.json()["error"]["code"] == "otp_required", r.text
-    r = c.put(f"{API}/companies/{env['co_a']}", json={"documentFreeViewDays": 3}, headers=h)
-    assert r.status_code == 200 and r.json()["documentFreeViewDays"] == 3, r.text
+    r = c.put(f"{API}/units/{env['a']['region']}", json={"documentFreeViewDays": 3}, headers=env["h_region"])
+    assert r.status_code == 200 and r.json()["settings"]["documentFreeViewDays"] == 3, r.text
     try:
         free = c.get(f"{API}/d/{token}").json()
         assert free["otpRequired"] is False and free["freeUntil"].endswith("Z")
         r = c.post(f"{API}/d/{token}/open")
         assert r.status_code == 200 and r.content == FAKE_PDF and r.headers["cache-control"] == "no-store"
-        assert c.put(f"{API}/companies/{env['co_a']}", json={"documentFreeViewDays": 91}, headers=h).status_code == 422
+        assert c.put(f"{API}/units/{env['facility']}", json={"documentFreeViewDays": 91}, headers=h).status_code == 422
     finally:
-        assert c.put(f"{API}/companies/{env['co_a']}", json={"documentFreeViewDays": 0}, headers=h).status_code == 200
+        assert c.put(f"{API}/units/{env['a']['region']}", json={"documentFreeViewDays": 0}, headers=env["h_region"]).status_code == 200
     # back to 0: closed again at once
     assert c.get(f"{API}/d/{token}").json()["otpRequired"] is True
     assert c.post(f"{API}/d/{token}/open").status_code == 403
@@ -424,8 +335,8 @@ def test_full_workflow_create_pay_worklist_values_submit_approve(env: dict[str, 
     vtoken = qr_link.rsplit("/", 1)[-1]
     check = c.get(f"{API}/v/{vtoken}").json()
     assert check["id"] == doc["id"] and check["status"] == "valid" and check["revokedAt"] is None
-    assert check["title"] == doc["title"] and check["companyName"].startswith("T-orders") and check["orderNumber"] == order["number"]
-    assert check["doctorName"] == "T-orders Doctor" and check["branchName"] and check["issuedAt"].endswith("Z")
+    assert check["title"] == doc["title"] and check["orgName"] == f"T-{env['tag']} tumani" and check["orderNumber"] == order["number"]
+    assert check["doctorName"] == "T-orders Doctor" and check["unitName"] == f"T-{env['tag']} SES" and check["issuedAt"].endswith("Z")
     assert check["patient"].endswith("***") and "values" not in check and "phone" not in str(check).lower()
     assert c.get(f"{API}/d/{vtoken}").status_code == 404
     assert c.post(f"{API}/d/{vtoken}/otp/request").status_code == 404
@@ -516,33 +427,33 @@ def test_remove_cancel_and_closed(env: dict[str, Any]) -> None:
     assert r.status_code == 409 and r.json()["error"] == {"code": "closed", "message": "Chek yopilgan"}
     r = c.post(f"{API}/orders/{order['id']}/pay", json={"amount": 10, "method": "cash", "sendSms": False}, headers=h)
     assert r.status_code == 422 and r.json()["error"]["code"] == "empty"
-    # a service switched off in the cheque's branch: not listed for that branch, refused on a new cheque (409)
-    r = c.put(f"{API}/service-types/{env['st2']}", json={"disabledBranchIds": [env["branch"]]}, headers=h)
-    assert r.status_code == 200 and r.json()["disabledBranchIds"] == [env["branch"]], r.text
+    # a service switched off for the cheque's facility: flagged off in that facility's list, refused on a new cheque (409)
+    r = c.put(f"{API}/service-types/{env['st2']}", json={"disabledUnitIds": [env["facility"]]}, headers=h)
+    assert r.status_code == 200 and r.json()["disabledUnitIds"] == [env["facility"]], r.text
     try:
-        listed = {s["id"] for s in c.get(f"{API}/companies/{env['co_a']}/service-types", params={"branchId": env["branch"]}, headers=h).json()}
-        assert env["st2"] not in listed and env["st1"] in listed
-        r = c.post(
-            f"{API}/companies/{env['co_a']}/orders",
-            json={"patientId": env["patient"], "branchId": env["branch"], "serviceTypeIds": [env["st1"], env["st2"]]},
-            headers=h,
-        )
+        listed = {s["id"]: s for s in c.get(f"{API}/units/{env['facility']}/service-types", params={"unitId": env["facility"]}, headers=h).json()}
+        assert listed[env["st2"]]["available"] is False and listed[env["st1"]]["available"] is True and listed[env["st2"]]["effectivePrice"] == 50000
+        r = c.post(f"{API}/units/{env['facility']}/orders", json={"patientId": env["patient"], "serviceTypeIds": [env["st1"], env["st2"]]}, headers=h)
         assert r.status_code == 409 and r.json()["error"]["code"] == "not_in_branch", r.text
     finally:
-        assert c.put(f"{API}/service-types/{env['st2']}", json={"disabledBranchIds": []}, headers=h).status_code == 200
-    # bad patient/branch → 404
-    r = c.post(
-        f"{API}/companies/{env['co_a']}/orders",
-        json={"patientId": env["patient"], "branchId": str(uuid.uuid4()), "serviceTypeIds": []},
-        headers=h,
-    )
-    assert r.status_code == 404 and r.json()["error"]["message"] == "Bemor yoki filial topilmadi"
-    # cross-tenant create → 403
-    r = c.post(
-        f"{API}/companies/{env['co_a']}/orders",
-        json={"patientId": env["patient"], "branchId": env["branch"], "serviceTypeIds": []},
-        headers=env["h_b"],
-    )
+        assert c.put(f"{API}/service-types/{env['st2']}", json={"disabledUnitIds": []}, headers=h).status_code == 200
+    # bad patient / facility → 404
+    r = c.post(f"{API}/units/{env['facility']}/orders", json={"patientId": env["patient"], "unitId": str(uuid.uuid4()), "serviceTypeIds": []}, headers=h)
+    assert r.status_code == 404 and r.json()["error"]["message"] == "Muassasa topilmadi"
+    r = c.post(f"{API}/units/{env['facility']}/orders", json={"patientId": str(uuid.uuid4()), "serviceTypeIds": []}, headers=h)
+    assert r.status_code == 404 and r.json()["error"]["message"] == "Bemor topilmadi"
+    # from a higher unit the facility must be named; another facility of the tree is fine, the other tree is not
+    r = c.post(f"{API}/units/{env['a']['region']}/orders", json={"patientId": env["patient"], "serviceTypeIds": []}, headers=env["h_region"])
+    assert r.status_code == 422 and r.json()["error"]["code"] == "facility_required"
+    r = c.post(f"{API}/units/{env['a']['region']}/orders", json={"patientId": env["patient"], "unitId": env["facility"], "serviceTypeIds": [env["st2"]]}, headers=env["h_region"])
+    assert r.status_code == 201 and r.json()["order"]["unitId"] == env["facility"] and r.json()["items"][0]["price"] == 50000, r.text
+    r = c.post(f"{API}/units/{env['a']['region']}/orders", json={"patientId": env["patient"], "unitId": env["b"]["facility"], "serviceTypeIds": []}, headers=env["h_region"])
+    assert r.status_code == 404 and r.json()["error"]["message"] == "Muassasa topilmadi"
+    # a facility that cannot see the service's owner: not offered there (409)
+    r = c.post(f"{API}/units/{env['b']['facility']}/orders", json={"patientId": env["patient"], "serviceTypeIds": [env["st1"]]}, headers=env["h_b"])
+    assert r.status_code == 404  # the patient is not seen at facility B
+    # staff of another facility → 403
+    r = c.post(f"{API}/units/{env['facility']}/orders", json={"patientId": env["patient"], "serviceTypeIds": []}, headers=env["h_b"])
     assert r.status_code == 403
 
 
@@ -584,5 +495,5 @@ def test_order_scope_approval(env: dict[str, Any]) -> None:
     # completed → closed for new items
     r = c.post(f"{API}/orders/{order['id']}/items", json={"serviceTypeIds": [env["st2"]]}, headers=h)
     assert r.status_code == 409 and r.json()["error"]["code"] == "closed"
-    docs = c.get(f"{API}/companies/{env['co_a']}/documents", params={"patientId": env["patient"]}, headers=h).json()
+    docs = c.get(f"{API}/units/{env['facility']}/documents", params={"patientId": env["patient"]}, headers=h).json()
     assert docs[0]["id"] == out["document"]["id"]

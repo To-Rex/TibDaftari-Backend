@@ -1,54 +1,83 @@
-"""Unit tests for the seed CLI helpers (no DB round trips)."""
+"""The operations CLI: argument parsing (pure) and the `create-superadmin` / `create-country-root` /
+`seed-reference` commands against the test database."""
 
 from __future__ import annotations
 
 import uuid
 
 import pytest
-from app.cli import CliError, IdMap, _order_seq, build_parser, remap_template_doc
+from app.cli import CliError, build_parser, create_country_root, create_superadmin, district_kind, seed_reference
+from app.infrastructure.db.models import Country, Employee, OrgUnit, Role
+from app.infrastructure.db.session import SessionLocal, session_scope
+from sqlalchemy import select
+
+from tests.helpers import COUNTRY_ID, COUNTRY_UNIT_ID, run_async
+
+SFX = uuid.uuid4().hex[:8]
 
 
-def test_idmap_allocates_once_and_resolves() -> None:
-    ids = IdMap()
-    first = ids.alloc("b1")
-    assert ids.alloc("b1") == first
-    assert ids.get("b1") == first
-    assert ids.many(["b1"]) == [first]
-    assert ids.opt(None) is None
-    assert "b2" not in ids
+def test_parser_knows_every_command() -> None:
+    args = build_parser().parse_args(["seed-reference"])
+    assert args.command == "seed-reference"
+    args = build_parser().parse_args(["create-superadmin", "--login", "root", "--password", "pw", "--name", "Root"])
+    assert (args.command, args.login, args.password, args.name) == ("create-superadmin", "root", "pw", "Root")
+    args = build_parser().parse_args(["create-country-root", "--country", "uz", "--name", "O‘zbekiston Respublikasi", "--short-name", "O‘zbekiston"])
+    assert (args.command, args.country, args.short_name, args.code) == ("create-country-root", "uz", "O‘zbekiston", None)
+    args = build_parser().parse_args(["set-password", "--login", "a", "--password", "b"])
+    assert args.command == "set-password"
+    assert build_parser().parse_args(["ensure-partitions", "--months", "5"]).months == 5
+    with pytest.raises(SystemExit):  # the demo seed is gone
+        build_parser().parse_args(["seed-demo"])
+
+
+def test_district_kind_is_explicit_or_guessed_from_the_name() -> None:
+    assert district_kind({"name": "Urganch shahri"}) == "city"
+    assert district_kind({"name": "Bog‘ot tumani"}) == "district"
+    assert district_kind({"name": "Urganch shahri", "kind": "district"}) == "district"
+    assert district_kind({"name": "X", "kind": "weird"}) == "district"
+
+
+def test_create_superadmin_uses_the_system_role_and_refuses_a_taken_login() -> None:
+    login = f"t-cli-super-{SFX}"
+
+    async def flow() -> tuple[Employee, Role]:
+        emp_id = await create_superadmin(login=login, password="secret-1", full_name="T-cli Super")
+        with pytest.raises(CliError):
+            await create_superadmin(login=login.upper(), password="x", full_name="T-cli Dup")
+        async with session_scope() as s:
+            emp = await s.get(Employee, uuid.UUID(emp_id))
+            role = await s.get(Role, emp.role_id)
+            return emp, role
+
+    emp, role = run_async(flow)
+    assert emp.is_super_admin is True and emp.unit_id is None and emp.login == login
+    assert role.key == "superadmin" and role.scope_unit_id is None and role.is_system is True
+
+
+def test_create_country_root_is_idempotent_for_a_seeded_country() -> None:
+    async def flow() -> tuple[tuple[str, bool], Country]:
+        out = await create_country_root(country_code="uz", name="O‘zbekiston Respublikasi")
+        async with session_scope() as s:
+            return out, await s.get(Country, COUNTRY_ID)
+
+    (unit_id, created), country = run_async(flow)
+    assert created is False and uuid.UUID(unit_id) == COUNTRY_UNIT_ID
+    assert country.is_enabled is True
     with pytest.raises(CliError):
-        ids.get("b2")
+        run_async(create_country_root(country_code="ZZ", name="Nowhere"))
 
 
-def test_idmap_alias_and_roundtrip() -> None:
-    real = uuid.uuid4()
-    ids = IdMap()
-    ids.alias("rg12", real)
-    assert ids.get("rg12") == real
-    restored = IdMap(ids.as_dict())
-    assert restored.get("rg12") == real
+def test_seed_reference_upserts_without_duplicating() -> None:
+    """Re-running the reference seed on a seeded database changes nothing (rolled back here anyway)."""
 
+    async def flow() -> tuple[tuple[int, int, int], int, int]:
+        async with SessionLocal() as s:
+            before = (await s.execute(select(OrgUnit.id).where(OrgUnit.level == "country"))).scalars().all()
+            counts = await seed_reference(s)
+            n_countries = (await s.execute(select(Country.id))).scalars().all()
+            await s.rollback()
+        return counts, len(n_countries), len(before)
 
-def test_remap_template_doc_rewrites_only_known_assets() -> None:
-    ids = IdMap()
-    logo = ids.alloc("as_logo")
-    doc = {
-        "paper": "A4",
-        "elements": [
-            {"id": "el_0", "type": "image", "assetId": "as_logo"},
-            {"id": "el_1", "type": "image", "assetId": "data:image/png;base64,AAAA"},
-            {"id": "el_2", "type": "text", "text": "{company.name}"},
-        ],
-    }
-    out = remap_template_doc(doc, ids)
-    assert out["elements"][0]["assetId"] == str(logo)
-    assert out["elements"][1]["assetId"] == "data:image/png;base64,AAAA"
-    assert out["elements"][2] == {"id": "el_2", "type": "text", "text": "{company.name}"}
-    assert doc["elements"][0]["assetId"] == "as_logo"  # input untouched
-
-
-def test_order_seq_and_parser() -> None:
-    assert _order_seq("UR-000813") == 813
-    assert _order_seq("weird") == 0
-    args = build_parser().parse_args(["seed-demo", "--with-transactions"])
-    assert args.command == "seed-demo" and args.with_transactions is True
+    counts, n_countries, n_roots = run_async(flow)
+    assert counts[0] >= 1 and counts[1] >= 14 and counts[2] >= 100
+    assert n_countries == counts[0] and n_roots >= 1

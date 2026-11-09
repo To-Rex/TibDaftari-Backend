@@ -1,18 +1,15 @@
-"""Result-ready SMS: the {link} placeholder and the public link (pure — no database)."""
+"""Result-ready SMS: the {link} placeholder, the public links and the SMS account rules (pure — no database)."""
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from app.api.deps import RequestMeta
 from app.core.config import settings
-from app.modules.messaging.service import (
-    render_text,
-    result_ready_order_text,
-    result_ready_text,
-    sms_branch_for,
-)
+from app.infrastructure.db.models import MessagingAccount
+from app.modules.messaging.service import account_to_sms, render_text
 from app.modules.orders.service import (
     document_qr_link,
     mask_name,
@@ -22,24 +19,37 @@ from app.modules.orders.service import (
     public_result_link,
     public_verify_link_for_token,
 )
-from app.modules.tenant.schemas import DOCUMENT_FREE_VIEW_MAX_DAYS, document_free_view_days
+from app.modules.units.schemas import DOCUMENT_FREE_VIEW_MAX_DAYS, document_free_view_days
 
-COMPANY = SimpleNamespace(name="Temo Med", settings={})
+ORG = "Temo Med"
 
 
 def test_default_texts_carry_the_link() -> None:
-    assert result_ready_text(COMPANY, "Qon tahlili", link="https://temo.uz/d/abc") == "Qon tahlili natijasi tayyor: https://temo.uz/d/abc Temo Med"
-    assert result_ready_order_text(COMPANY, "Virusologiya", 3, link="https://temo.uz/d/x") == "Virusologiya: 3 ta tahlil natijasi tayyor: https://temo.uz/d/x Temo Med"
+    assert render_text({}, "result_ready", org=ORG, service="Qon tahlili", link="https://temo.uz/d/abc") == "Qon tahlili natijasi tayyor: https://temo.uz/d/abc Temo Med"
+    assert render_text({}, "result_ready_order", org=ORG, service="Virusologiya", count=3, link="https://temo.uz/d/x") == "Virusologiya: 3 ta tahlil natijasi tayyor: https://temo.uz/d/x Temo Med"
     # no link: no double space left behind
-    assert "  " not in result_ready_text(COMPANY, "Qon tahlili")
+    assert "  " not in render_text({}, "result_ready", org=ORG, service="Qon tahlili")
 
 
-def test_company_override_can_use_the_link() -> None:
-    company = SimpleNamespace(name="Temo Med", settings={"smsTemplates": {"result_ready": "Hurmatli {patient}! Natija: {link}"}})
-    assert render_text(company, "result_ready", patient="Ali", link="https://t.uz/d/1") == "Hurmatli Ali! Natija: https://t.uz/d/1"
+def test_unit_override_can_use_the_link() -> None:
+    texts = {"result_ready": "Hurmatli {patient}! Natija: {link}"}
+    assert render_text(texts, "result_ready", patient="Ali", link="https://t.uz/d/1") == "Hurmatli Ali! Natija: https://t.uz/d/1"
     # an override without {link} stays exactly as written
-    company2 = SimpleNamespace(name="Temo Med", settings={"smsTemplates": {"result_ready": "{service} tayyor."}})
-    assert render_text(company2, "result_ready", service="X", link="https://t.uz/d/1") == "X tayyor."
+    assert render_text({"result_ready": "{service} tayyor."}, "result_ready", service="X", link="https://t.uz/d/1") == "X tayyor."
+    # a customised result text also serves the order-scope approval
+    assert render_text({"result_ready": "{service}: {link}"}, "result_ready_order", service="Panel", count=2, link="L") == "Panel: L"
+
+
+def test_org_and_unit_placeholders_and_their_aliases() -> None:
+    texts = {"payment_receipt": "Chek {order} — {unit}, {org}"}
+    assert render_text(texts, "payment_receipt", order="UR-7", org="Xorazm SES", unit="Bog‘ot SES") == "Chek UR-7 — Bog‘ot SES, Xorazm SES"
+    # texts written before the tree keep working: {company} = {org}, {branch} = {unit}
+    old = {"payment_receipt": "Chek {order} — {branch}, {company}"}
+    assert render_text(old, "payment_receipt", order="UR-7", org="Xorazm SES", unit="Bog‘ot SES") == "Chek UR-7 — Bog‘ot SES, Xorazm SES"
+    # and callers may still pass the old names
+    assert render_text(texts, "payment_receipt", order="UR-7", company="Xorazm SES", branch="Bog‘ot SES") == "Chek UR-7 — Bog‘ot SES, Xorazm SES"
+    # without a unit the placeholder is just dropped (no double space left behind)
+    assert render_text({"result_ready": "{service} tayyor {unit} {link}"}, "result_ready", service="Qon", link="L") == "Qon tayyor L"
 
 
 def test_public_link_uses_the_staff_web_app() -> None:
@@ -60,24 +70,23 @@ def test_qr_gets_its_own_verification_link() -> None:
     assert document_qr_link(SimpleNamespace(snapshot={"context": {"doc": None}})) is None
 
 
-def test_public_link_code_goes_out_through_the_first_branch_that_can_send() -> None:
-    company = SimpleNamespace(sms_provider="xabarchi", sms_api_key_enc="co-key", sms_default_priority="transactional")
-    no_key_company = SimpleNamespace(sms_provider="none", sms_api_key_enc=None, sms_default_priority="transactional")
-    shared = SimpleNamespace(sms_provider=None, sms_api_key_enc=None, sms_default_priority=None)  # on the company's key
-    own = SimpleNamespace(sms_provider="xabarchi", sms_api_key_enc="br-key", sms_default_priority=None)  # its own key
-    off = SimpleNamespace(sms_provider="none", sms_api_key_enc=None, sms_default_priority=None)  # switched SMS off
-    # the cheque's branch sends; one that switched SMS off is skipped in favour of the patient's branch
-    assert sms_branch_for(company, shared, own) == (shared, True)
-    assert sms_branch_for(company, off, own) == (own, True)
-    assert sms_branch_for(no_key_company, shared, own) == (own, True)
-    # nobody can send → the caller must say so (never a silent "code sent")
-    assert sms_branch_for(company, off) == (None, False)
-    assert sms_branch_for(company, off, off) == (None, False)
-    assert sms_branch_for(no_key_company, shared) == (None, False)
-    # no branch at all (missing rows) → the company's key decides
-    assert sms_branch_for(company) == (None, True)
-    assert sms_branch_for(company, None, None) == (None, True)
-    assert sms_branch_for(no_key_company, None) == (None, False)
+def _account(provider: str = "xabarchi", key: str | None = "enc-key", *, active: bool = True, deleted: bool = False, priority: str = "transactional") -> MessagingAccount:
+    now = datetime.now(UTC)
+    return MessagingAccount(id=uuid.uuid4(), unit_id=uuid.uuid4(), channel="sms", provider=provider, api_key_enc=key, default_priority=priority, is_active=active, created_at=now, updated_at=now, deleted_at=now if deleted else None)
+
+
+def test_only_a_live_xabarchi_account_with_a_key_can_send() -> None:
+    """The nearest account on the path decides: `provider='none'` switches SMS off for the subtree — the caller must
+    then say so (never a silent "code sent")."""
+    acc = _account(priority="urgent")
+    sms = account_to_sms(acc)
+    assert sms is not None and sms.key_enc == "enc-key" and sms.priority == "urgent" and sms.unit_id == acc.unit_id and sms.account_id == acc.id
+    assert account_to_sms(None) is None
+    assert account_to_sms(_account("none", None)) is None
+    assert account_to_sms(_account(key=None)) is None
+    assert account_to_sms(_account(active=False)) is None
+    assert account_to_sms(_account(deleted=True)) is None
+    assert account_to_sms(_account(priority="")).priority == "transactional"  # type: ignore[union-attr]
 
 
 def test_mask_name_keeps_only_initials() -> None:
