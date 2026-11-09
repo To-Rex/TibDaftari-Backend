@@ -87,6 +87,7 @@ async def staff_session_out(session: AsyncSession, p: StaffPrincipal, token: str
         facility_id=str(p.home_facility_id) if p.home_facility_id else None,
         is_super_admin=p.is_super_admin,
         role_key=p.role_key,
+        role_id=str(p.role.id) if p.role else None,
         full_name=p.employee.full_name,
         permissions=p.permissions,
         access_token=token,

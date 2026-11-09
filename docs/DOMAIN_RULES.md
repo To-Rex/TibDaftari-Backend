@@ -116,7 +116,12 @@ verbatim in the UI.
   (`PROTECTED_ROLE_KEYS`; 403 "Ruxsat yo‘q" for a unit administrator, also on `/overrides`); its key is reserved
   (422 `reserved`). A staff reset keeps installer accounts like it keeps superadmins. Installers never get
   `platform.*` (no other countries, no country roots, no Davlatlar tab); the session says `roleKey = "installer"`,
-  `isSuperAdmin = false`. A role says WHAT; the employee's
+  `isSuperAdmin = false`.
+* **No self-escalation** (2026-11-10): an employee edits their own name, contacts, login and password, never their own
+  `roleId`, `overrides` (also `PUT /employees/{id}/overrides`), `unitId` / `unitIds`, `categoryIds`, `status` or the
+  superadmin flag → 403 `self_edit` "O‘z rolingiz, ruxsatlaringiz va hududingizni o‘zingiz o‘zgartira olmaysiz"; the
+  role one holds cannot be edited or deleted by its holder → 403 `own_role`. Superadmins are exempt. The session
+  carries `roleId` so the UI can lock the matching controls. A role says WHAT; the employee's
   unit says WHERE — the same `rahbar` attached to a region node is a viloyat rahbari, on a facility a muassasa
   rahbari. Unit-scoped roles (`scopeUnitId` = a unit; usable in its subtree) are created under a unit (§3).
 * **StaffSession** `{actor:'staff', employeeId, unitId, unitIds, unit {id, level, name, code, countryId, path}, facilityId, isSuperAdmin, roleKey, fullName, permissions[], accessToken, expiresAt}`; `unitId` = the home unit (any level; null for a superadmin, who picks any unit of the tree); `unitIds` = every scope root (home + extra units — the UI switches among these subtrees); `facilityId` = the home unit when it is a facility (where this employee's cheques are written); `isSuperAdmin = employee.is_super_admin` (**FIX**: not derived from a client-editable role key); `roleKey = role.key`; staff token TTL 12h (fixed - the JWT `exp` is immutable and the SPA keeps the login token; `staffMe` only records `lastSeenAt`).

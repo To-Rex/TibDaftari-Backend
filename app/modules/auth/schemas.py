@@ -39,6 +39,8 @@ class StaffSessionOut(CamelModel):
     facility_id: str | None = None
     is_super_admin: bool
     role_key: str
+    #: the held role (None for an employee without one) — the UI locks the editing of one's own role
+    role_id: str | None = None
     full_name: str
     permissions: list[str]
     access_token: str

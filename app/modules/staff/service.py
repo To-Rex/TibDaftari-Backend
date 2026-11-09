@@ -180,11 +180,32 @@ async def _guard_protected_target(session: AsyncSession, emp: Employee, staff: S
     """Superadmins and installers (accounts a superadmin handed out) are edited, re-scoped, reset or removed by
     superadmins only — a unit administrator must not widen or hijack them."""
     _guard_super_admin_target(emp, staff)
-    if staff.is_super_admin or not emp.role_id:
-        return
+    if staff.is_super_admin or not emp.role_id or emp.id == staff.id:
+        return  # one's own account: `_guard_self_edit` limits the fields instead
     role = await session.get(Role, emp.role_id)
     if role is not None and role.scope_unit_id is None and role.key in PROTECTED_ROLE_KEYS:
         raise ForbiddenError("Ruxsat yo‘q")
+
+
+SELF_EDIT_ERROR = "O‘z rolingiz, ruxsatlaringiz va hududingizni o‘zingiz o‘zgartira olmaysiz"
+#: fields of one's own account that only a superadmin may change (profile and password stay editable)
+SELF_LOCKED_FIELDS = frozenset({"role_id", "overrides", "unit_id", "unit_ids", "category_ids", "status", "is_super_admin"})
+
+
+def _guard_self_edit(emp: Employee, staff: StaffPrincipal, fields: Iterable[str]) -> None:
+    """An administrator or installer edits their own name, contacts and password — never their role, overrides,
+    units, categories or status (no self-escalation); a superadmin is exempt."""
+    if emp.id != staff.id or staff.is_super_admin:
+        return
+    locked = sorted(SELF_LOCKED_FIELDS.intersection(fields))
+    if locked:
+        raise ForbiddenError(SELF_EDIT_ERROR, code="self_edit", details={"fields": locked})
+
+
+def _guard_own_role(role: Role, staff: StaffPrincipal) -> None:
+    """The role one holds is edited or removed by someone else (or a superadmin) — never by its holder."""
+    if staff.role is not None and staff.role.id == role.id and not staff.is_super_admin:
+        raise ForbiddenError("O‘z rolingizni o‘zingiz tahrirlay olmaysiz", code="own_role")
 
 
 def _is_installer_role(role: Role) -> bool:
@@ -354,13 +375,15 @@ async def create_employee(session: AsyncSession, scope: UnitScope, body: Employe
 
 async def update_employee(session: AsyncSession, employee_id: uuid.UUID, body: EmployeeUpdateIn, staff: StaffPrincipal, meta: RequestMeta) -> EmployeeOut:
     """Partial merge; `unitIds` / `categoryIds` / overrides replaced wholesale; moving `unitId` needs the new unit
-    inside the caller's scope; password change or deactivation revokes sessions. A superadmin loses unit and extras."""
+    inside the caller's scope; password change or deactivation revokes sessions. A superadmin loses unit and extras.
+    One's own role / overrides / units / categories / status: 403 `self_edit` (superadmins excepted)."""
     emp = await get_employee_or_404(session, employee_id, staff)
     await _guard_protected_target(session, emp, staff)
+    data = body.model_dump(exclude_unset=True)
+    _guard_self_edit(emp, staff, data)
     extra_before = (await repo.extra_unit_ids(session, [emp.id])).get(emp.id, [])
     before = _employee_snapshot(emp, extra_before)
     old_unit_id = emp.unit_id
-    data = body.model_dump(exclude_unset=True)
     revoke = False
     if data.get("login"):
         login = str(data["login"]).strip()
@@ -455,6 +478,7 @@ async def set_overrides(session: AsyncSession, employee_id: uuid.UUID, overrides
     """Replace `{allow, deny}` wholesale (keys must be catalogue permissions → else 422)."""
     emp = await get_employee_or_404(session, employee_id, staff)
     await _guard_protected_target(session, emp, staff)
+    _guard_self_edit(emp, staff, ("overrides",))
     before = {"overrides": emp.overrides}
     emp.overrides = _validate_overrides(overrides, staff)
     await session.flush()
@@ -552,6 +576,7 @@ async def update_role(session: AsyncSession, role_id: uuid.UUID, body: RoleUpdat
     """Partial merge; system roles: only name/description/permissions (superadmin only); unit roles: callers who see the unit."""
     role = await get_role_or_404(session, role_id, staff)
     _guard_role_write(role, staff)
+    _guard_own_role(role, staff)
     before = _role_snapshot(role)
     data = body.model_dump(exclude_unset=True)
     if data.get("key") and not role.is_system:
@@ -577,6 +602,7 @@ async def delete_role(session: AsyncSession, role_id: uuid.UUID, staff: StaffPri
     """Soft delete; 409 in_use when assigned to employees or when it is a system role."""
     role = await get_role_or_404(session, role_id, staff)
     _guard_role_write(role, staff)
+    _guard_own_role(role, staff)
     if role.is_system or role.scope_unit_id is None:
         raise ConflictError("Tizim rolini o‘chirib bo‘lmaydi", code="in_use")
     if await repo.role_in_use(session, role.id):
