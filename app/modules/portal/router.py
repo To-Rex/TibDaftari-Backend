@@ -13,12 +13,12 @@ from app.modules.portal.schemas import PortalDocumentOut, PortalOrderOut, Portal
 router = APIRouter()
 
 
-@router.get("/overview", response_model=PortalOverviewOut, summary="Patient card, orders (all clinics), documents, clinics")
+@router.get("/overview", response_model=PortalOverviewOut, summary="Patient card, orders (every facility), documents, organisations and facilities")
 async def overview(patient: Patient, session: DbSession) -> PortalOverviewOut:
     return await service.overview(session, patient)
 
 
-@router.get("/orders/{order_id}", response_model=PortalOrderOut, summary="Owned order with items and documents")
+@router.get("/orders/{order_id}", response_model=PortalOrderOut, summary="Owned order with items, documents and its place (org + facility)")
 async def order(order_id: uuid.UUID, patient: Patient, session: DbSession) -> PortalOrderOut:
     return await service.order(session, order_id, patient)
 

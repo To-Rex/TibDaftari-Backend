@@ -1,10 +1,11 @@
 """Declarative base + reusable column mixins.
 
-Conventions (see ARCHITECTURE.md):
-* UUIDv7 primary keys generated in the app (`app.core.ids.uuid7`).
-* Every business table is soft-deleted (`deleted_at`/`deleted_by`) — rows are
-  never physically removed. `alive(Model)` gives the standard filter.
-* Tenant tables carry `company_id`; services always scope by it.
+Conventions (see ARCHITECTURE.md and docs/V2_PORT.md):
+* UUIDv7 primary keys generated in the app (`app.core.ids.uuid7`); the DB also defaults to `uuidv7()`.
+* Every business table is soft-deleted (`deleted_at`/`deleted_by`) — rows are never physically removed.
+  `alive(Model)` gives the standard filter.
+* There is no tenant column any more. Operational rows carry `unit_id` (the facility that did the work),
+  catalogue rows carry `owner_unit_id` (the level that defines them); both point at `org_units`.
 * Timestamps are timezone-aware UTC.
 """
 
@@ -14,7 +15,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, MetaData, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, MetaData, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -58,8 +59,16 @@ class SoftDeleteMixin:
         return self.deleted_at is not None
 
 
-class TenantMixin:
-    company_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+class UnitMixin:
+    """Operational rows: the facility (`org_units.level = 'facility'`) the row belongs to."""
+
+    unit_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("org_units.id"), nullable=False, index=True)
+
+
+class OwnerMixin:
+    """Catalogue rows: the unit (any level) that defines the row; visible to its whole subtree."""
+
+    owner_unit_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("org_units.id"), nullable=False, index=True)
 
 
 class Money:

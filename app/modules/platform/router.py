@@ -1,4 +1,5 @@
-"""Platform endpoints (superadmin): activity across every clinic by territory. HTTP only."""
+"""Platform endpoints: activity across the organisation tree by territory. HTTP only — access is decided in the
+service (platform permission, or a `unitId` inside the caller's scope)."""
 
 from __future__ import annotations
 
@@ -13,7 +14,6 @@ from app.modules.platform.schemas import RegionStatsOut, RegionStatsQuery
 router = APIRouter()
 
 
-@router.get("/platform/regions", response_model=RegionStatsOut, summary="Activity by country / region / district / clinic (numbers only)")
+@router.get("/platform/regions", response_model=RegionStatsOut, summary="Activity by country / region / district / facility (numbers only)")
 async def region_stats(q: Annotated[RegionStatsQuery, Query()], staff: Staff, session: DbSession) -> RegionStatsOut:
-    staff.require("platform.company.manage")
-    return await service.region_stats(session, q)
+    return await service.region_stats(session, q, staff)

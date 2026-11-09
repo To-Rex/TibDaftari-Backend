@@ -9,17 +9,17 @@ from pydantic import Field
 
 from app.core.schemas import CamelModel, PageQuery
 
-BreakdownBy = Literal["category", "service", "branch", "employee"]
+BreakdownBy = Literal["category", "service", "unit", "employee"]
 
 _DAY = r"^\d{4}-\d{2}-\d{2}$"
 
 
 class RangeQuery(CamelModel):
-    """Inclusive calendar-day range evaluated in Asia/Tashkent; optional branch filter."""
+    """Inclusive calendar-day range evaluated in Asia/Tashkent; optional `unitId` narrowing to a sub-unit of the path unit."""
 
     date_from: str = Field(pattern=_DAY)
     date_to: str = Field(pattern=_DAY)
-    branch_id: str | None = None
+    unit_id: str | None = None
 
 
 class BreakdownQuery(RangeQuery):

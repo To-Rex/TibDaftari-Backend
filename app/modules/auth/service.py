@@ -31,13 +31,14 @@ from app.core.security import (
     verify_password,
 )
 from app.core.textutil import is_valid_uz_phone, norm_phone
-from app.infrastructure.db.models import Company, Employee, OtpChallenge, Patient
+from app.infrastructure.db.models import Employee, OtpChallenge, Patient
 from app.infrastructure.db.models import Session as SessionModel
 from app.infrastructure.redis import rate_limit
 from app.infrastructure.redis.client import get_redis
-from app.modules.auth.schemas import PatientOtpRequestOut, PatientSessionOut, StaffSessionOut
+from app.modules.auth.schemas import PatientOtpRequestOut, PatientSessionOut, SessionUnitOut, StaffSessionOut
 from app.modules.messaging import service as messaging
 from app.modules.patients.portal_login import login_owner, norm_login, revoke_login_sessions
+from app.modules.units import service as units
 
 log = logging.getLogger("auth")
 
@@ -45,10 +46,10 @@ log = logging.getLogger("auth")
 # ----------------------------------------------------------------------------- sessions
 
 
-async def _open_session(session: AsyncSession, *, actor: str, subject_id: uuid.UUID, company_id: uuid.UUID | None, ttl: timedelta, meta: RequestMeta | None, method: str | None = None) -> tuple[str, datetime]:
+async def _open_session(session: AsyncSession, *, actor: str, subject_id: uuid.UUID, unit_id: uuid.UUID | None, ttl: timedelta, meta: RequestMeta | None, method: str | None = None) -> tuple[str, datetime]:
     """`method` (patients): otp | login — a login token carries `via=login`, which confines it to its own patient."""
     token, jti, exp = issue_token(subject_id, actor, ttl, via="login" if method == "login" else None)  # type: ignore[arg-type]
-    session.add(SessionModel(id=jti, actor=actor, method=method, subject_id=subject_id, company_id=company_id, expires_at=exp, ip=meta.ip if meta else None, user_agent=meta.user_agent if meta else None))
+    session.add(SessionModel(id=jti, actor=actor, method=method, subject_id=subject_id, unit_id=unit_id, expires_at=exp, ip=meta.ip if meta else None, user_agent=meta.user_agent if meta else None))
     try:
         await get_redis().set(SESSION_KEY.format(jti=jti), "1", ex=int(ttl.total_seconds()))
     except Exception:  # pragma: no cover
@@ -73,12 +74,17 @@ async def revoke_all_for_subject(session: AsyncSession, subject_id: uuid.UUID) -
 # ----------------------------------------------------------------------------- staff
 
 
-def staff_session_out(p: StaffPrincipal, token: str, exp: datetime, branch_id: uuid.UUID | None) -> StaffSessionOut:
+async def staff_session_out(session: AsyncSession, p: StaffPrincipal, token: str, exp: datetime) -> StaffSessionOut:
+    home = p.home_unit
+    unit_out = None
+    if home is not None:
+        unit_out = SessionUnitOut(id=str(home.id), level=home.level, name=home.name, code=home.code, country_id=str(home.country_id), path=await units.unit_path(session, home.id))  # type: ignore[arg-type]
     return StaffSessionOut(
         employee_id=str(p.employee.id),
-        company_id=str(p.employee.company_id),
-        branch_id=str(branch_id) if branch_id else None,
-        branch_ids=[str(b) for b in (p.employee.branch_ids or [])],
+        unit_id=str(p.employee.unit_id) if p.employee.unit_id else None,
+        unit_ids=[str(u) for u in p.unit_ids],
+        unit=unit_out,
+        facility_id=str(p.home_facility_id) if p.home_facility_id else None,
         is_super_admin=p.is_super_admin,
         role_key=p.role_key,
         full_name=p.employee.full_name,
@@ -108,7 +114,7 @@ async def staff_login(session: AsyncSession, login: str, password: str, meta: Re
                 emp.locked_until = now + timedelta(minutes=settings.login_lock_minutes)
                 emp.failed_logins = 0
                 log.warning("employee %s locked after repeated failures", emp.id)
-        await audit(session, actor_type="staff", actor_id=emp.id if emp else None, company_id=emp.company_id if emp else None, action="login_failed", entity="employee", entity_id=emp.id if emp else login_norm, ip=meta.ip, request_id=meta.request_id)
+        await audit(session, actor_type="staff", actor_id=emp.id if emp else None, unit_id=emp.unit_id if emp else None, action="login_failed", entity="employee", entity_id=emp.id if emp else login_norm, ip=meta.ip, request_id=meta.request_id)
         # The request session is rolled back on the exception below - persist the
         # lockout counter and the audit row first, otherwise the lockout is dead.
         await session.commit()
@@ -121,10 +127,10 @@ async def staff_login(session: AsyncSession, login: str, password: str, meta: Re
     emp.locked_until = None
     emp.last_login_at = now
     ttl = timedelta(hours=settings.staff_token_ttl_hours)
-    token, exp = await _open_session(session, actor="staff", subject_id=emp.id, company_id=emp.company_id, ttl=ttl, meta=meta)
+    token, exp = await _open_session(session, actor="staff", subject_id=emp.id, unit_id=emp.unit_id, ttl=ttl, meta=meta)
     principal = await build_staff_principal(session, emp.id, "", exp)
-    await audit(session, actor_type="staff", actor_id=emp.id, company_id=emp.company_id, action="login", entity="employee", entity_id=emp.id, ip=meta.ip, request_id=meta.request_id)
-    return staff_session_out(principal, token, exp, principal.branch_id)
+    await audit(session, actor_type="staff", actor_id=emp.id, unit_id=emp.unit_id, action="login", entity="employee", entity_id=emp.id, ip=meta.ip, request_id=meta.request_id)
+    return await staff_session_out(session, principal, token, exp)
 
 
 async def staff_me(session: AsyncSession, principal: StaffPrincipal, token: str) -> StaffSessionOut:
@@ -134,7 +140,7 @@ async def staff_me(session: AsyncSession, principal: StaffPrincipal, token: str)
     if row:
         row.last_seen_at = datetime.now(UTC)
         exp = row.expires_at
-    return staff_session_out(principal, token, exp, principal.branch_id)
+    return await staff_session_out(session, principal, token, exp)
 
 
 # ----------------------------------------------------------------------------- patient OTP
@@ -162,21 +168,20 @@ async def request_patient_otp(session: AsyncSession, phone_raw: str, meta: Reque
         raise NotFoundError("Bu raqam bilan bemor topilmadi. Klinikaga murojaat qiling.")
 
     code = random_digits(settings.otp_length)
+    unit_id = await messaging.patient_home_unit(session, patient)
     challenge = OtpChallenge(
         phone=phone,
         purpose="portal",
         code_hash=sha256_hex(code),
         max_attempts=settings.otp_max_attempts,
         expires_at=datetime.now(UTC) + timedelta(seconds=settings.otp_ttl_seconds),
-        company_id=patient.company_id,
+        unit_id=unit_id,
         meta={"ip": meta.ip},
     )
     session.add(challenge)
     await session.flush()
 
-    company = await session.get(Company, patient.company_id)
-    if company:
-        await messaging.enqueue_sms_if_configured(session, company, kind="otp", to=phone, text=messaging.otp_text(company, code), patient_id=patient.id, branch_id=patient.branch_id)
+    await messaging.enqueue_sms_if_configured(session, unit_id, kind="otp", to=phone, text=await messaging.otp_text(session, unit_id, code), patient_id=patient.id)
     try:
         await get_redis().set(cooldown_key, "1", ex=settings.otp_resend_cooldown_seconds)
     except Exception:  # pragma: no cover
@@ -219,8 +224,8 @@ async def verify_patient_otp(session: AsyncSession, challenge_id: str, code: str
     patient.portal_linked = True
     patient.portal_last_login_at = now
     ttl = timedelta(hours=settings.patient_token_ttl_hours)
-    token, exp = await _open_session(session, actor="patient", subject_id=patient.id, company_id=patient.company_id, ttl=ttl, meta=meta, method="otp")
-    await audit(session, actor_type="patient", actor_id=patient.id, company_id=patient.company_id, action="login", entity="patient", entity_id=patient.id, ip=meta.ip, request_id=meta.request_id)
+    token, exp = await _open_session(session, actor="patient", subject_id=patient.id, unit_id=patient.registered_unit_id, ttl=ttl, meta=meta, method="otp")
+    await audit(session, actor_type="patient", actor_id=patient.id, unit_id=patient.registered_unit_id, country_id=patient.country_id, action="login", entity="patient", entity_id=patient.id, ip=meta.ip, request_id=meta.request_id)
     return patient_session_out(patient, token, exp)
 
 
@@ -247,7 +252,7 @@ async def patient_password_login(session: AsyncSession, login: str, password: st
                 p.portal_locked_until = now + timedelta(minutes=settings.login_lock_minutes)
                 p.portal_failed_logins = 0
                 log.warning("patient %s portal login locked after repeated failures", p.id)
-        await audit(session, actor_type="patient", actor_id=p.id if p else None, company_id=p.company_id if p else None, action="login_failed", entity="patient", entity_id=p.id if p else login_norm[:64], after={"via": "login"}, ip=meta.ip, request_id=meta.request_id)
+        await audit(session, actor_type="patient", actor_id=p.id if p else None, unit_id=p.registered_unit_id if p else None, country_id=p.country_id if p else None, action="login_failed", entity="patient", entity_id=p.id if p else login_norm[:64], after={"via": "login"}, ip=meta.ip, request_id=meta.request_id)
         # persist the counter and the audit row: the request session is rolled back on the exception below
         await session.commit()
         raise AuthError("Login yoki parol noto‘g‘ri")
@@ -258,8 +263,8 @@ async def patient_password_login(session: AsyncSession, login: str, password: st
     p.portal_linked = True
     p.portal_last_login_at = now
     ttl = timedelta(hours=settings.patient_token_ttl_hours)
-    token, exp = await _open_session(session, actor="patient", subject_id=p.id, company_id=p.company_id, ttl=ttl, meta=meta, method="login")
-    await audit(session, actor_type="patient", actor_id=p.id, company_id=p.company_id, action="login", entity="patient", entity_id=p.id, after={"via": "login"}, ip=meta.ip, request_id=meta.request_id)
+    token, exp = await _open_session(session, actor="patient", subject_id=p.id, unit_id=p.registered_unit_id, ttl=ttl, meta=meta, method="login")
+    await audit(session, actor_type="patient", actor_id=p.id, unit_id=p.registered_unit_id, country_id=p.country_id, action="login", entity="patient", entity_id=p.id, after={"via": "login"}, ip=meta.ip, request_id=meta.request_id)
     return patient_session_out(p, token, exp, via="login")
 
 
@@ -278,7 +283,7 @@ async def change_patient_password(session: AsyncSession, principal: PatientPrinc
     p.portal_password_hash = hash_password(new)
     p.portal_password_set_at = datetime.now(UTC)
     ended = await revoke_login_sessions(session, p.id, keep_jti=principal.jti)
-    await audit(session, actor_type="patient", actor_id=p.id, company_id=p.company_id, action="password_change", entity="patient", entity_id=p.id, after={"endedSessions": ended}, ip=meta.ip, request_id=meta.request_id)
+    await audit(session, actor_type="patient", actor_id=p.id, unit_id=p.registered_unit_id, country_id=p.country_id, action="password_change", entity="patient", entity_id=p.id, after={"endedSessions": ended}, ip=meta.ip, request_id=meta.request_id)
 
 
 async def patient_me(session: AsyncSession, patient: Patient, jti: str, token: str, exp: datetime, via: str = "otp") -> PatientSessionOut:

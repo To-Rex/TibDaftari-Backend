@@ -64,21 +64,24 @@ def validate_doc(doc: Any) -> dict[str, Any]:
 class TemplateQuery(CamelModel):
     status: TemplateStatus | None = None
     service_type_id: str | None = None
-    # only templates available in this branch (bound to it OR bound to no branch)
-    branch_id: str | None = None
+    # only templates USABLE at this unit (a unit under the path unit): owner on the unit's path and either no
+    # unit bindings or one of them on that path
+    unit_id: str | None = None
     search: str | None = Field(default=None, max_length=200)
 
 
 class TemplateOut(CamelModel):
     id: str
-    company_id: str
+    #: the unit (any level) that owns the template; usable in the owner's whole subtree unless `unit_ids` narrows it
+    owner_unit_id: str
     name: str
     description: str | None = None
     status: TemplateStatus
     version: int
     service_type_ids: list[str]
     category_ids: list[str]
-    branch_ids: list[str]
+    #: `template_units` bindings — the units (and their subtrees) the template is limited to; empty = the whole subtree
+    unit_ids: list[str]
     scope: TemplateScope
     language: TemplateLanguage
     doc: dict[str, Any]
@@ -93,7 +96,8 @@ class _TemplateWrite(CamelModel):
     description: str | None = Field(default=None, max_length=2000)
     service_type_ids: list[str] | None = Field(default=None, max_length=500)
     category_ids: list[str] | None = Field(default=None, max_length=500)
-    branch_ids: list[str] | None = Field(default=None, max_length=100)
+    # every id must lie inside the owner's subtree (404 "Birlik topilmadi" otherwise)
+    unit_ids: list[str] | None = Field(default=None, max_length=100)
     scope: TemplateScope | None = None
     language: TemplateLanguage | None = None
     doc: dict[str, Any] | None = None
@@ -106,19 +110,19 @@ class _TemplateWrite(CamelModel):
 
 
 class TemplateDuplicateIn(CamelModel):
-    """Optional overrides for a copy: its name (default "<name> (nusxa)") and the branches it belongs to
-    (default: the source's) — a branch imports another branch's template as its own copy this way."""
+    """Optional overrides for a copy: its name (default "<name> (nusxa)") and the units it is limited to
+    (default: the source's bindings) — a unit takes over another unit's template as its own copy this way."""
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
-    branch_ids: list[str] | None = Field(default=None, max_length=100)
+    unit_ids: list[str] | None = Field(default=None, max_length=100)
 
 
 class DefaultReceiptIn(CamelModel):
     """The standard cheque as a new draft receipt template: optional name (default "Standart chek" in the
-    company's language), branches (default none = every branch), paper and label language."""
+    unit's language), unit bindings (default none = the owner's whole subtree), paper and label language."""
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
-    branch_ids: list[str] | None = Field(default=None, max_length=100)
+    unit_ids: list[str] | None = Field(default=None, max_length=100)
     paper: Literal["Receipt80", "Receipt58"] = "Receipt80"
     language: TemplateLanguage | None = None
 
@@ -146,7 +150,7 @@ class TemplatePreviewIn(CamelModel):
 
 class TemplateAssetOut(CamelModel):
     id: str
-    company_id: str
+    owner_unit_id: str
     kind: AssetKind
     name: str
     url: str

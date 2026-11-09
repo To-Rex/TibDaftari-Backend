@@ -1,8 +1,9 @@
 """Portal DTOs — the patient self-service wire shapes (Clinic-Web `PortalRepository`).
 
-Order/OrderItem/ResultDocument/ResultTemplate/AttributeSchema/Category DTOs are the same classes
-the staff surface uses (`orders`, `templates`, `catalog` schemas); only the patient projection is
-portal-specific because sensitive fields are neutralised.
+Order/OrderItem/ResultDocument/ResultTemplate/AttributeSchema/Category DTOs are the same classes the staff surface
+uses (`orders`, `templates`, `catalog` schemas). Portal-specific are the patient projection (sensitive fields are
+neutralised) and the two place cards: the facility a cheque was written at (`PortalUnitOut`) and its organisation
+(`PortalOrgOut` — the nearest non-facility unit above it, the letterhead).
 """
 
 from __future__ import annotations
@@ -38,7 +39,9 @@ class PortalPatientOut(CamelModel):
     `discountPercent` fixed to 0 and `tags` empty."""
 
     id: str
-    company_id: str
+    country_id: str
+    #: the facility that registered the patient
+    registered_unit_id: str | None = None
     full_name: str
     phone: str
     gender: Literal["male", "female"] | None = None
@@ -52,8 +55,9 @@ class PortalPatientOut(CamelModel):
     updated_at: datetime
 
 
-class PortalCompanyOut(CamelModel):
-    """Public clinic card (letterhead data) — no settings, secrets or counters."""
+class PortalOrgOut(CamelModel):
+    """Public organisation card (letterhead data): the nearest non-facility unit above the facility — no settings,
+    secrets or counters."""
 
     id: str
     name: str
@@ -62,11 +66,11 @@ class PortalCompanyOut(CamelModel):
     address: str | None = None
 
 
-class PortalBranchOut(CamelModel):
-    """Public branch card — enough for `{{branch.*}}` placeholders and place labels."""
+class PortalUnitOut(CamelModel):
+    """Public facility card — enough for `{{unit.*}}` placeholders and place labels."""
 
     id: str
-    company_id: str
+    org_id: str
     name: str
     address: str | None = None
     phone: str | None = None
@@ -76,16 +80,18 @@ class PortalOverviewOut(CamelModel):
     patient: PortalPatientOut
     orders: list[OrderOut]
     documents: list[ResultDocumentOut]
-    companies: list[PortalCompanyOut]
-    branches: list[PortalBranchOut]
+    #: the organisations behind the patient's cheques, in order of first appearance
+    orgs: list[PortalOrgOut]
+    #: the facilities the cheques were written at
+    units: list[PortalUnitOut]
 
 
 class PortalOrderOut(CamelModel):
     order: OrderOut
     items: list[OrderItemOut]
     documents: list[ResultDocumentOut]
-    company: PortalCompanyOut
-    branch: PortalBranchOut | None = None
+    org: PortalOrgOut
+    unit: PortalUnitOut | None = None
 
 
 class PortalDocumentOut(CamelModel):
@@ -97,6 +103,6 @@ class PortalDocumentOut(CamelModel):
     schemas: list[AttributeSchemaOut]
     service_codes: dict[str, str]
     category: CategoryOut | None = None
-    company: PortalCompanyOut
-    branch: PortalBranchOut | None = None
+    org: PortalOrgOut
+    unit: PortalUnitOut | None = None
     assets: list[TemplateAssetOut]

@@ -1,1 +1,1 @@
-"""Platform (superadmin) views across every clinic: activity by country / region / district / clinic."""
+"""Platform views across the whole organisation tree: activity by country / region / district / facility."""

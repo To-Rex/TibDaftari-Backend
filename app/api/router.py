@@ -17,12 +17,12 @@ from app.modules.reports.router import router as reports_router
 from app.modules.staff.router import router as staff_router
 from app.modules.telegram.router import router as telegram_router
 from app.modules.templates.router import router as templates_router
-from app.modules.tenant.router import router as tenant_router
+from app.modules.units.router import router as units_router
 
 api_router = APIRouter()
 api_router.include_router(health_router, tags=["health"])
 api_router.include_router(auth_router, prefix="/auth", tags=["auth"])
-api_router.include_router(tenant_router, tags=["tenant"])
+api_router.include_router(units_router, tags=["units"])
 api_router.include_router(staff_router, tags=["staff"])
 api_router.include_router(patients_router, tags=["patients"])
 api_router.include_router(catalog_router, tags=["catalog"])

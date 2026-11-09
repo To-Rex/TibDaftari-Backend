@@ -1,4 +1,7 @@
-"""Staff endpoints: employees (list/get/create/update/overrides) and roles (list/create/update/delete)."""
+"""Staff endpoints: employees (list/get/create/update/overrides) and roles (list/create/update/delete).
+
+Unit-scoped lists and creates live under `/units/{unit_id}/…` (the `Scope` dependency checks the caller may act
+there); rows fetched by id are checked against the caller's scope in the service."""
 
 from __future__ import annotations
 
@@ -7,7 +10,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, Response
 
-from app.api.deps import DbSession, Meta, Staff
+from app.api.deps import DbSession, Meta, Scope, Staff
 from app.core.schemas import Page
 from app.modules.staff import service
 from app.modules.staff.schemas import (
@@ -24,22 +27,22 @@ from app.modules.staff.schemas import (
 router = APIRouter()
 
 
-@router.get("/companies/{company_id}/employees", response_model=Page[EmployeeOut], summary="List employees")
-async def list_employees(company_id: uuid.UUID, q: Annotated[EmployeeQuery, Query()], staff: Staff, session: DbSession) -> Page[EmployeeOut]:
-    staff.require("admin.employee.read").scope(company_id)
-    return await service.list_employees(session, company_id, q)
+@router.get("/units/{unit_id}/employees", response_model=Page[EmployeeOut], summary="List employees under a unit")
+async def list_employees(scope: Scope, q: Annotated[EmployeeQuery, Query()], staff: Staff, session: DbSession) -> Page[EmployeeOut]:
+    staff.require("admin.employee.read")
+    return await service.list_employees(session, scope, q, staff)
 
 
-@router.post("/companies/{company_id}/employees", response_model=EmployeeOut, status_code=201, summary="Create an employee")
-async def create_employee(company_id: uuid.UUID, body: EmployeeCreateIn, staff: Staff, session: DbSession, meta: Meta) -> EmployeeOut:
-    staff.require("admin.employee.write").scope(company_id)
-    return await service.create_employee(session, company_id, body, staff, meta)
+@router.post("/units/{unit_id}/employees", response_model=EmployeeOut, status_code=201, summary="Create an employee")
+async def create_employee(scope: Scope, body: EmployeeCreateIn, staff: Staff, session: DbSession, meta: Meta) -> EmployeeOut:
+    staff.require("admin.employee.write")
+    return await service.create_employee(session, scope, body, staff, meta)
 
 
 @router.get("/employees/{employee_id}", response_model=EmployeeOut, summary="Employee details")
 async def get_employee(employee_id: uuid.UUID, staff: Staff, session: DbSession) -> EmployeeOut:
     # Self-read is always allowed (lab category restriction); operational roles may resolve
-    # colleagues of their own company (order creator); tenant scope is enforced in the service.
+    # colleagues inside their own scope (order creator); unit scope is enforced in the service.
     if employee_id != staff.id:
         staff.require("admin.employee.read", "reception.order.create", "lab.worklist.read", "confirm.result.read")
     return await service.get_employee_dto(session, employee_id, staff)
@@ -57,16 +60,15 @@ async def set_overrides(employee_id: uuid.UUID, body: PermissionOverrides, staff
     return await service.set_overrides(session, employee_id, body, staff, meta)
 
 
-@router.get("/companies/{company_id}/roles", response_model=list[RoleOut], summary="Company + platform roles")
-async def list_roles(company_id: uuid.UUID, staff: Staff, session: DbSession) -> list[RoleOut]:
-    staff.scope(company_id)
-    return await service.list_roles(session, company_id)
+@router.get("/units/{unit_id}/roles", response_model=list[RoleOut], summary="System roles + roles scoped to the unit's lineage")
+async def list_roles(scope: Scope, session: DbSession) -> list[RoleOut]:
+    return await service.list_roles(session, scope)
 
 
-@router.post("/companies/{company_id}/roles", response_model=RoleOut, status_code=201, summary="Create a role")
-async def create_role(company_id: uuid.UUID, body: RoleCreateIn, staff: Staff, session: DbSession, meta: Meta) -> RoleOut:
-    staff.require("admin.role.write").scope(company_id)
-    return await service.create_role(session, company_id, body, staff, meta)
+@router.post("/units/{unit_id}/roles", response_model=RoleOut, status_code=201, summary="Create a role scoped to the unit")
+async def create_role(scope: Scope, body: RoleCreateIn, staff: Staff, session: DbSession, meta: Meta) -> RoleOut:
+    staff.require("admin.role.write")
+    return await service.create_role(session, scope, body, staff, meta)
 
 
 @router.put("/roles/{role_id}", response_model=RoleOut, summary="Update a role (partial)")

@@ -64,6 +64,8 @@ class Settings(BaseSettings):
     otp_length: int = 4
     otp_max_attempts: int = 3
     otp_resend_cooldown_seconds: int = 60
+    # The platform Telegram bot (a `messaging_accounts` row with channel=telegram and no stored token uses it)
+    telegram_bot_token: str = ""
 
     # ---- background workers ------------------------------------------------
     workers_enabled: bool = True

@@ -6,15 +6,19 @@ from app.core.schemas import CamelModel
 
 
 class TelegramStatusOut(CamelModel):
-    """`GET /companies/{id}/telegram/status` — bot configured (token stored), its username, and whether
-    the long-polling application is running in this process."""
+    """`GET /units/{unitId}/telegram/status` — the bot account the unit resolves to (its own, or an ancestor's
+    when `inherited`), the bot's username and whether its Application is running in this process."""
 
     connected: bool
-    bot_username: str | None = None
     running: bool
+    bot_username: str | None = None
+    account_id: str | None = None
+    #: the account sits on an ancestor of the unit, not on the unit itself
+    inherited: bool = False
+    effective_unit_id: str | None = None
 
 
 class WebhookAck(CamelModel):
-    """`POST /telegram/webhook/{companyId}/{secret}` — Telegram only needs a 200; `ok` mirrors its convention."""
+    """`POST /telegram/webhook/{accountId}/{secret}` — Telegram only needs a 200; `ok` mirrors its convention."""
 
     ok: bool

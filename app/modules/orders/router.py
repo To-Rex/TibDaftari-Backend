@@ -1,4 +1,9 @@
-"""Orders endpoints — cheques, items, payments, lab worklist, approvals, result documents. HTTP only."""
+"""Orders endpoints — cheques, items, payments, lab worklist, approvals, result documents. HTTP only.
+
+Lists live under `/units/{unit_id}/…` (the `Scope` dependency resolves the unit and checks the caller may act
+there); row routes (`/orders/{id}`, `/items/{id}`, `/payments/{id}`, `/documents/{id}`) load the row and the
+service checks `staff.require_unit(row.unit_id)`. Public result links (`/d/{token}`, `/v/{token}`) need no login.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +13,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query, Response
 from starlette.responses import Response as StarletteResponse
 
-from app.api.deps import DbSession, Meta, Staff
+from app.api.deps import DbSession, Meta, Scope, Staff
 from app.core.schemas import Page
 from app.modules.orders import service
 from app.modules.orders.schemas import (
@@ -68,7 +73,7 @@ def _pdf_response(pdf: bytes, filename: str, *, public: bool = False) -> Respons
         media_type="application/pdf",
         headers={
             "Content-Disposition": f'inline; filename="{filename}"',
-            # public links are gated (SMS code / the clinic's code-free window) — never let the browser replay the PDF
+            # public links are gated (SMS code / the organisation's code-free window) — never let the browser replay the PDF
             "Cache-Control": "no-store" if public else "private, max-age=3600",
         },
     )
@@ -77,11 +82,11 @@ def _pdf_response(pdf: bytes, filename: str, *, public: bool = False) -> Respons
 # ----------------------------------------------------------------------------- orders
 
 
-@router.get("/companies/{company_id}/orders/export.xlsx", summary="The filtered + sorted cheques as an Excel workbook", response_class=Response,
+@router.get("/units/{unit_id}/orders/export.xlsx", summary="The filtered + sorted cheques as an Excel workbook", response_class=Response,
             responses={200: {"content": {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {}}}})
-async def export_orders(company_id: uuid.UUID, q: Annotated[OrderExportQuery, Query()], staff: Staff, session: DbSession) -> Response:
-    staff.require(*ORDER_READ).scope(company_id)
-    data, filename, count = await service.export_orders_xlsx(session, company_id, q, staff)
+async def export_orders(scope: Scope, q: Annotated[OrderExportQuery, Query()], staff: Staff, session: DbSession) -> Response:
+    staff.require(*ORDER_READ)
+    data, filename, count = await service.export_orders_xlsx(session, scope, q)
     return Response(
         content=data,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -89,52 +94,44 @@ async def export_orders(company_id: uuid.UUID, q: Annotated[OrderExportQuery, Qu
     )
 
 
-@router.get("/companies/{company_id}/orders/summary", response_model=OrderSummaryOut, summary="The filtered cheques at a glance (same filters as the list)")
-async def orders_summary(company_id: uuid.UUID, q: Annotated[OrderListQuery, Query()], staff: Staff, session: DbSession) -> OrderSummaryOut:
-    staff.require(*ORDER_READ).scope(company_id)
-    return await service.orders_summary(session, company_id, q, staff)
+@router.get("/units/{unit_id}/orders/summary", response_model=OrderSummaryOut, summary="The filtered cheques at a glance (same filters as the list)")
+async def orders_summary(scope: Scope, q: Annotated[OrderListQuery, Query()], staff: Staff, session: DbSession) -> OrderSummaryOut:
+    staff.require(*ORDER_READ)
+    return await service.orders_summary(session, scope, q)
 
 
-@router.get(
-    "/companies/{company_id}/orders", response_model=Page[OrderOut], summary="List orders (paged, filters, search)"
-)
-async def list_orders(
-    company_id: uuid.UUID, q: Annotated[OrderListQuery, Query()], staff: Staff, session: DbSession
-) -> Page[OrderOut]:
-    staff.require(*ORDER_READ).scope(company_id)
-    return await service.list_orders(session, company_id, q, staff)
+@router.get("/units/{unit_id}/orders", response_model=Page[OrderOut], summary="List orders of the unit and everything under it (paged, filters, search)")
+async def list_orders(scope: Scope, q: Annotated[OrderListQuery, Query()], staff: Staff, session: DbSession) -> Page[OrderOut]:
+    staff.require(*ORDER_READ)
+    return await service.list_orders(session, scope, q)
 
 
 @router.post(
-    "/companies/{company_id}/orders",
+    "/units/{unit_id}/orders",
     response_model=OrderItemsOut,
     status_code=201,
-    summary="Create order (cheque) with items",
+    summary="Create order (cheque) with items — in the unit when it is a facility, else in `unitId` (a facility under it)",
 )
-async def create_order(
-    company_id: uuid.UUID, body: CreateOrderIn, staff: Staff, session: DbSession, meta: Meta
-) -> OrderItemsOut:
-    staff.require("reception.order.create").scope(company_id)
-    return await service.create_order(session, company_id, staff, body, meta)
+async def create_order(scope: Scope, body: CreateOrderIn, staff: Staff, session: DbSession, meta: Meta) -> OrderItemsOut:
+    staff.require("reception.order.create")
+    return await service.create_order(session, scope, staff, body, meta)
 
 
 @router.get("/orders/{order_id}", response_model=OrderBundleOut, summary="Order + items + payments")
 async def get_order(order_id: uuid.UUID, staff: Staff, session: DbSession) -> OrderBundleOut:
     staff.require(*ORDER_READ)
-    return await service.get_order_bundle(session, order_id, service.scope_company(staff), staff)
+    return await service.get_order_bundle(session, order_id, staff)
 
 
-@router.get("/orders/{order_id}/receipt.pdf", summary="Cheque rendered with the branch's receipt template (404 no_template when none)", response_class=StarletteResponse, responses={200: {"content": {"application/pdf": {}}}})
+@router.get("/orders/{order_id}/receipt.pdf", summary="Cheque rendered with the facility's receipt template (404 no_template when none)", response_class=StarletteResponse, responses={200: {"content": {"application/pdf": {}}}})
 async def order_receipt_pdf(order_id: uuid.UUID, staff: Staff, session: DbSession, template_id: Annotated[uuid.UUID | None, Query(alias="templateId")] = None) -> StarletteResponse:
     staff.require(*ORDER_READ)
-    pdf, filename = await service.render_receipt_pdf(session, order_id, service.scope_company(staff), template_id, staff)
+    pdf, filename = await service.render_receipt_pdf(session, order_id, template_id, staff)
     return _pdf_response(pdf, filename)
 
 
 @router.post("/orders/{order_id}/items", response_model=OrderItemsOut, summary="Add services to an order")
-async def add_items(
-    order_id: uuid.UUID, body: AddItemsIn, staff: Staff, session: DbSession, meta: Meta
-) -> OrderItemsOut:
+async def add_items(order_id: uuid.UUID, body: AddItemsIn, staff: Staff, session: DbSession, meta: Meta) -> OrderItemsOut:
     staff.require("reception.order.create")
     return await service.add_items(session, order_id, staff, body, meta)
 
@@ -163,9 +160,7 @@ async def pay(order_id: uuid.UUID, body: PayIn, staff: Staff, session: DbSession
 
 
 @router.post("/payments/{payment_id}/refund", response_model=OrderPaymentsOut, summary="Refund a payment")
-async def refund(
-    payment_id: uuid.UUID, body: ReasonIn, staff: Staff, session: DbSession, meta: Meta
-) -> OrderPaymentsOut:
+async def refund(payment_id: uuid.UUID, body: ReasonIn, staff: Staff, session: DbSession, meta: Meta) -> OrderPaymentsOut:
     staff.require("reception.payment.refund", service.LATE_EDIT)
     return await service.refund(session, payment_id, staff, body.reason, meta)
 
@@ -175,9 +170,7 @@ async def refund(
     response_model=OrderPaymentsOut,
     summary="Correct a payment's method, or split it over several — the amount stays (reception within a day)",
 )
-async def change_payment_method(
-    payment_id: uuid.UUID, body: PaymentMethodIn, staff: Staff, session: DbSession, meta: Meta
-) -> OrderPaymentsOut:
+async def change_payment_method(payment_id: uuid.UUID, body: PaymentMethodIn, staff: Staff, session: DbSession, meta: Meta) -> OrderPaymentsOut:
     staff.require("reception.payment.create", service.LATE_EDIT)
     return await service.change_payment_method(session, payment_id, staff, body, meta)
 
@@ -197,31 +190,18 @@ async def delete_order(order_id: uuid.UUID, staff: Staff, session: DbSession, me
 # ----------------------------------------------------------------------------- lab
 
 
-@router.get(
-    "/companies/{company_id}/worklist",
-    response_model=Page[WorklistItemOut],
-    summary="Lab worklist (paid orders, items with a schema)",
-)
-async def worklist(
-    company_id: uuid.UUID, q: Annotated[WorklistQuery, Query()], staff: Staff, session: DbSession
-) -> Page[WorklistItemOut]:
+@router.get("/units/{unit_id}/worklist", response_model=Page[WorklistItemOut], summary="Lab worklist (paid orders, items with a schema)")
+async def worklist(scope: Scope, q: Annotated[WorklistQuery, Query()], staff: Staff, session: DbSession) -> Page[WorklistItemOut]:
     approved_only = bool(q.status) and set(q.status) == {"approved"}
     if not (approved_only and staff.has(APPROVED_VIEW)):
         staff.require("lab.worklist.read")
-    staff.scope(company_id)
-    return await service.worklist(session, company_id, q, staff)
+    return await service.worklist(session, scope, q, staff)
 
 
-@router.get(
-    "/companies/{company_id}/worklist/counts",
-    response_model=WorklistCountsOut,
-    summary="Lab worklist counters per status (same filters as the worklist)",
-)
-async def worklist_counts(
-    company_id: uuid.UUID, q: Annotated[WorklistQuery, Query()], staff: Staff, session: DbSession
-) -> WorklistCountsOut:
-    staff.require("lab.worklist.read").scope(company_id)
-    return await service.worklist_counts(session, company_id, q, staff)
+@router.get("/units/{unit_id}/worklist/counts", response_model=WorklistCountsOut, summary="Lab worklist counters per status (same filters as the worklist)")
+async def worklist_counts(scope: Scope, q: Annotated[WorklistQuery, Query()], staff: Staff, session: DbSession) -> WorklistCountsOut:
+    staff.require("lab.worklist.read")
+    return await service.worklist_counts(session, scope, q, staff)
 
 
 @router.get("/items/{item_id}", response_model=OrderItemOut, summary="Get order item")
@@ -231,9 +211,7 @@ async def get_item(item_id: uuid.UUID, staff: Staff, session: DbSession) -> Orde
 
 
 @router.put("/items/{item_id}/values", response_model=OrderItemOut, summary="Save result values (wholesale)")
-async def save_values(
-    item_id: uuid.UUID, body: SaveValuesIn, staff: Staff, session: DbSession, meta: Meta
-) -> OrderItemOut:
+async def save_values(item_id: uuid.UUID, body: SaveValuesIn, staff: Staff, session: DbSession, meta: Meta) -> OrderItemOut:
     staff.require("lab.result.write")
     return await service.save_values(session, item_id, staff, body, meta)
 
@@ -247,12 +225,8 @@ async def submit_item(item_id: uuid.UUID, staff: Staff, session: DbSession, meta
 # ----------------------------------------------------------------------------- confirm
 
 
-@router.post(
-    "/items/{item_id}/approve", response_model=ApproveItemOut, summary="Approve a submitted result -> document"
-)
-async def approve_item(
-    item_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta, body: ApproveItemIn | None = None
-) -> ApproveItemOut:
+@router.post("/items/{item_id}/approve", response_model=ApproveItemOut, summary="Approve a submitted result -> document")
+async def approve_item(item_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta, body: ApproveItemIn | None = None) -> ApproveItemOut:
     staff.require("confirm.result.approve")
     return await service.approve_item(session, item_id, staff, body or ApproveItemIn(), meta)
 
@@ -269,26 +243,14 @@ async def reject_item(item_id: uuid.UUID, body: ReasonIn, staff: Staff, session:
     return await service.reject_item(session, item_id, staff, body.reason, meta)
 
 
-@router.post(
-    "/orders/{order_id}/approve",
-    response_model=ApproveOrderOut,
-    summary="Order-scope approval (one document for many items)",
-)
-async def approve_order(
-    order_id: uuid.UUID, body: ApproveOrderIn, staff: Staff, session: DbSession, meta: Meta
-) -> ApproveOrderOut:
+@router.post("/orders/{order_id}/approve", response_model=ApproveOrderOut, summary="Order-scope approval (one document for many items)")
+async def approve_order(order_id: uuid.UUID, body: ApproveOrderIn, staff: Staff, session: DbSession, meta: Meta) -> ApproveOrderOut:
     staff.require("confirm.result.approve")
     return await service.approve_order(session, order_id, staff, body, meta)
 
 
-@router.get(
-    "/orders/{order_id}/scope-items",
-    response_model=list[OrderItemOut],
-    summary="Items an order-scope template would cover",
-)
-async def order_scope_items(
-    order_id: uuid.UUID, staff: Staff, session: DbSession, template_id: Annotated[uuid.UUID, Query(alias="templateId")]
-) -> list[OrderItemOut]:
+@router.get("/orders/{order_id}/scope-items", response_model=list[OrderItemOut], summary="Items an order-scope template would cover")
+async def order_scope_items(order_id: uuid.UUID, staff: Staff, session: DbSession, template_id: Annotated[uuid.UUID, Query(alias="templateId")]) -> list[OrderItemOut]:
     staff.require("confirm.result.read", "confirm.result.approve")
     return await service.order_scope_items(session, order_id, template_id, staff)
 
@@ -296,27 +258,23 @@ async def order_scope_items(
 # ----------------------------------------------------------------------------- documents
 
 
-@router.get(
-    "/companies/{company_id}/documents",
-    response_model=list[ResultDocumentOut],
-    summary="Result documents by order / patient",
-)
+@router.get("/units/{unit_id}/documents", response_model=list[ResultDocumentOut], summary="Result documents by order / patient (the unit and everything under it)")
 async def list_documents(
-    company_id: uuid.UUID,
+    scope: Scope,
     staff: Staff,
     session: DbSession,
     order_id: Annotated[str | None, Query(alias="orderId")] = None,
     patient_id: Annotated[str | None, Query(alias="patientId")] = None,
-    branch_id: Annotated[str | None, Query(alias="branchId")] = None,
+    unit_id_filter: Annotated[str | None, Query(alias="unitId")] = None,
 ) -> list[ResultDocumentOut]:
-    staff.require(*DOC_READ).scope(company_id)
-    return await service.list_documents(session, company_id, order_id=order_id, patient_id=patient_id, branches=staff.branch_scope(branch_id))
+    staff.require(*DOC_READ)
+    return await service.list_documents(session, scope, order_id=order_id, patient_id=patient_id, unit_id=unit_id_filter)
 
 
 @router.get("/documents/{document_id}", response_model=ResultDocumentOut, summary="Get result document")
 async def get_document(document_id: uuid.UUID, staff: Staff, session: DbSession) -> ResultDocumentOut:
     staff.require(*DOC_READ)
-    return service.document_out(await service.get_document_or_404(session, document_id, service.scope_company(staff), staff))
+    return await service.get_document_dto(session, document_id, staff)
 
 
 @router.post("/documents/{document_id}/sms", response_model=ResultSmsOut, summary="Re-send the result-ready SMS (with the result link); dryRun only builds it")
@@ -332,7 +290,7 @@ async def document_printed(document_id: uuid.UUID, staff: Staff, session: DbSess
 
 @router.get("/documents/{document_id}/pdf", summary="Result document PDF (rendered on demand when missing)")
 async def document_pdf(document_id: uuid.UUID, staff: Staff, session: DbSession) -> StarletteResponse:
-    doc = await service.get_document_or_404(session, document_id, service.scope_company(staff), staff)
+    doc = await service.get_document_or_404(session, document_id, staff)
     pdf = await service.ensure_document_pdf(session, doc)
     return _pdf_response(pdf, service.pdf_filename(doc))
 
@@ -340,7 +298,7 @@ async def document_pdf(document_id: uuid.UUID, staff: Staff, session: DbSession)
 @router.get("/d/{token}", response_model=PublicDocumentInfoOut, summary="Public result info by unguessable token (SMS / Telegram links)")
 async def public_document_info(token: str, session: DbSession) -> PublicDocumentInfoOut:
     """The SMS link's landing card — public metadata only; the PDF itself needs an SMS code, except during the
-    clinic's code-free window (`otpRequired: false`, `freeUntil`)."""
+    organisation's code-free window (`otpRequired: false`, `freeUntil`)."""
     return await service.public_document_info(session, token)
 
 
@@ -350,9 +308,9 @@ async def public_document_verify(token: str, session: DbSession) -> PublicDocume
     return await service.public_document_verify(session, token)
 
 
-@router.post("/d/{token}/open", summary="Public result PDF without a code — only inside the clinic's code-free window")
+@router.post("/d/{token}/open", summary="Public result PDF without a code — only inside the organisation's code-free window")
 async def public_document_open(token: str, session: DbSession, meta: Meta) -> StarletteResponse:
-    """403 `otp_required` once the window is over (or the clinic needs a code always) — the page asks for the SMS code."""
+    """403 `otp_required` once the window is over (or the organisation needs a code always) — the page asks for the SMS code."""
     pdf, filename = await service.public_document_open(session, token, meta)
     return _pdf_response(pdf, filename, public=True)
 

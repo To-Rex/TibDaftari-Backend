@@ -1,4 +1,8 @@
-"""Permission catalogue — mirror of the frontend `src/domain/access/permissions.ts`."""
+"""Permission catalogue — mirror of the frontend `src/domain/access/permissions.ts`.
+
+WHERE a permission applies is not part of the key: it comes from the employee's unit (their home unit and
+everything under it). The same `admin.unit.write` edits a facility for a facility administrator and a whole
+viloyat for a regional one."""
 
 from __future__ import annotations
 
@@ -16,60 +20,77 @@ PERMISSIONS: tuple[str, ...] = (
     "confirm.result.read", "confirm.result.view", "confirm.result.approve", "confirm.result.resend",
     "reports.finance.read", "reports.finance.recent", "reports.operations.read", "reports.export",
     "messaging.send", "messaging.broadcast",
-    "admin.company.read", "admin.company.write", "admin.branch.write",
+    # the organisation unit: its profile / settings (read, write) and the units under it (manage = create / edit)
+    "admin.unit.read", "admin.unit.write", "admin.unit.manage",
     "admin.employee.read", "admin.employee.write", "admin.role.write",
     "admin.catalog.read", "admin.catalog.write", "admin.schema.write",
     "admin.template.read", "admin.template.write", "admin.template.publish",
     "admin.settings.write",
-    "platform.company.manage",
+    # the whole tree, every country (superadmin)
+    "platform.unit.manage",
 )
 PERMISSION_SET = frozenset(PERMISSIONS)
 PLATFORM_PERMISSIONS = frozenset(p for p in PERMISSIONS if p.startswith("platform."))
-COMPANY_ADMIN_PERMISSIONS = tuple(p for p in PERMISSIONS if not p.startswith("platform."))
+UNIT_ADMIN_PERMISSIONS = tuple(p for p in PERMISSIONS if not p.startswith("platform."))
+
+#: v1 → v2 key renames (roles / overrides saved before the port are read through this map)
+RENAMED: dict[str, str] = {
+    "admin.company.read": "admin.unit.read",
+    "admin.company.write": "admin.unit.write",
+    "admin.branch.write": "admin.unit.manage",
+    "platform.company.manage": "platform.unit.manage",
+}
 
 SUPERADMIN_ROLE_KEY = "superadmin"
 ADMIN_ROLE_KEY = "admin"
 
 
+def normalize_key(key: str) -> str:
+    return RENAMED.get(key, key)
+
+
 def resolve_permissions(role_permissions: Iterable[str] | None, overrides: dict | None) -> list[str]:
-    """role ∪ allow − deny, order preserved (role order, then appended allows)."""
+    """role ∪ allow − deny, order preserved (role order, then appended allows). Old key names are mapped."""
     result: list[str] = []
     seen: set[str] = set()
-    for p in list(role_permissions or []) + list((overrides or {}).get("allow") or []):
+    for raw in list(role_permissions or []) + list((overrides or {}).get("allow") or []):
+        p = normalize_key(raw)
         if p in PERMISSION_SET and p not in seen:
             seen.add(p)
             result.append(p)
-    deny = set((overrides or {}).get("deny") or [])
+    deny = {normalize_key(p) for p in (overrides or {}).get("deny") or []}
     return [p for p in result if p not in deny]
 
 
 def invalid_permission_keys(keys: Iterable[str]) -> list[str]:
-    return [k for k in keys if k not in PERMISSION_SET]
+    return [k for k in keys if normalize_key(k) not in PERMISSION_SET]
 
 
-# Roles every new company starts with (keys are stable machine names used by the frontend).
-DEFAULT_COMPANY_ROLES: tuple[dict, ...] = (
-    {"key": ADMIN_ROLE_KEY, "name": "Administrator", "is_system": True, "permissions": list(COMPANY_ADMIN_PERMISSIONS)},
+# System roles (scope_unit_id NULL) — seeded by db/v2/21_seed_roles.sql with fixed ids; keys are stable machine names
+# used by the frontend. WHERE a role applies comes from the employee's unit.
+SYSTEM_ROLES: tuple[dict, ...] = (
+    {"key": SUPERADMIN_ROLE_KEY, "name": "Superadmin", "is_system": True, "permissions": list(PERMISSIONS)},
+    {"key": ADMIN_ROLE_KEY, "name": "Administrator", "is_system": True, "permissions": list(UNIT_ADMIN_PERMISSIONS)},
     {
         "key": "registrator",
         "name": "Registrator / Kassir",
-        "is_system": False,
+        "is_system": True,
         "permissions": [
             "reception.patient.read", "reception.patient.write", "reception.order.create", "reception.order.cancel",
             "reception.order.delete",
             "reception.payment.create", "reports.operations.read", "messaging.send",
             # reports like the admin's: full revenue (no 7-day cap) + CSV / Excel export — still confined to the
-            # employee's branches; `reports.finance.recent` stays as the fallback if an admin takes finance.read away
+            # employee's units; `reports.finance.recent` stays as the fallback if an admin takes finance.read away
             "reports.finance.read", "reports.export", "reports.finance.recent",
             # approved results: view, print and re-send the SMS (no approving, nothing unapproved)
             "confirm.result.view", "confirm.result.resend",
         ],
     },
-    {"key": "laborant", "name": "Laborant", "is_system": False, "permissions": ["lab.worklist.read", "lab.result.write", "lab.result.submit"]},
+    {"key": "laborant", "name": "Laborant", "is_system": True, "permissions": ["lab.worklist.read", "lab.result.write", "lab.result.submit"]},
     {
         "key": "vrach",
         "name": "Vrach",
-        "is_system": False,
+        "is_system": True,
         "permissions": [
             "lab.worklist.read", "lab.result.write", "confirm.result.read", "confirm.result.approve", "confirm.result.resend",
             "reception.patient.read",
@@ -78,7 +99,7 @@ DEFAULT_COMPANY_ROLES: tuple[dict, ...] = (
     {
         "key": "rahbar",
         "name": "Rahbar",
-        "is_system": False,
+        "is_system": True,
         "permissions": [
             "reports.finance.read", "reports.operations.read", "reports.export", "reception.patient.read", "admin.employee.read",
             # corrects old payments on a cheque (remove a service with money back, delete the cheque)
@@ -86,3 +107,5 @@ DEFAULT_COMPANY_ROLES: tuple[dict, ...] = (
         ],
     },
 )
+#: kept for callers written against v1 naming
+DEFAULT_COMPANY_ROLES = SYSTEM_ROLES

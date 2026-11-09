@@ -11,17 +11,19 @@ from pydantic import Field, field_validator
 from app.core.schemas import CamelModel, PageQuery
 
 MessageChannel = Literal["sms", "telegram", "portal"]
-MessageStatus = Literal["scheduled", "queued", "sent", "delivered", "failed"]
+MessageStatus = Literal["scheduled", "queued", "sent", "delivered", "failed", "cancelled"]
 MessageKind = Literal["payment_receipt", "result_ready", "reminder", "broadcast", "otp", "portal_access"]
 NotificationKind = Literal["info", "success", "warning"]
 
 
 class OutboxQuery(PageQuery):
-    """`listOutbox` filters (sort is fixed to createdAt desc; sortBy/sortDir are ignored)."""
+    """`listOutbox` filters (sort is fixed to createdAt desc; sortBy/sortDir are ignored).
+
+    `unitId` narrows the path unit's subtree to the given sub-units (facilities, districts …)."""
 
     status: MessageStatus | None = None
     kind: MessageKind | None = None
-    branch_id: str | None = None
+    unit_id: list[str] | None = Field(default=None, max_length=200)
 
 
 class OutboxCountsOut(CamelModel):
@@ -34,12 +36,14 @@ class OutboxCountsOut(CamelModel):
     sent: int
     delivered: int
     failed: int
+    cancelled: int = 0
 
 
 class OutboxMessageOut(CamelModel):
     id: uuid.UUID
-    company_id: uuid.UUID
-    branch_id: uuid.UUID | None = None
+    #: the facility the message went out from (None for a message without one, e.g. a code for an unregistered phone)
+    unit_id: uuid.UUID | None = None
+    unit_name: str | None = None
     patient_id: uuid.UUID | None = None
     order_id: uuid.UUID | None = None
     channel: MessageChannel
@@ -67,8 +71,8 @@ class SendIn(CamelModel):
     text: str = Field(min_length=1, max_length=1000)
     kind: MessageKind = "broadcast"
     scheduled_at: datetime | None = None
-    # the branch the message is sent from (default: the employee's own branch)
-    branch_id: str | None = Field(default=None, max_length=64)
+    #: the facility the message goes out from — required when the path unit is not a facility itself
+    unit_id: str | None = Field(default=None, max_length=64)
 
     @field_validator("scheduled_at")
     @classmethod

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 
 from sqlalchemy import Select, delete, func, or_, select, text, update
@@ -12,17 +13,22 @@ from app.core.pagination import paginate_query
 from app.core.schemas import PageQuery
 from app.core.textutil import digits, fold
 from app.infrastructure.db.base import alive
-from app.infrastructure.db.models import Branch, Company, Notification, OtpChallenge, OutboxMessage
+from app.infrastructure.db.models import (
+    MessagingAccount,
+    Notification,
+    Order,
+    OrgUnitClosure,
+    OtpChallenge,
+    OutboxMessage,
+)
 from app.infrastructure.db.models import Session as SessionModel
 
 QUEUE_STATUSES = ("queued", "scheduled")
 
 
-def outbox_select(company_id: uuid.UUID, *, status: str | None, kind: str | None, search: str | None, branches: list[uuid.UUID] | None = None) -> Select:
-    """Company-scoped outbox statement with the §8 filters (uses ix_outbox_company_status_created)."""
-    stmt = select(OutboxMessage).where(OutboxMessage.company_id == company_id, alive(OutboxMessage))
-    if branches is not None:
-        stmt = stmt.where(OutboxMessage.branch_id.in_(branches))
+def outbox_select(unit_ids: Sequence[uuid.UUID], *, status: str | None, kind: str | None, search: str | None) -> Select:
+    """Outbox rows of the given facilities with the §8 filters (uses ix_outbox_unit_status_created)."""
+    stmt = select(OutboxMessage).where(OutboxMessage.unit_id.in_(unit_ids), alive(OutboxMessage))
     if status:
         # the UI never sees `sending`; it belongs to the `queued` bucket
         stmt = stmt.where(OutboxMessage.status.in_(("queued", "sending")) if status == "queued" else OutboxMessage.status == status)
@@ -39,43 +45,62 @@ def outbox_select(company_id: uuid.UUID, *, status: str | None, kind: str | None
     return stmt
 
 
-async def list_outbox(session: AsyncSession, company_id: uuid.UUID, q: PageQuery, *, status: str | None, kind: str | None, branches: list[uuid.UUID] | None = None) -> tuple[list[OutboxMessage], int]:
+async def list_outbox(session: AsyncSession, unit_ids: Sequence[uuid.UUID], q: PageQuery, *, status: str | None, kind: str | None) -> tuple[list[OutboxMessage], int]:
     """Page of outbox rows, newest first (fixed sort)."""
-    stmt = outbox_select(company_id, status=status, kind=kind, search=q.search, branches=branches)
+    stmt = outbox_select(unit_ids, status=status, kind=kind, search=q.search)
     return await paginate_query(session, stmt, q, order_by=[OutboxMessage.created_at.desc(), OutboxMessage.id.desc()])
 
 
-async def outbox_counts(session: AsyncSession, company_id: uuid.UUID, *, kind: str | None, search: str | None, branches: list[uuid.UUID] | None = None) -> dict[str, int]:
+async def outbox_counts(session: AsyncSession, unit_ids: Sequence[uuid.UUID], *, kind: str | None, search: str | None) -> dict[str, int]:
     """status → count for the outbox filters (one GROUP BY instead of one request per status tab)."""
-    base = outbox_select(company_id, status=None, kind=kind, search=search, branches=branches).with_only_columns(OutboxMessage.status, func.count()).order_by(None).group_by(OutboxMessage.status)
+    base = outbox_select(unit_ids, status=None, kind=kind, search=search).with_only_columns(OutboxMessage.status, func.count()).order_by(None).group_by(OutboxMessage.status)
     return {str(st): int(n) for st, n in (await session.execute(base)).all()}
 
 
-async def list_notifications(session: AsyncSession, company_id: uuid.UUID, employee_id: uuid.UUID, limit: int = 50) -> list[Notification]:
-    """Newest company-wide + personal notifications for one employee."""
-    stmt = (
-        select(Notification)
-        .where(
-            Notification.company_id == company_id,
-            alive(Notification),
-            or_(Notification.employee_id.is_(None), Notification.employee_id == employee_id),
-        )
-        .order_by(Notification.created_at.desc(), Notification.id.desc())
-        .limit(limit)
-    )
+async def count_queued(session: AsyncSession, unit_ids: Sequence[uuid.UUID] | None) -> int:
+    """Rows still waiting to go out (`queued` / `scheduled`) in the given facilities; None = everywhere."""
+    stmt = select(func.count()).select_from(OutboxMessage).where(alive(OutboxMessage), OutboxMessage.status.in_(QUEUE_STATUSES))
+    if unit_ids is not None:
+        if not unit_ids:
+            return 0
+        stmt = stmt.where(OutboxMessage.unit_id.in_(unit_ids))
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def latest_order_unit(session: AsyncSession, patient_id: uuid.UUID) -> uuid.UUID | None:
+    """The facility of the patient's newest alive cheque (where their messages go out from when unregistered)."""
+    stmt = select(Order.unit_id).where(Order.patient_id == patient_id, alive(Order)).order_by(Order.created_at.desc(), Order.id.desc()).limit(1)
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+# ----------------------------------------------------------------------------- notifications
+
+
+def _visible_notifications(employee_id: uuid.UUID, roots: Sequence[uuid.UUID] | None):
+    """Filter: alive, addressed to everyone or to me, and in my scope — `unit_id` NULL (everyone), under one of my
+    scope roots, or on the path above them (a region-wide notice reaches its facilities). `roots` None = superadmin."""
+    conds = [alive(Notification), or_(Notification.employee_id.is_(None), Notification.employee_id == employee_id)]
+    if roots is not None:
+        if not roots:
+            conds.append(Notification.unit_id.is_(None))
+        else:
+            below = select(OrgUnitClosure.descendant_id).where(OrgUnitClosure.ancestor_id.in_(roots))
+            above = select(OrgUnitClosure.ancestor_id).where(OrgUnitClosure.descendant_id.in_(roots))
+            conds.append(or_(Notification.unit_id.is_(None), Notification.unit_id.in_(below), Notification.unit_id.in_(above)))
+    return conds
+
+
+async def list_notifications(session: AsyncSession, employee_id: uuid.UUID, roots: Sequence[uuid.UUID] | None, limit: int = 50) -> list[Notification]:
+    """Newest notifications one employee may see (see `_visible_notifications`)."""
+    stmt = select(Notification).where(*_visible_notifications(employee_id, roots)).order_by(Notification.created_at.desc(), Notification.id.desc()).limit(limit)
     return list((await session.execute(stmt)).scalars().all())
 
 
-async def mark_read(session: AsyncSession, company_id: uuid.UUID, employee_id: uuid.UUID, notification_id: uuid.UUID | None) -> int:
+async def mark_read(session: AsyncSession, employee_id: uuid.UUID, roots: Sequence[uuid.UUID] | None, notification_id: uuid.UUID | None) -> int:
     """Append `employee_id` to read_by of one (or every visible) notification; returns rows touched."""
     stmt = (
         update(Notification)
-        .where(
-            Notification.company_id == company_id,
-            alive(Notification),
-            or_(Notification.employee_id.is_(None), Notification.employee_id == employee_id),
-            ~Notification.read_by.any(employee_id),
-        )
+        .where(*_visible_notifications(employee_id, roots), ~Notification.read_by.any(employee_id))
         .values(read_by=func.array_append(Notification.read_by, employee_id))
     )
     if notification_id is not None:
@@ -119,20 +144,13 @@ async def load_messages(session: AsyncSession, ids: list[uuid.UUID]) -> list[Out
     return [by_id[i] for i in ids if i in by_id]
 
 
-async def load_companies(session: AsyncSession, ids: set[uuid.UUID]) -> dict[uuid.UUID, Company]:
-    """Companies for a batch in one query (SMS provider settings)."""
+async def load_accounts(session: AsyncSession, ids: set[uuid.UUID]) -> dict[uuid.UUID, MessagingAccount]:
+    """The messaging accounts a batch was queued with, in one query (deleted / inactive rows included — the
+    dispatcher decides whether they may still send)."""
     if not ids:
         return {}
-    rows = (await session.execute(select(Company).where(Company.id.in_(ids)))).scalars().all()
-    return {c.id: c for c in rows}
-
-
-async def load_branches(session: AsyncSession, ids: set[uuid.UUID]) -> dict[uuid.UUID, Branch]:
-    """Branches for a batch in one query (a branch may send SMS with its own key)."""
-    if not ids:
-        return {}
-    rows = (await session.execute(select(Branch).where(Branch.id.in_(ids)))).scalars().all()
-    return {b.id: b for b in rows}
+    rows = (await session.execute(select(MessagingAccount).where(MessagingAccount.id.in_(ids)))).scalars().all()
+    return {a.id: a for a in rows}
 
 
 async def ensure_audit_partitions(session: AsyncSession, months_ahead: int = 3) -> None:

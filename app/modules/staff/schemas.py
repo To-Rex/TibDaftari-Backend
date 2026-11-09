@@ -1,5 +1,8 @@
 """Staff DTOs — mirror of Clinic-Web `Employee` (domain/tenant.ts) and `Role` / `PermissionOverrides`
-(domain/access/permissions.ts)."""
+(domain/access/permissions.ts).
+
+v2: an employee has a home unit (`unitId`, any level of the tree) and optional extra units (`unitIds`);
+a role is system-wide (`scopeUnitId` null) or scoped to a unit's subtree."""
 
 from __future__ import annotations
 
@@ -9,6 +12,7 @@ from typing import Literal
 from pydantic import Field
 
 from app.core.schemas import CamelModel, PageQuery
+from app.modules.units.schemas import UnitLevel
 
 EmployeeStatus = Literal["active", "inactive"]
 
@@ -20,8 +24,12 @@ class PermissionOverrides(CamelModel):
 
 class EmployeeOut(CamelModel):
     id: str
-    company_id: str
-    branch_ids: list[str]
+    #: home unit; null only for a superadmin
+    unit_id: str | None = None
+    #: extra scope units (besides the home unit)
+    unit_ids: list[str] = Field(default_factory=list)
+    unit_name: str | None = None
+    unit_level: UnitLevel | None = None
     full_name: str
     login: str
     phone: str | None = None
@@ -31,19 +39,23 @@ class EmployeeOut(CamelModel):
     category_ids: list[str]
     status: EmployeeStatus
     avatar_hue: int
+    #: the true value only for superadmin callers; everyone else always sees false
+    is_super_admin: bool = False
     last_login_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
 
 class EmployeeQuery(PageQuery):
-    branch_id: str | None = None
+    #: narrow the list to one sub-unit of the path unit (the employee's home unit)
+    unit_id: str | None = None
     role_id: str | None = None
     status: EmployeeStatus | None = None
 
 
 class EmployeeCreateIn(CamelModel):
-    """Partial<Employee> + password; `isSuperAdmin` is honoured only for superadmin callers."""
+    """Partial<Employee> + password; `isSuperAdmin` is honoured only for superadmin callers.
+    `unitId` defaults to the path unit; it and `unitIds` must lie inside the request scope."""
 
     full_name: str = Field(min_length=1, max_length=200)
     login: str = Field(min_length=3, max_length=80)
@@ -51,7 +63,8 @@ class EmployeeCreateIn(CamelModel):
     phone: str | None = Field(default=None, max_length=40)
     email: str | None = Field(default=None, max_length=200)
     role_id: str
-    branch_ids: list[str] = Field(default_factory=list, max_length=100)
+    unit_id: str | None = None
+    unit_ids: list[str] = Field(default_factory=list, max_length=100)
     category_ids: list[str] = Field(default_factory=list, max_length=500)
     overrides: PermissionOverrides | None = None
     status: EmployeeStatus = "active"
@@ -65,7 +78,10 @@ class EmployeeUpdateIn(CamelModel):
     phone: str | None = Field(default=None, max_length=40)
     email: str | None = Field(default=None, max_length=200)
     role_id: str | None = None
-    branch_ids: list[str] | None = Field(default=None, max_length=100)
+    #: move the employee to another home unit (must be inside the caller's scope)
+    unit_id: str | None = None
+    #: replaces the extra units wholesale when given
+    unit_ids: list[str] | None = Field(default=None, max_length=100)
     category_ids: list[str] | None = Field(default=None, max_length=500)
     overrides: PermissionOverrides | None = None
     status: EmployeeStatus | None = None
@@ -74,13 +90,14 @@ class EmployeeUpdateIn(CamelModel):
 
 class RoleOut(CamelModel):
     id: str
-    company_id: str | None
+    #: null = system role (available everywhere); else usable inside that unit's subtree
+    scope_unit_id: str | None
     key: str
     name: str
     description: str | None = None
     permissions: list[str]
     is_system: bool
-    # denormalised for the roles page (employees of the requesting company using this role)
+    # denormalised for the roles page (employees under the requesting unit using this role)
     employee_count: int = 0
 
 

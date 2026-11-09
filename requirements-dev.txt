@@ -4,3 +4,4 @@ pytest-asyncio>=0.24
 ruff>=0.6
 mypy>=1.11
 pypdfium2>=4
+fakeredis>=2.26

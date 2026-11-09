@@ -1,4 +1,4 @@
-"""Outbox dispatcher — delivers queued messages (SMS via Xabarchi, Telegram via the company bot).
+"""Outbox dispatcher — delivers queued messages (SMS via Xabarchi, Telegram via the unit's bot account).
 
 Runs from `workers/runner.py` every `settings.outbox_poll_seconds` under a Redis lease.
 One pass = claim a batch (FOR UPDATE SKIP LOCKED → `sending` + 60s lease, committed), then
@@ -8,17 +8,25 @@ deliver each message and persist the outcome. Nothing here runs inside an HTTP r
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.crypto import decrypt
-from app.infrastructure.db.models import Branch, Company, OutboxMessage
+from app.infrastructure.db.models import MessagingAccount, OutboxMessage
 from app.infrastructure.db.session import session_scope
 from app.modules.messaging import repository as repo
 from app.modules.messaging import xabarchi
-from app.modules.messaging.service import mark_document_delivery, outgoing_text, sms_account
+from app.modules.messaging.service import (
+    SMS_NOT_CONFIGURED,
+    SmsAccount,
+    account_to_sms,
+    mark_document_delivery,
+    outgoing_text,
+    sms_account_for,
+)
 from app.modules.messaging.xabarchi import XabarchiError, XabarchiTransientError
 
 log = logging.getLogger("outbox")
@@ -69,16 +77,23 @@ def _defer(msg: OutboxMessage, now: datetime, delay: timedelta, note: str) -> No
     msg.next_attempt_at = now + delay
 
 
-async def _deliver_sms(msg: OutboxMessage, company: Company | None, now: datetime, branch: Branch | None = None) -> None:
-    # the branch's own key, else the company's shared one (decided at delivery time)
-    account = sms_account(company, branch)
+async def _sms_account(session: AsyncSession, msg: OutboxMessage, accounts: dict[uuid.UUID, MessagingAccount]) -> SmsAccount | None:
+    """The key a message goes out with: the account it was queued with while it can still send; otherwise — no
+    account recorded, or that account since removed / switched off — whatever is in effect for its facility now."""
+    account = account_to_sms(accounts.get(msg.account_id)) if msg.account_id else None
+    if account is None and msg.unit_id:
+        account = await sms_account_for(session, msg.unit_id)
+    return account
+
+
+async def _deliver_sms(session: AsyncSession, msg: OutboxMessage, now: datetime, accounts: dict[uuid.UUID, MessagingAccount]) -> None:
+    account = await _sms_account(session, msg, accounts)
     api_key = decrypt(account.key_enc) if account else None
     if not account or not api_key:
-        _mark_failed(msg, "sms_not_configured")
+        _mark_failed(msg, SMS_NOT_CONFIGURED)
         return
-    priority = account.priority
     try:
-        results = await xabarchi.send_sms(api_key, [msg.to], outgoing_text(msg), priority)
+        results = await xabarchi.send_sms(api_key, [msg.to], outgoing_text(msg), account.priority)
     except XabarchiTransientError as exc:
         _mark_retry(msg, now, exc.message)
         return
@@ -106,11 +121,14 @@ async def _deliver_telegram(session: AsyncSession, msg: OutboxMessage, now: date
         _mark_failed(msg, msg.error or "telegram_not_configured")
 
 
-async def deliver_one(session: AsyncSession, msg: OutboxMessage, company: Company | None, branch: Branch | None = None) -> str:
-    """Deliver a claimed (`sending`) message and update it in place; returns the resulting status."""
+async def deliver_one(session: AsyncSession, msg: OutboxMessage, accounts: dict[uuid.UUID, MessagingAccount] | None = None) -> str:
+    """Deliver a claimed (`sending`) message and update it in place; returns the resulting status.
+    `accounts` = the batch's pre-loaded messaging accounts by id (loaded on demand when not given)."""
     now = datetime.now(UTC)
     if msg.channel == "sms":
-        await _deliver_sms(msg, company, now, branch)
+        if accounts is None:
+            accounts = await repo.load_accounts(session, {msg.account_id} if msg.account_id else set())
+        await _deliver_sms(session, msg, now, accounts)
     elif msg.channel == "telegram":
         await _deliver_telegram(session, msg, now)
     else:  # portal messages are informational — nothing to push
@@ -132,14 +150,13 @@ async def dispatch_outbox_once() -> int:
     counts: dict[str, int] = {}
     async with session_scope() as session:
         rows = await repo.load_messages(session, ids)
-        companies = await repo.load_companies(session, {r.company_id for r in rows})
-        branches = await repo.load_branches(session, {r.branch_id for r in rows if r.branch_id and r.channel == "sms"})
+        accounts = await repo.load_accounts(session, {r.account_id for r in rows if r.account_id and r.channel == "sms"})
         for msg in rows:
             try:
                 # SAVEPOINT per row: a DB-side failure inside delivery rolls back only this row's
                 # writes and leaves the session usable for the rest of the batch.
                 async with session.begin_nested():
-                    status = await deliver_one(session, msg, companies.get(msg.company_id), branches.get(msg.branch_id) if msg.branch_id else None)
+                    status = await deliver_one(session, msg, accounts)
             except Exception:  # never let one bad row poison the batch
                 log.exception("outbox %s: unexpected delivery error", msg.id)
                 await session.refresh(msg)

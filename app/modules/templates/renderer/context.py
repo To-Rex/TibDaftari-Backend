@@ -1,15 +1,28 @@
 """RenderContext builder — port of Clinic-Web `src/features/documents/buildContext.ts` (spec §1).
 
 Works on plain dicts so it can be used both from ORM rows (templates.service) and from tests.
+
+Organisation keys: `org` is the organisation a document is issued by (the nearest non-facility unit on the
+facility's path — name, shortName, legalName, phone, email, address, logoUrl) and `unit` is the facility itself
+(name, code, phone, address, timezone, …). `company` and `branch` are kept as ALIASES of `org` / `unit` so the
+template documents written before the organisation tree (`{company.name}`, `{branch.code}` …) render unchanged.
+`unit_dict(row)` / `org_of(path_rows)` turn `OrgUnit` rows into the input dicts.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, date, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.core.textutil import fmt_phone
 from app.core.timeutil import age_months, age_years, fmt_date, fmt_datetime, parse_iso, today_local
+
+if TYPE_CHECKING:
+    from app.infrastructure.db.models import OrgUnit
+
+#: public route of a stored file (`files.service.file_url`) — the organisation logo in `org.logoUrl`
+FILE_URL = "/api/v1/files/{file_id}"
 
 GENDER_LABELS: dict[str, dict[str, str]] = {
     "uz": {"male": "Erkak", "female": "Ayol"},
@@ -23,6 +36,35 @@ def gender_label(gender: str | None, language: str = "uz") -> str:
     if not gender:
         return ""
     return GENDER_LABELS.get(language, GENDER_LABELS["uz"]).get(gender, "")
+
+
+def unit_dict(u: OrgUnit | None) -> dict[str, Any] | None:
+    """An `OrgUnit` row → the plain input dict `build_render_context` takes for `org` / `unit` (None stays None)."""
+    if u is None:
+        return None
+    return {
+        "id": str(u.id),
+        "level": u.level,
+        "kind": u.kind,
+        "name": u.name,
+        "shortName": u.short_name,
+        "legalName": u.legal_name,
+        "code": u.code,
+        "phone": u.phone,
+        "email": u.email,
+        "address": u.address,
+        "timezone": u.timezone,
+        "logoUrl": FILE_URL.format(file_id=u.logo_file_id) if u.logo_file_id else None,
+    }
+
+
+def org_of(path: Sequence[OrgUnit]) -> OrgUnit | None:
+    """The organisation on a root → unit path of `OrgUnit` rows: the nearest unit that is not a facility
+    (the unit itself when it is one), None for an empty path."""
+    for u in reversed(list(path)):
+        if u.level != "facility":
+            return u
+    return path[0] if path else None
 
 
 def _dt(v: datetime | date | str | None) -> datetime | date | None:
@@ -158,8 +200,8 @@ def build_render_context(
     patient: dict[str, Any] | None = None,
     order: dict[str, Any] | None = None,
     item: dict[str, Any] | None = None,
-    company: dict[str, Any] | None = None,
-    branch: dict[str, Any] | None = None,
+    org: dict[str, Any] | None = None,
+    unit: dict[str, Any] | None = None,
     category: dict[str, Any] | None = None,
     schema: dict[str, Any] | None = None,
     district_name: str | None = None,
@@ -170,6 +212,8 @@ def build_render_context(
     payments: list[dict[str, Any]] | None = None,
     cashier: str | None = None,
     doc_link: str | None = None,
+    company: dict[str, Any] | None = None,
+    branch: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a RenderContext dict (spec §1) from plain dicts.
 
@@ -177,12 +221,37 @@ def build_render_context(
       patient  {fullName, phone, birthDate, gender, street, passportNumber}
       order    {number, createdAt, subtotal?, discountPercent?, discountAmount?, total?, paidAmount?, itemCount?, note?, status?}
       item     {serviceName, approvedAt, technicianName, doctorName, labNote, values}
-      company  {name, phone, address}   branch {name, address, phone}   category {name, phone}
+      org      {name, shortName, legalName, phone, email, address, logoUrl}  (see `unit_dict`)
+      unit     {name, shortName, code, kind, address, phone, email, timezone}
+      category {name, code, phone}
       items    list of RenderItem dicts (see `to_render_item`)
       payments receipts: [{createdAt, method, amount, note}] → `payments` dataset (i/date/method/amount/note)
       cashier  receipts: name of the employee who opened the cheque
+      company / branch — alias inputs for `org` / `unit` (pre-tree callers); the output always carries
+      `org`, `unit` AND the aliases `company`, `branch` pointing at the same blocks.
     """
     p = patient or {}
+    o = org if org is not None else (company or {})
+    u = unit if unit is not None else (branch or {})
+    org_block: dict[str, Any] = {
+        "name": o.get("name") or "",
+        "shortName": o.get("shortName") or o.get("name") or "",
+        "legalName": o.get("legalName") or "",
+        "phone": o.get("phone"),
+        "email": o.get("email"),
+        "address": o.get("address"),
+        "logoUrl": o.get("logoUrl"),
+    }
+    unit_block: dict[str, Any] = {
+        "name": u.get("name") or "",
+        "shortName": u.get("shortName") or u.get("name") or "",
+        "code": u.get("code") or "",
+        "kind": u.get("kind") or "",
+        "address": u.get("address"),
+        "phone": fmt_phone(u.get("phone")) if u.get("phone") else None,
+        "email": u.get("email"),
+        "timezone": u.get("timezone") or "",
+    }
     birth = _date(p.get("birthDate"))
     ref_day = today or today_local()
     address = ", ".join(x for x in (district_name, p.get("street")) if x)
@@ -227,21 +296,11 @@ def build_render_context(
             "rejectReason": it.get("rejectReason") or "",
             "schemaVersion": str(it.get("schemaVersion")) if it.get("schemaVersion") is not None else "",
         },
-        "company": {
-            "name": (company or {}).get("name") or "",
-            "legalName": (company or {}).get("legalName") or "",
-            "slug": (company or {}).get("slug") or "",
-            "phone": (company or {}).get("phone"),
-            "email": (company or {}).get("email"),
-            "address": (company or {}).get("address"),
-        },
-        "branch": {
-            "name": (branch or {}).get("name") or "",
-            "code": (branch or {}).get("code") or "",
-            "address": (branch or {}).get("address"),
-            "phone": fmt_phone((branch or {}).get("phone")) if (branch or {}).get("phone") else None,
-            "timezone": (branch or {}).get("timezone") or "",
-        },
+        "org": org_block,
+        "unit": unit_block,
+        # aliases — documents authored before the organisation tree keep rendering
+        "company": org_block,
+        "branch": unit_block,
         "category": {"name": (category or {}).get("name") or "", "code": (category or {}).get("code") or "", "phone": (category or {}).get("phone")},
         "today": fmt_date(ref_day),
         "now": fmt_datetime(datetime.now(UTC)),

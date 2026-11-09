@@ -1,10 +1,11 @@
-"""Orders SQL: tenant-scoped selects for orders/items/payments/documents, list + worklist queries,
-atomic cheque numbering, and the catalog/template look-ups the workflow needs (models only)."""
+"""Orders SQL: selects for orders/items/payments/documents (rows by id carry no tenant filter — the service checks
+`staff.require_unit(row.unit_id)`), list + worklist queries over a set of facilities, and the small catalogue /
+template look-ups the workflow needs (models only, no rules)."""
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -17,19 +18,18 @@ from app.core.timeutil import day_range
 from app.infrastructure.db.base import alive
 from app.infrastructure.db.models import (
     AttributeSchema,
-    Branch,
     Category,
-    Company,
     District,
     Employee,
     Order,
     OrderItem,
+    OrgUnit,
     Patient,
     Payment,
     Region,
     ResultDocument,
     ResultTemplate,
-    ServiceType,
+    TemplateUnit,
 )
 from app.modules.orders.schemas import OrderListQuery, WorklistQuery
 
@@ -87,12 +87,10 @@ def parse_uuids(values: Iterable[str]) -> list[uuid.UUID]:
 # ----------------------------------------------------------------------------- orders
 
 
-async def get_order(session: AsyncSession, order_id: uuid.UUID, company_id: uuid.UUID | None, *, for_update: bool = False) -> Order | None:
-    """Alive order by id, optionally restricted to a company; `for_update` takes a row lock so that
-    per-order mutations (items, payments, approvals) are serialised and `recompute` sees committed state."""
+async def get_order(session: AsyncSession, order_id: uuid.UUID, *, for_update: bool = False) -> Order | None:
+    """Alive order by id; `for_update` takes a row lock so that per-order mutations (items, payments, approvals)
+    are serialised and `recompute` sees committed state."""
     stmt = select(Order).where(Order.id == order_id, alive(Order))
-    if company_id is not None:
-        stmt = stmt.where(Order.company_id == company_id)
     if for_update:
         stmt = stmt.with_for_update()
     return (await session.execute(stmt)).scalar_one_or_none()
@@ -114,37 +112,16 @@ async def payments_of_order(session: AsyncSession, order_id: uuid.UUID) -> list[
     return list((await session.execute(stmt)).scalars().all())
 
 
-async def get_item(session: AsyncSession, item_id: uuid.UUID, company_id: uuid.UUID | None) -> OrderItem | None:
-    """Alive item by id, optionally restricted to a company."""
+async def get_item(session: AsyncSession, item_id: uuid.UUID) -> OrderItem | None:
+    """Alive item by id."""
     stmt = select(OrderItem).where(OrderItem.id == item_id, alive(OrderItem))
-    if company_id is not None:
-        stmt = stmt.where(OrderItem.company_id == company_id)
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def get_payment(session: AsyncSession, payment_id: uuid.UUID, company_id: uuid.UUID | None) -> Payment | None:
-    """Alive payment by id, optionally restricted to a company."""
+async def get_payment(session: AsyncSession, payment_id: uuid.UUID) -> Payment | None:
+    """Alive payment by id."""
     stmt = select(Payment).where(Payment.id == payment_id, alive(Payment))
-    if company_id is not None:
-        stmt = stmt.where(Payment.company_id == company_id)
     return (await session.execute(stmt)).scalar_one_or_none()
-
-
-async def allocate_order_number(session: AsyncSession, branch_id: uuid.UUID, company_id: uuid.UUID) -> str | None:
-    """`UPDATE branches SET order_seq = order_seq + 1 ... RETURNING` on the request connection: concurrent
-    creations on one branch serialise on the branch row until commit (gap-free numbers), and no second
-    pooled connection is needed while the request already holds one."""
-    row = (
-        await session.execute(
-            update(Branch)
-            .where(Branch.id == branch_id, Branch.company_id == company_id, alive(Branch))
-            .values(order_seq=Branch.order_seq + 1)
-            .returning(Branch.order_seq, Branch.code)
-        )
-    ).one_or_none()
-    if row is None:
-        return None
-    return f"{row.code}-{int(row.order_seq):06d}"
 
 
 async def bump_patient_stats(session: AsyncSession, patient_id: uuid.UUID, *, orders: int = 0, spent: int = 0, visit_at: datetime | None = None, now: datetime) -> None:
@@ -174,21 +151,18 @@ def _order_search(search: str | None) -> ColumnElement[bool] | None:
     return or_(*clauses) if clauses else false()
 
 
-async def list_orders(session: AsyncSession, company_id: uuid.UUID, q: OrderListQuery, branches: list[uuid.UUID] | None = None) -> tuple[list[Order], int]:
-    """Filtered + paged orders of one company (DOMAIN_RULES section 7 `list`).
+async def list_orders(session: AsyncSession, unit_ids: Sequence[uuid.UUID], q: OrderListQuery) -> tuple[list[Order], int]:
+    """Filtered + paged orders of the given facilities (DOMAIN_RULES section 7 `list`).
 
-    `branches` is the caller's branch scope (StaffPrincipal.branch_scope); without it `q.branch_id` applies as is."""
-    stmt: Select = select(Order).where(*order_conditions(company_id, q, branches))
+    `unit_ids` is the resolved scope: every unit under the URL's unit, already narrowed by `q.unit_id`."""
+    stmt: Select = select(Order).where(*order_conditions(unit_ids, q))
     order_by = [sort_clause(q.sort_by, q.sort_dir, ORDER_SORTABLE, "createdAt"), Order.id.desc()]
     return await paginate_query(session, stmt, q, order_by=order_by)
 
 
-def order_conditions(company_id: uuid.UUID, q: OrderListQuery, branches: list[uuid.UUID] | None = None) -> list[ColumnElement[bool]]:
-    """WHERE clauses of the cheque list (shared by the list and its summary)."""
-    conds: list[ColumnElement[bool]] = [Order.company_id == company_id, alive(Order)]
-    scope = branches if branches is not None else ([to_uuid(q.branch_id)] if q.branch_id else None)
-    if scope is not None:
-        conds.append(Order.branch_id.in_(scope))
+def order_conditions(unit_ids: Sequence[uuid.UUID], q: OrderListQuery) -> list[ColumnElement[bool]]:
+    """WHERE clauses of the cheque list (shared by the list, its summary and the export)."""
+    conds: list[ColumnElement[bool]] = [Order.unit_id.in_(list(unit_ids) or [uuid.UUID(int=0)]), alive(Order)]
     if q.status:
         conds.append(Order.status == q.status)
     if q.payment:
@@ -249,19 +223,6 @@ def _chunks(ids: list[uuid.UUID], size: int = 2000) -> Iterable[list[uuid.UUID]]
         yield ids[i : i + size]
 
 
-async def first_payment_at_by_order(session: AsyncSession, order_ids: list[uuid.UUID]) -> dict[uuid.UUID, datetime]:
-    """order → time of its oldest alive payment (refunded or not)."""
-    out: dict[uuid.UUID, datetime] = {}
-    for part in _chunks(order_ids):
-        rows = (
-            await session.execute(
-                select(Payment.order_id, func.min(Payment.created_at)).where(Payment.order_id.in_(part), alive(Payment)).group_by(Payment.order_id)
-            )
-        ).all()
-        out.update({oid: at for oid, at in rows})
-    return out
-
-
 async def payments_by_order(session: AsyncSession, order_ids: list[uuid.UUID]) -> dict[uuid.UUID, dict[str, int]]:
     """order → {method: Σ non-refunded payments}."""
     out: dict[uuid.UUID, dict[str, int]] = {}
@@ -294,13 +255,13 @@ async def service_names_by_order(session: AsyncSession, order_ids: list[uuid.UUI
     return out
 
 
-async def export_orders(session: AsyncSession, company_id: uuid.UUID, q: OrderListQuery, branches: list[uuid.UUID] | None, limit: int) -> tuple[list[Row[Any]], bool]:
-    """Every cheque the list's filters select, in the list's order (+ who opened it, branch) — at most `limit`."""
+async def export_orders(session: AsyncSession, unit_ids: Sequence[uuid.UUID], q: OrderListQuery, limit: int) -> tuple[list[Row[Any]], bool]:
+    """Every cheque the list's filters select, in the list's order (+ who opened it, the facility's name) — at most `limit`."""
     stmt = (
-        select(Order, Employee.full_name.label("creator"), Branch.name.label("branch"))
+        select(Order, Employee.full_name.label("creator"), OrgUnit.name.label("unit"))
         .outerjoin(Employee, Employee.id == Order.created_by_employee_id)
-        .outerjoin(Branch, Branch.id == Order.branch_id)
-        .where(*order_conditions(company_id, q, branches))
+        .outerjoin(OrgUnit, OrgUnit.id == Order.unit_id)
+        .where(*order_conditions(unit_ids, q))
         .order_by(sort_clause(q.sort_by, q.sort_dir, ORDER_SORTABLE, "createdAt"), Order.id.desc())
         .limit(limit + 1)
     )
@@ -308,9 +269,9 @@ async def export_orders(session: AsyncSession, company_id: uuid.UUID, q: OrderLi
     return rows[:limit], len(rows) > limit
 
 
-async def orders_summary(session: AsyncSession, company_id: uuid.UUID, q: OrderListQuery, branches: list[uuid.UUID] | None = None) -> dict[str, Any]:
+async def orders_summary(session: AsyncSession, unit_ids: Sequence[uuid.UUID], q: OrderListQuery) -> dict[str, Any]:
     """Count + money (non-cancelled) of the filtered cheques, their payments by method, and who opened them."""
-    conds = order_conditions(company_id, q, branches)
+    conds = order_conditions(unit_ids, q)
     live = Order.status != "cancelled"
     row = (
         await session.execute(
@@ -334,7 +295,7 @@ async def orders_summary(session: AsyncSession, company_id: uuid.UUID, q: OrderL
         await session.execute(
             select(Order.created_by_employee_id, func.max(Employee.full_name), n)
             .outerjoin(Employee, Employee.id == Order.created_by_employee_id)
-            .where(*order_conditions(company_id, q.model_copy(update={"created_by": None}), branches))
+            .where(*order_conditions(unit_ids, q.model_copy(update={"created_by": None})))
             .group_by(Order.created_by_employee_id)
             .order_by(n.desc())
             .limit(50)
@@ -364,18 +325,15 @@ def _worklist_search(search: str | None) -> ColumnElement[bool] | None:
     return or_(*clauses)
 
 
-def _worklist_filters(stmt: Select, company_id: uuid.UUID, q: WorklistQuery, *, with_status: bool, branches: list[uuid.UUID] | None = None) -> Select:
-    """Shared WHERE clause of the worklist (items with a schema on paid/partial orders)."""
+def _worklist_filters(stmt: Select, unit_ids: Sequence[uuid.UUID], q: WorklistQuery, *, with_status: bool) -> Select:
+    """Shared WHERE clause of the worklist (items with a schema on paid/partial orders of the given facilities)."""
     stmt = stmt.where(
-        OrderItem.company_id == company_id,
+        OrderItem.unit_id.in_(list(unit_ids) or [uuid.UUID(int=0)]),
         alive(OrderItem),
         alive(Order),
         OrderItem.schema_id.is_not(None),
         Order.payment != "unpaid",
     )
-    scope = branches if branches is not None else ([to_uuid(q.branch_id)] if q.branch_id else None)
-    if scope is not None:
-        stmt = stmt.where(OrderItem.branch_id.in_(scope))
     if q.category_ids:
         stmt = stmt.where(OrderItem.category_id.in_(parse_uuids(q.category_ids) or [uuid.UUID(int=0)]))
     if with_status and q.status:
@@ -391,22 +349,22 @@ def _worklist_filters(stmt: Select, company_id: uuid.UUID, q: WorklistQuery, *, 
     return stmt
 
 
-async def worklist(session: AsyncSession, company_id: uuid.UUID, q: WorklistQuery, branches: list[uuid.UUID] | None = None) -> tuple[list[Row[Any]], int]:
+async def worklist(session: AsyncSession, unit_ids: Sequence[uuid.UUID], q: WorklistQuery) -> tuple[list[Row[Any]], int]:
     """Items with a schema on paid/partial orders + order snapshots + live patient gender/birth date."""
     stmt: Select = (
         select(OrderItem, Order.number, Order.patient_name, Order.patient_phone, Patient.gender, Patient.birth_date)
         .join(Order, Order.id == OrderItem.order_id)
         .join(Patient, Patient.id == Order.patient_id, isouter=True)
     )
-    stmt = _worklist_filters(stmt, company_id, q, with_status=True, branches=branches)
+    stmt = _worklist_filters(stmt, unit_ids, q, with_status=True)
     order_by = [sort_clause(q.sort_by, q.sort_dir, WORKLIST_SORTABLE, "createdAt"), OrderItem.id.desc()]
     return await paginate_query(session, stmt, q, order_by=order_by, scalars=False)
 
 
-async def worklist_counts(session: AsyncSession, company_id: uuid.UUID, q: WorklistQuery, branches: list[uuid.UUID] | None = None) -> dict[str, int]:
+async def worklist_counts(session: AsyncSession, unit_ids: Sequence[uuid.UUID], q: WorklistQuery) -> dict[str, int]:
     """Per-status counts for the same filters (one GROUP BY instead of one request per status tab)."""
     stmt: Select = select(OrderItem.status, func.count()).join(Order, Order.id == OrderItem.order_id)
-    stmt = _worklist_filters(stmt, company_id, q, with_status=False, branches=branches).group_by(OrderItem.status)
+    stmt = _worklist_filters(stmt, unit_ids, q, with_status=False).group_by(OrderItem.status)
     rows = (await session.execute(stmt)).all()
     return {str(status): int(n) for status, n in rows}
 
@@ -414,13 +372,9 @@ async def worklist_counts(session: AsyncSession, company_id: uuid.UUID, q: Workl
 # ----------------------------------------------------------------------------- documents
 
 
-async def get_document(
-    session: AsyncSession, document_id: uuid.UUID, company_id: uuid.UUID | None
-) -> ResultDocument | None:
-    """Alive document by id, optionally restricted to a company."""
+async def get_document(session: AsyncSession, document_id: uuid.UUID) -> ResultDocument | None:
+    """Alive document by id."""
     stmt = select(ResultDocument).where(ResultDocument.id == document_id, alive(ResultDocument))
-    if company_id is not None:
-        stmt = stmt.where(ResultDocument.company_id == company_id)
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
@@ -442,29 +396,20 @@ async def document_token_revoked(session: AsyncSession, token: str) -> bool:
     return (await session.execute(stmt)).first() is not None
 
 
-async def order_branch_id(session: AsyncSession, order_id: uuid.UUID) -> uuid.UUID | None:
-    """Branch of an order (documents carry no branch of their own)."""
-    return (await session.execute(select(Order.branch_id).where(Order.id == order_id))).scalar_one_or_none()
-
-
 async def list_documents(
     session: AsyncSession,
-    company_id: uuid.UUID,
+    unit_ids: Sequence[uuid.UUID],
     *,
     order_id: uuid.UUID | None,
     patient_id: uuid.UUID | None,
-    branches: list[uuid.UUID] | None = None,
     limit: int = 500,
 ) -> list[ResultDocument]:
-    """Company documents filtered by order and/or patient, newest first."""
-    stmt = select(ResultDocument).where(ResultDocument.company_id == company_id, alive(ResultDocument))
+    """Documents of the given facilities filtered by order and/or patient, newest first."""
+    stmt = select(ResultDocument).where(ResultDocument.unit_id.in_(list(unit_ids) or [uuid.UUID(int=0)]), alive(ResultDocument))
     if order_id is not None:
         stmt = stmt.where(ResultDocument.order_id == order_id)
     if patient_id is not None:
         stmt = stmt.where(ResultDocument.patient_id == patient_id)
-    if branches is not None:
-        # a document belongs to the branch of its order
-        stmt = stmt.where(ResultDocument.order_id.in_(select(Order.id).where(Order.company_id == company_id, Order.branch_id.in_(branches))))
     stmt = stmt.order_by(ResultDocument.created_at.desc(), ResultDocument.id.desc()).limit(limit)
     return list((await session.execute(stmt)).scalars().all())
 
@@ -472,21 +417,9 @@ async def list_documents(
 # ----------------------------------------------------------------------------- look-ups (other aggregates, read-only)
 
 
-async def get_patient(session: AsyncSession, patient_id: uuid.UUID, company_id: uuid.UUID) -> Patient | None:
-    """Alive patient of the company."""
-    stmt = select(Patient).where(Patient.id == patient_id, Patient.company_id == company_id, alive(Patient))
-    return (await session.execute(stmt)).scalar_one_or_none()
-
-
-async def get_branch(session: AsyncSession, branch_id: uuid.UUID, company_id: uuid.UUID) -> Branch | None:
-    """Alive branch of the company."""
-    stmt = select(Branch).where(Branch.id == branch_id, Branch.company_id == company_id, alive(Branch))
-    return (await session.execute(stmt)).scalar_one_or_none()
-
-
-async def get_company(session: AsyncSession, company_id: uuid.UUID) -> Company | None:
-    """Alive company."""
-    stmt = select(Company).where(Company.id == company_id, alive(Company))
+async def get_patient(session: AsyncSession, patient_id: uuid.UUID) -> Patient | None:
+    """Alive patient by id (the cheque already proved the patient belongs here)."""
+    stmt = select(Patient).where(Patient.id == patient_id, alive(Patient))
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
@@ -509,30 +442,17 @@ async def get_region_name(session: AsyncSession, region_id: uuid.UUID | None) ->
     return (await session.execute(select(Region.name).where(Region.id == region_id))).scalar_one_or_none()
 
 
-async def service_types_by_ids(
-    session: AsyncSession, company_id: uuid.UUID, ids: Iterable[uuid.UUID]
-) -> dict[uuid.UUID, ServiceType]:
-    """Alive service types of the company by id."""
+async def categories_by_ids(session: AsyncSession, ids: Iterable[uuid.UUID]) -> dict[uuid.UUID, Category]:
+    """Categories by id (any state — item snapshots and render contexts must still resolve)."""
     ids = list(ids)
     if not ids:
         return {}
-    stmt = select(ServiceType).where(ServiceType.company_id == company_id, ServiceType.id.in_(ids), alive(ServiceType))
-    return {s.id: s for s in (await session.execute(stmt)).scalars().all()}
-
-
-async def categories_by_ids(
-    session: AsyncSession, company_id: uuid.UUID, ids: Iterable[uuid.UUID]
-) -> dict[uuid.UUID, Category]:
-    """Categories of the company by id (any state — snapshots must resolve)."""
-    ids = list(ids)
-    if not ids:
-        return {}
-    stmt = select(Category).where(Category.company_id == company_id, Category.id.in_(ids))
+    stmt = select(Category).where(Category.id.in_(ids))
     return {c.id: c for c in (await session.execute(stmt)).scalars().all()}
 
 
 async def schemas_by_ids(session: AsyncSession, ids: Iterable[uuid.UUID | None]) -> dict[uuid.UUID, AttributeSchema]:
-    """Attribute schemas by id (None ids ignored)."""
+    """Attribute schemas by id (None ids ignored; any state — frozen items keep rendering)."""
     ids = list({i for i in ids if i is not None})
     if not ids:
         return {}
@@ -540,76 +460,37 @@ async def schemas_by_ids(session: AsyncSession, ids: Iterable[uuid.UUID | None])
     return {s.id: s for s in (await session.execute(stmt)).scalars().all()}
 
 
+async def descendant_category_ids(session: AsyncSession, root_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
+    """The roots plus every transitive alive descendant category (one recursive CTE for all roots)."""
+    roots = list(root_ids)
+    if not roots:
+        return set()
+    base = select(Category.id).where(Category.id.in_(roots), alive(Category)).cte("tree", recursive=True)
+    child = select(Category.id).join(base, Category.parent_id == base.c.id).where(alive(Category))
+    tree = base.union(child)
+    rows = (await session.execute(select(tree.c.id))).scalars().all()
+    return set(rows)
+
+
 # ----------------------------------------------------------------------------- templates (rows only; rendering is templates.service)
 
 
-async def get_template(session: AsyncSession, template_id: uuid.UUID, company_id: uuid.UUID) -> ResultTemplate | None:
-    """Alive template of the company in any status."""
-    stmt = select(ResultTemplate).where(
-        ResultTemplate.id == template_id, ResultTemplate.company_id == company_id, alive(ResultTemplate)
-    )
+async def get_template(session: AsyncSession, template_id: uuid.UUID) -> ResultTemplate | None:
+    """Alive template by id, any status (the service decides whether it is usable at the facility)."""
+    stmt = select(ResultTemplate).where(ResultTemplate.id == template_id, alive(ResultTemplate))
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-def _branch_ok(branch_id: uuid.UUID):
-    """Template is usable in the branch: bound to it, or bound to no branch at all."""
-    return ResultTemplate.branch_ids.any(branch_id) | (func.cardinality(ResultTemplate.branch_ids) == 0)
-
-
-def _branch_specificity() -> ColumnElement[int]:
-    """Order key: bound to fewer branches = more specific; company-wide (no binding) last."""
-    n = func.cardinality(ResultTemplate.branch_ids)
-    return case((n == 0, 1_000_000), else_=n)
-
-
-async def find_active_template(
-    session: AsyncSession, company_id: uuid.UUID, service_type_id: uuid.UUID, category_id: uuid.UUID, branch_id: uuid.UUID
-) -> ResultTemplate | None:
-    """Active template of the branch bound to the service type or its category — the most branch-specific
-    one first, then the oldest."""
-    stmt = (
-        select(ResultTemplate)
-        .where(
-            ResultTemplate.company_id == company_id,
-            alive(ResultTemplate),
-            ResultTemplate.status == "active",
-            ResultTemplate.scope != "receipt",
-            or_(ResultTemplate.service_type_ids.any(service_type_id), ResultTemplate.category_ids.any(category_id)),
-            _branch_ok(branch_id),
-        )
-        .order_by(_branch_specificity(), ResultTemplate.created_at, ResultTemplate.id)
-        .limit(1)
-    )
-    return (await session.execute(stmt)).scalar_one_or_none()
-
-
-async def find_receipt_template(session: AsyncSession, company_id: uuid.UUID, branch_id: uuid.UUID) -> ResultTemplate | None:
-    """Active receipt (cheque) template of the branch — most branch-specific first, then the oldest."""
-    stmt = (
-        select(ResultTemplate)
-        .where(ResultTemplate.company_id == company_id, alive(ResultTemplate), ResultTemplate.status == "active", ResultTemplate.scope == "receipt", _branch_ok(branch_id))
-        .order_by(_branch_specificity(), ResultTemplate.created_at, ResultTemplate.id)
-        .limit(1)
-    )
-    return (await session.execute(stmt)).scalar_one_or_none()
-
-
-async def find_generic_template(session: AsyncSession, company_id: uuid.UUID, branch_id: uuid.UUID) -> ResultTemplate | None:
-    """Active catch-all template of the branch (no service-type bindings) — most branch-specific first."""
-    stmt = (
-        select(ResultTemplate)
-        .where(
-            ResultTemplate.company_id == company_id,
-            alive(ResultTemplate),
-            ResultTemplate.status == "active",
-            ResultTemplate.scope != "receipt",
-            func.cardinality(ResultTemplate.service_type_ids) == 0,
-            _branch_ok(branch_id),
-        )
-        .order_by(_branch_specificity(), ResultTemplate.created_at, ResultTemplate.id)
-        .limit(1)
-    )
-    return (await session.execute(stmt)).scalar_one_or_none()
+async def template_units_for(session: AsyncSession, template_ids: Iterable[uuid.UUID]) -> dict[uuid.UUID, set[uuid.UUID]]:
+    """template → the units it is explicitly limited to (`template_units`); absent = usable in the owner's whole subtree."""
+    ids = list({i for i in template_ids})
+    if not ids:
+        return {}
+    rows = (await session.execute(select(TemplateUnit.template_id, TemplateUnit.unit_id).where(TemplateUnit.template_id.in_(ids)))).all()
+    out: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for tid, uid in rows:
+        out.setdefault(tid, set()).add(uid)
+    return out
 
 
 # ----------------------------------------------------------------------------- receipt tracking

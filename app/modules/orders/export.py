@@ -21,21 +21,21 @@ METHODS = ("cash", "card", "transfer", "insurance")
 
 LABELS: dict[str, dict[str, str]] = {
     "uz": {
-        "sheet": "Cheklar", "title": "Cheklar", "no": "№", "number": "Chek", "date": "Sana", "branch": "Filial", "patient": "Bemor",
+        "sheet": "Cheklar", "title": "Cheklar", "no": "№", "number": "Chek", "date": "Sana", "unit": "Muassasa", "patient": "Bemor",
         "phone": "Telefon", "items": "Xizmatlar soni", "services": "Xizmatlar", "subtotal": "Summa", "discountPercent": "Chegirma %",
         "discount": "Chegirma", "total": "Jami", "paid": "To‘langan", "debt": "Qarz", "cash": "Naqd", "card": "Karta",
         "transfer": "O‘tkazma", "insurance": "Sug‘urta", "payment": "To‘lov holati", "status": "Holat", "createdBy": "Chekni ochgan",
         "totals": "Jami", "generated": "Yaratildi: {at} · {n} ta chek", "truncated": "Faqat birinchi {n} ta chek eksport qilindi — filtrlarni toraytiring",
     },
     "ru": {
-        "sheet": "Чеки", "title": "Чеки", "no": "№", "number": "Чек", "date": "Дата", "branch": "Филиал", "patient": "Пациент",
+        "sheet": "Чеки", "title": "Чеки", "no": "№", "number": "Чек", "date": "Дата", "unit": "Учреждение", "patient": "Пациент",
         "phone": "Телефон", "items": "Кол-во услуг", "services": "Услуги", "subtotal": "Сумма", "discountPercent": "Скидка %",
         "discount": "Скидка", "total": "Итого", "paid": "Оплачено", "debt": "Долг", "cash": "Наличные", "card": "Карта",
         "transfer": "Перевод", "insurance": "Страховка", "payment": "Оплата", "status": "Статус", "createdBy": "Кто открыл",
         "totals": "Итого", "generated": "Создано: {at} · чеков: {n}", "truncated": "Выгружены только первые {n} чеков — сузьте фильтры",
     },
     "en": {
-        "sheet": "Orders", "title": "Orders", "no": "#", "number": "Order", "date": "Date", "branch": "Branch", "patient": "Patient",
+        "sheet": "Orders", "title": "Orders", "no": "#", "number": "Order", "date": "Date", "unit": "Facility", "patient": "Patient",
         "phone": "Phone", "items": "Services", "services": "Service names", "subtotal": "Subtotal", "discountPercent": "Discount %",
         "discount": "Discount", "total": "Total", "paid": "Paid", "debt": "Debt", "cash": "Cash", "card": "Card",
         "transfer": "Transfer", "insurance": "Insurance", "payment": "Payment", "status": "Status", "createdBy": "Opened by",
@@ -62,7 +62,7 @@ def fmt_phone(p: str | None) -> str:
 
 
 def local_naive(dt: datetime | None) -> datetime | None:
-    """Excel has no time zones: the clinic's wall-clock time."""
+    """Excel has no time zones: the organisation's wall-clock time."""
     return dt.astimezone(DEFAULT_TZ).replace(tzinfo=None) if dt else None
 
 
@@ -76,7 +76,7 @@ def build_xlsx(
     truncated: bool = False,
     generated_at: datetime,
 ) -> bytes:
-    """`rows`: objects with `.Order`, `.creator`, `.branch` (see repository.export_orders)."""
+    """`rows`: objects with `.Order`, `.creator`, `.unit` (the facility's name — see repository.export_orders)."""
     lang = lang if lang in LABELS else "uz"
     labels = LABELS[lang]
     buf = io.BytesIO()
@@ -95,7 +95,7 @@ def build_xlsx(
     tot_f = wb.add_format({"bold": True, "top": 2, "num_format": "#,##0", "bg_color": "#F4F6F5"})
 
     cols: list[tuple[str, int]] = [
-        ("no", 6), ("number", 13), ("date", 17), ("branch", 18), ("patient", 26), ("phone", 18), ("items", 9), ("services", 40),
+        ("no", 6), ("number", 13), ("date", 17), ("unit", 22), ("patient", 26), ("phone", 18), ("items", 9), ("services", 40),
         ("subtotal", 13), ("discountPercent", 10), ("discount", 12), ("total", 13), ("paid", 13), ("debt", 12),
         *[(m, 12) for m in METHODS], ("payment", 14), ("status", 15), ("createdBy", 22),
     ]
@@ -125,7 +125,7 @@ def build_xlsx(
         created = local_naive(o.created_at)
         if created:
             ws.write_datetime(r, ci["date"], created, date_f)
-        ws.write_string(r, ci["branch"], row.branch or "", text_f)
+        ws.write_string(r, ci["unit"], row.unit or "", text_f)
         ws.write_string(r, ci["patient"], o.patient_name or "", text_f)
         ws.write_string(r, ci["phone"], fmt_phone(o.patient_phone), text_f)
         ws.write_number(r, ci["items"], o.item_count, int_f)

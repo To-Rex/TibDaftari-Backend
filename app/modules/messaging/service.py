@@ -1,69 +1,78 @@
 """Messaging service — the ONLY way other modules create SMS/Telegram messages and notifications.
 
-`enqueue()` writes an outbox row; the dispatcher worker (`dispatcher.py`) delivers it
-(Xabarchi for SMS, the company bot for Telegram). Nothing is sent synchronously inside a
-request — a slow provider must never slow down the clinic.
+`enqueue()` writes an outbox row; the dispatcher worker (`dispatcher.py`) delivers it (Xabarchi for SMS, the
+unit's Telegram bot account for Telegram). Nothing is sent synchronously inside a request — a slow provider must
+never slow down the clinic.
+
+Credentials and texts are inherited down the organisation tree: `sms_account_for(unit)` / `sms_texts_for(unit)`
+pick the nearest `messaging_accounts` / `sms_templates` rows on the path above the facility.
 """
 
 from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import RequestMeta, StaffPrincipal
 from app.core.audit import audit
 from app.core.crypto import decrypt, encrypt
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import ValidationError
 from app.core.pagination import page_of
 from app.core.schemas import Page
+from app.core.scope import UnitScope, ids_of, narrow_to
 from app.core.textutil import fmt_money_ru, is_valid_uz_phone, norm_phone
 from app.core.timeutil import to_iso
-from app.infrastructure.db.models import Branch, Company, Notification, OutboxMessage
+from app.infrastructure.db.models import MessagingAccount, Notification, OutboxMessage, Patient
 from app.modules.messaging import repository as repo
 from app.modules.messaging.schemas import NotificationOut, OutboxCountsOut, OutboxMessageOut, OutboxQuery, SendIn
+from app.modules.units import repository as units_repo
+from app.modules.units import service as units
+
+#: `OutboxMessage.error` of a row that could not go out because no SMS account is configured for its facility
+SMS_NOT_CONFIGURED = "sms_not_configured"  # error code the UI maps to a label (the message text is "SMS provayder sozlanmagan")
 
 # ----------------------------------------------------------------------------- texts
 
+#: every placeholder a text may use; `{company}` / `{branch}` are kept as aliases of `{org}` / `{unit}` so texts
+#: saved before the organisation tree keep rendering
+PLACEHOLDERS: tuple[str, ...] = ("patient", "order", "service", "org", "unit", "company", "branch", "amount", "total", "remaining", "count", "code", "link", "login", "password")
+
 DEFAULT_TEMPLATES: dict[str, str] = {
-    # {patient} {order} {service} {company} {branch} {amount} {total} {remaining} {count} {code} {link}
+    # {org} = the organisation (nearest node above facility level: "Xorazm SES"), {unit} = the facility's name
     # payment receipt: {amount} = this payment, {total} = the cheque total, {remaining} = still to pay (money as 120 000)
-    # {branch} = the name of the order's branch (empty for messages without one)
     # {link} = the public result PDF (results only); it is what makes the SMS useful on any phone
-    "payment_receipt": "Chek {order}: {amount} so‘m qabul qilindi. Natijalar tayyor bo‘lganda xabar beramiz. {company}",
-    "result_ready": "{service} natijasi tayyor: {link} {company}",
-    "result_ready_order": "{service}: {count} ta tahlil natijasi tayyor: {link} {company}",
-    "reminder": "Hurmatli {patient}! Sizni {company} klinikasida kutamiz. Chek: {order}",
+    "payment_receipt": "Chek {order}: {amount} so‘m qabul qilindi. Natijalar tayyor bo‘lganda xabar beramiz. {org}",
+    "result_ready": "{service} natijasi tayyor: {link} {org}",
+    "result_ready_order": "{service}: {count} ta tahlil natijasi tayyor: {link} {org}",
+    "reminder": "Hurmatli {patient}! Sizni {org} klinikasida kutamiz. Chek: {order}",
     "otp": "Sizning tasdiqlash kodingiz: {code}",
     # portal login issued at reception; {link} = the portal sign-in page
-    "portal_access": "{company} shaxsiy kabinetiga kirish: {link} Login: {login} Parol: {password}",
+    "portal_access": "{org} shaxsiy kabinetiga kirish: {link} Login: {login} Parol: {password}",
 }
 
 
-def sms_overrides(company: Company | None, branch: Branch | None = None) -> dict[str, str]:
-    """The texts a message of `branch` uses: the branch's own once it saved them (an empty value = the default),
-    otherwise the company's (`companies.settings.smsTemplates`)."""
-    own = (branch.settings or {}).get("smsTemplates") if branch is not None else None
-    if isinstance(own, dict):
-        return own
-    return ((company.settings or {}).get("smsTemplates") or {}) if company else {}
-
-
-def render_text(company: Company | None, kind: str, *, branch: Branch | None = None, **vars: Any) -> str:
-    """The branch's / company's override (`sms_overrides`) or the default text."""
-    overrides = sms_overrides(company, branch)
+def render_text(texts: Mapping[str, str] | None, kind: str, **vars: Any) -> str:
+    """The unit's (inherited) text for `kind` — `sms_texts_for()` — or the platform default, with the placeholders
+    filled in. `company` and `branch` are aliases of `org` and `unit` (either spelling may be passed or used)."""
+    overrides = dict(texts or {})
     tpl = overrides.get(kind)
     if not tpl and kind == "result_ready_order":
         # A customised `result_ready` text also wins for order-scope approvals (DOMAIN_RULES §10).
         tpl = overrides.get("result_ready")
     tpl = tpl or DEFAULT_TEMPLATES.get(kind, "{service}")
-    values = {"patient": "", "order": "", "service": "", "company": company.name if company else "", "branch": (getattr(branch, "name", "") or "") if branch is not None else "", "amount": "", "total": "", "remaining": "", "count": "", "code": "", "link": ""}
+    values = dict.fromkeys(PLACEHOLDERS, "")
     values.update({k: ("" if v is None else str(v)) for k, v in vars.items()})
+    values["org"] = values["org"] or values["company"]
+    values["company"] = values["company"] or values["org"]
+    values["unit"] = values["unit"] or values["branch"]
+    values["branch"] = values["branch"] or values["unit"]
     out = tpl
     for k, v in values.items():
         out = out.replace("{" + k + "}", v)
@@ -73,29 +82,84 @@ def render_text(company: Company | None, kind: str, *, branch: Branch | None = N
     return out
 
 
-def payment_receipt_text(
-    company: Company, order_number: str, amount: int, patient_name: str = "", branch: Branch | None = None, total: int | None = None, remaining: int | None = None
+async def sms_texts_for(session: AsyncSession, unit_id: uuid.UUID | None) -> dict[str, str]:
+    """The SMS texts a message of `unit_id` uses: its own, else the nearest ancestor's, per key (missing = default)."""
+    if unit_id is None:
+        return {}
+    return await units_repo.resolve_sms_texts(session, unit_id)
+
+
+async def _text_context(session: AsyncSession, unit_id: uuid.UUID | None) -> tuple[dict[str, str], str, str]:
+    """`(texts, org, unit)` for a message of the facility `unit_id` — defaults and empty names without one."""
+    if unit_id is None:
+        return {}, "", ""
+    texts = await sms_texts_for(session, unit_id)
+    org = await units.org_name(session, unit_id)
+    unit = (await units_repo.units_by_ids(session, [unit_id])).get(unit_id)
+    unit_name = unit.name if unit is not None and unit.level == "facility" else ""
+    return texts, org, unit_name
+
+
+async def payment_receipt_text(
+    session: AsyncSession, unit_id: uuid.UUID | None, order_number: str, amount: int, patient_name: str = "", total: int | None = None, remaining: int | None = None
 ) -> str:
+    texts, org, unit = await _text_context(session, unit_id)
     return render_text(
-        company, "payment_receipt", branch=branch, order=order_number, amount=fmt_money_ru(amount), patient=patient_name,
+        texts, "payment_receipt", org=org, unit=unit, order=order_number, amount=fmt_money_ru(amount), patient=patient_name,
         total=fmt_money_ru(total) if total is not None else "", remaining=fmt_money_ru(remaining) if remaining is not None else "",
     )
 
 
-def result_ready_text(company: Company, service_name: str, patient_name: str = "", order_number: str = "", link: str = "", branch: Branch | None = None) -> str:
-    return render_text(company, "result_ready", branch=branch, service=service_name, patient=patient_name, order=order_number, link=link)
+async def result_ready_text(session: AsyncSession, unit_id: uuid.UUID | None, service_name: str, patient_name: str = "", order_number: str = "", link: str = "") -> str:
+    texts, org, unit = await _text_context(session, unit_id)
+    return render_text(texts, "result_ready", org=org, unit=unit, service=service_name, patient=patient_name, order=order_number, link=link)
 
 
-def result_ready_order_text(company: Company, template_name: str, count: int, patient_name: str = "", order_number: str = "", link: str = "", branch: Branch | None = None) -> str:
-    return render_text(company, "result_ready_order", branch=branch, service=template_name, count=count, patient=patient_name, order=order_number, link=link)
+async def result_ready_order_text(
+    session: AsyncSession, unit_id: uuid.UUID | None, template_name: str, count: int, patient_name: str = "", order_number: str = "", link: str = ""
+) -> str:
+    texts, org, unit = await _text_context(session, unit_id)
+    return render_text(texts, "result_ready_order", org=org, unit=unit, service=template_name, count=count, patient=patient_name, order=order_number, link=link)
 
 
-def otp_text(company: Company | None, code: str) -> str:
-    return render_text(company, "otp", code=code)
+async def otp_text(session: AsyncSession, unit_id: uuid.UUID | None, code: str) -> str:
+    texts, org, unit = await _text_context(session, unit_id)
+    return render_text(texts, "otp", org=org, unit=unit, code=code)
 
 
-def portal_access_text(company: Company | None, login: str, password: str, link: str) -> str:
-    return render_text(company, "portal_access", login=login, password=password, link=link)
+async def portal_access_text(session: AsyncSession, unit_id: uuid.UUID | None, login: str, password: str, link: str) -> str:
+    texts, org, unit = await _text_context(session, unit_id)
+    return render_text(texts, "portal_access", org=org, unit=unit, login=login, password=password, link=link)
+
+
+# ----------------------------------------------------------------------------- SMS accounts
+
+
+@dataclass(frozen=True, slots=True)
+class SmsAccount:
+    """The Xabarchi account a message goes out through."""
+
+    key_enc: str
+    priority: str
+    #: the unit the account sits on (the facility itself or an ancestor whose key it inherits)
+    unit_id: uuid.UUID
+    #: the `messaging_accounts` row (recorded on the outbox row so the dispatcher sends with the same key)
+    account_id: uuid.UUID | None = None
+
+
+def account_to_sms(account: MessagingAccount | None) -> SmsAccount | None:
+    """A usable Xabarchi account, or None: missing, deleted, inactive, `provider='none'` (SMS switched off) or no key."""
+    if account is None or account.deleted_at is not None or not account.is_active or account.provider == "none" or not account.api_key_enc:
+        return None
+    return SmsAccount(key_enc=account.api_key_enc, priority=account.default_priority or "transactional", unit_id=account.unit_id, account_id=account.id)
+
+
+async def sms_account_for(session: AsyncSession, unit_id: uuid.UUID | None) -> SmsAccount | None:
+    """The nearest active `sms` account on the unit's path (own first, then ancestors); None = SMS not configured
+    here — including when the nearest account says `provider='none'`, which switches SMS off for that subtree."""
+    if unit_id is None:
+        return None
+    return account_to_sms(await units_repo.resolve_account(session, unit_id, "sms"))
 
 
 # ----------------------------------------------------------------------------- outbox
@@ -103,12 +167,12 @@ def portal_access_text(company: Company | None, login: str, password: str, link:
 
 def build_message(
     *,
-    company_id: uuid.UUID,
+    unit_id: uuid.UUID | None,
     channel: str,
     kind: str,
     to: str,
     text: str,
-    branch_id: uuid.UUID | None = None,
+    account_id: uuid.UUID | None = None,
     patient_id: uuid.UUID | None = None,
     order_id: uuid.UUID | None = None,
     document_id: uuid.UUID | None = None,
@@ -122,8 +186,8 @@ def build_message(
         to = norm_phone(to)
     scheduled = scheduled_at if scheduled_at and scheduled_at > now else None
     return OutboxMessage(
-        company_id=company_id,
-        branch_id=branch_id,
+        unit_id=unit_id,
+        account_id=account_id,
         patient_id=patient_id,
         order_id=order_id,
         document_id=document_id,
@@ -140,15 +204,21 @@ def build_message(
     )
 
 
+async def _enqueue(session: AsyncSession, account: SmsAccount | None, **kwargs: Any) -> OutboxMessage:
+    msg = build_message(account_id=account.account_id if account else None, **kwargs)
+    session.add(msg)
+    await session.flush()
+    return msg
+
+
 async def enqueue(
     session: AsyncSession,
     *,
-    company_id: uuid.UUID,
+    unit_id: uuid.UUID | None,
     channel: str,
     kind: str,
     to: str,
     text: str,
-    branch_id: uuid.UUID | None = None,
     patient_id: uuid.UUID | None = None,
     order_id: uuid.UUID | None = None,
     document_id: uuid.UUID | None = None,
@@ -156,14 +226,17 @@ async def enqueue(
     payload: dict[str, Any] | None = None,
     created_by: uuid.UUID | None = None,
 ) -> OutboxMessage:
-    """Persist one outbox row (flushed so the id is available); the worker delivers it later."""
-    msg = build_message(
-        company_id=company_id,
+    """Persist one outbox row (flushed so the id is available); the worker delivers it later. An SMS row records
+    the account in effect for its facility (`account_id`, None when nothing is configured)."""
+    account = await sms_account_for(session, unit_id) if channel == "sms" else None
+    return await _enqueue(
+        session,
+        account,
+        unit_id=unit_id,
         channel=channel,
         kind=kind,
         to=to,
         text=text,
-        branch_id=branch_id,
         patient_id=patient_id,
         order_id=order_id,
         document_id=document_id,
@@ -171,57 +244,17 @@ async def enqueue(
         payload=payload,
         created_by=created_by,
     )
-    session.add(msg)
-    await session.flush()
-    return msg
 
 
-@dataclass(frozen=True)
-class SmsAccount:
-    """The Xabarchi account a message goes out through."""
-
-    key_enc: str
-    priority: str
-    #: `branch` = the branch's own key, `company` = the company's shared key
-    source: str
-
-
-def sms_account(company: Company | None, branch: Branch | None = None) -> SmsAccount | None:
-    """Which key sends a message of `branch`: the branch's own key once it saved one; nothing when the branch
-    switched SMS off; otherwise (no branch, or a branch on the shared key) the company's key. None = not configured."""
-    if branch is not None and branch.sms_provider is not None:
-        if branch.sms_provider == "none" or not branch.sms_api_key_enc:
-            return None
-        fallback = company.sms_default_priority if company is not None else "transactional"
-        return SmsAccount(branch.sms_api_key_enc, branch.sms_default_priority or fallback, "branch")
-    if company is not None and company.sms_provider != "none" and company.sms_api_key_enc:
-        return SmsAccount(company.sms_api_key_enc, company.sms_default_priority, "company")
-    return None
-
-
-def sms_branch_for(company: Company | None, *candidates: Branch | None) -> tuple[Branch | None, bool]:
-    """Pick the branch a patient-facing code (public-link OTP) goes out through: the first candidate that can send —
-    its own key, or the company's key when it is on the shared one; a candidate that switched SMS off is skipped.
-    No candidate at all (missing rows) → the company's key decides. Returns `(branch, configured)`; `configured`
-    False means nobody can send, and the caller must say so instead of queueing a row that only ends up `failed`."""
-    branches = [b for b in candidates if b is not None]
-    if not branches:
-        return None, sms_account(company) is not None
-    for branch in branches:
-        if sms_account(company, branch) is not None:
-            return branch, True
-    return None, False
-
-
-async def enqueue_sms_if_configured(session: AsyncSession, company: Company, **kwargs: Any) -> OutboxMessage | None:
-    """SMS only makes sense when the message's branch (or, without its own key, the company) has a provider;
-    else the message is recorded as failed (visible in the outbox so staff can see what was not delivered and why)."""
+async def enqueue_sms_if_configured(session: AsyncSession, unit_id: uuid.UUID | None, **kwargs: Any) -> OutboxMessage | None:
+    """SMS only makes sense when the facility (or an ancestor) has a Xabarchi key; else the message is recorded as
+    `failed` (visible in the outbox so staff can see what was not delivered and why). An invalid phone → None;
+    a credential text (OTP, portal password) is never persisted without a provider → None."""
     to = norm_phone(kwargs.get("to", ""))
     if not is_valid_uz_phone(to):
         return None
-    branch_id = kwargs.get("branch_id")
-    branch = await session.get(Branch, branch_id) if branch_id else None
-    configured = sms_account(company, branch) is not None
+    account = await sms_account_for(session, unit_id)
+    configured = account is not None
     # what the outbox may show instead of a secret text (a portal password); OTP codes are masked by pattern
     masked = kwargs.pop("masked_text", None)
     if kwargs.get("kind") in SECRET_KINDS:
@@ -232,12 +265,20 @@ async def enqueue_sms_if_configured(session: AsyncSession, company: Company, **k
         text = str(kwargs.get("text") or "")
         visible = str(masked) if masked is not None else mask_otp_text(text)
         kwargs = {**kwargs, "text": visible, "payload": {**(kwargs.get("payload") or {}), SECRET_TEXT_KEY: encrypt(text)}}
-    msg = await enqueue(session, company_id=company.id, channel="sms", **{**kwargs, "to": to})
+    msg = await _enqueue(session, account, unit_id=unit_id, channel="sms", **{**kwargs, "to": to})
     if not configured:
         msg.status = "failed"
-        msg.error = "sms_not_configured"
+        msg.error = SMS_NOT_CONFIGURED
         msg.next_attempt_at = None
     return msg
+
+
+async def patient_home_unit(session: AsyncSession, patient: Patient) -> uuid.UUID | None:
+    """The facility a patient's own messages (codes, portal access) go out from: where they were registered, else
+    the facility of their latest cheque; None for a patient without either."""
+    if patient.registered_unit_id:
+        return patient.registered_unit_id
+    return await repo.latest_order_unit(session, patient.id)
 
 
 SECRET_TEXT_KEY = "secretText"
@@ -264,27 +305,23 @@ def outgoing_text(msg: OutboxMessage) -> str:
 async def notify(
     session: AsyncSession,
     *,
-    company_id: uuid.UUID,
+    unit_id: uuid.UUID | None,
+    employee_id: uuid.UUID | None,
     title: str,
     body: str,
     kind: str = "info",
     link: str | None = None,
-    employee_id: uuid.UUID | None = None,
 ) -> Notification:
-    n = Notification(company_id=company_id, employee_id=employee_id, title=title, body=body, kind=kind, link=link, read_by=[])
+    """An in-app notice for `unit_id` and everything under it (None = everyone), optionally for one employee only."""
+    n = Notification(unit_id=unit_id, employee_id=employee_id, title=title, body=body, kind=kind, link=link, read_by=[])
     session.add(n)
     await session.flush()
     return n
 
 
-async def count_queued(session: AsyncSession, company_id: uuid.UUID) -> int:
-    return (
-        await session.execute(
-            select(func.count()).select_from(OutboxMessage).where(
-                OutboxMessage.company_id == company_id, OutboxMessage.deleted_at.is_(None), OutboxMessage.status.in_(("queued", "scheduled"))
-            )
-        )
-    ).scalar_one()
+async def count_queued(session: AsyncSession, unit_ids: Sequence[uuid.UUID] | None) -> int:
+    """Messages still waiting to go out from the given facilities (None = everywhere — the superadmin)."""
+    return await repo.count_queued(session, unit_ids)
 
 
 async def mark_document_delivery(session: AsyncSession, document_id: uuid.UUID, channel: str, status: str, detail: str | None = None) -> None:
@@ -309,23 +346,34 @@ async def mark_document_delivery(session: AsyncSession, document_id: uuid.UUID, 
 # ----------------------------------------------------------------------------- staff API (router → service)
 
 
-async def list_outbox(session: AsyncSession, company_id: uuid.UUID, q: OutboxQuery, staff: StaffPrincipal | None = None) -> Page[OutboxMessageOut]:
-    """§8 `listOutbox`: status/kind exact, search on `to` digits or folded text, newest first."""
-    rows, total = await repo.list_outbox(session, company_id, q, status=q.status, kind=q.kind, branches=staff.branch_scope(q.branch_id) if staff else None)
-    return page_of([OutboxMessageOut.model_validate(r) for r in rows], q, total)
+def outbox_out(msg: OutboxMessage, unit_name: str | None = None) -> OutboxMessageOut:
+    dto = OutboxMessageOut.model_validate(msg)
+    dto.unit_name = unit_name
+    return dto
 
 
-async def outbox_counts(session: AsyncSession, company_id: uuid.UUID, q: OutboxQuery, staff: StaffPrincipal | None = None) -> OutboxCountsOut:
-    """Status-tab counters for the messages page (same kind/search filters as the list)."""
-    counts = await repo.outbox_counts(session, company_id, kind=q.kind, search=q.search, branches=staff.branch_scope(q.branch_id) if staff else None)
-    keys = ("scheduled", "queued", "sending", "sent", "delivered", "failed")
+async def _outbox_dtos(session: AsyncSession, rows: Sequence[OutboxMessage]) -> list[OutboxMessageOut]:
+    names = await units_repo.units_by_ids(session, {m.unit_id for m in rows})
+    return [outbox_out(m, names[m.unit_id].name if m.unit_id in names else None) for m in rows]
+
+
+async def list_outbox(session: AsyncSession, scope: UnitScope, q: OutboxQuery, staff: StaffPrincipal | None = None) -> Page[OutboxMessageOut]:
+    """§8 `listOutbox`: everything sent from the facilities under `scope` (narrowed by `unitId`); status/kind exact,
+    search on `to` digits or folded text, newest first."""
+    rows, total = await repo.list_outbox(session, await narrow_to(session, scope, ids_of(q.unit_id)), q, status=q.status, kind=q.kind)
+    return page_of(await _outbox_dtos(session, rows), q, total)
+
+
+async def outbox_counts(session: AsyncSession, scope: UnitScope, q: OutboxQuery, staff: StaffPrincipal | None = None) -> OutboxCountsOut:
+    """Status-tab counters for the messages page (same kind/search/unit filters as the list)."""
+    counts = await repo.outbox_counts(session, await narrow_to(session, scope, ids_of(q.unit_id)), kind=q.kind, search=q.search)
+    keys = ("scheduled", "queued", "sending", "sent", "delivered", "failed", "cancelled")
     return OutboxCountsOut(all=sum(counts.values()), **{k: counts.get(k, 0) for k in keys})
 
 
-async def send(
-    session: AsyncSession, company_id: uuid.UUID, staff: StaffPrincipal, body: SendIn, meta: RequestMeta
-) -> tuple[list[OutboxMessageOut], list[str]]:
+async def send(session: AsyncSession, scope: UnitScope, staff: StaffPrincipal, body: SendIn, meta: RequestMeta) -> tuple[list[OutboxMessageOut], list[str]]:
     """§8 `send`: one SMS outbox row per distinct valid recipient; broadcast (>1) needs messaging.broadcast.
+    The messages go out from a facility: the path unit when it is one, else `body.unit_id` (a facility under it).
 
     Returns (created messages, invalid recipients that were skipped)."""
     valid: list[str] = []
@@ -344,23 +392,19 @@ async def send(
         raise ValidationError("Telefon raqam noto‘g‘ri", code="invalid_phone", details={"invalid": invalid} if invalid else None)
     if len(valid) > 1:
         staff.require("messaging.broadcast")
-    company = await session.get(Company, company_id)
-    if not company or company.deleted_at is not None:
-        raise NotFoundError("Kompaniya topilmadi")
-    # the sending branch: the requested one when it is the company's and inside the employee's scope, else their own
-    branch_id = staff.branch_id
-    if body.branch_id:
-        try:
-            wanted = uuid.UUID(body.branch_id)
-        except ValueError:
-            wanted = None
-        if wanted and staff.allows_branch(wanted) and (await session.execute(select(Branch.id).where(Branch.id == wanted, Branch.company_id == company_id, Branch.deleted_at.is_(None)))).scalar_one_or_none():
-            branch_id = wanted
-    if branch_id is None and not staff.can_switch_branch:
-        mine = list(staff.employee.branch_ids or [])
-        branch_id = mine[0] if mine else None
+    facility = await units.facility_or_422(session, scope, body.unit_id)
+    account = await sms_account_for(session, facility.id)
     created = [
-        build_message(company_id=company_id, channel="sms", kind=body.kind, to=phone, text=body.text, branch_id=branch_id, scheduled_at=body.scheduled_at, created_by=staff.id)
+        build_message(
+            unit_id=facility.id,
+            account_id=account.account_id if account else None,
+            channel="sms",
+            kind=body.kind,
+            to=phone,
+            text=body.text,
+            scheduled_at=body.scheduled_at,
+            created_by=staff.id,
+        )
         for phone in valid
     ]
     session.add_all(created)
@@ -369,7 +413,8 @@ async def send(
         session,
         actor_type="staff",
         actor_id=staff.id,
-        company_id=company_id,
+        unit_id=facility.id,
+        country_id=facility.country_id,
         action="send",
         entity="outbox_message",
         entity_id=created[0].id if len(created) == 1 else None,
@@ -377,12 +422,18 @@ async def send(
         ip=meta.ip,
         request_id=meta.request_id,
     )
-    return [OutboxMessageOut.model_validate(m) for m in created], invalid
+    return [outbox_out(m, facility.name) for m in created], invalid
+
+
+def _notification_roots(staff: StaffPrincipal) -> list[uuid.UUID] | None:
+    """The scope roots whose subtree and path decide which unit-scoped notifications `staff` sees; None = all."""
+    return None if staff.is_super_admin else list(staff.unit_ids)
 
 
 async def list_notifications(session: AsyncSession, staff: StaffPrincipal) -> list[NotificationOut]:
-    """§8 `notifications`: my company, company-wide or addressed to me, newest 50; `read` = me ∈ read_by."""
-    rows = await repo.list_notifications(session, staff.company_id, staff.id)
+    """§8 `notifications`: for everyone, for my units (or the units above them) or addressed to me, newest 50;
+    `read` = me ∈ read_by."""
+    rows = await repo.list_notifications(session, staff.id, _notification_roots(staff))
     return [
         NotificationOut(id=n.id, title=n.title, body=n.body, kind=n.kind, created_at=n.created_at, read=staff.id in (n.read_by or []), link=n.link)
         for n in rows
@@ -391,4 +442,4 @@ async def list_notifications(session: AsyncSession, staff: StaffPrincipal) -> li
 
 async def mark_read(session: AsyncSession, staff: StaffPrincipal, notification_id: uuid.UUID | None) -> None:
     """§8 `markRead(id?)`: one or all visible notifications become read for the caller (idempotent)."""
-    await repo.mark_read(session, staff.company_id, staff.id, notification_id)
+    await repo.mark_read(session, staff.id, _notification_roots(staff), notification_id)

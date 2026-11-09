@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from app.core.schemas import CamelModel
+from app.core.schemas import CamelModel, PageQuery
 
 Gender = Literal["male", "female"]
 
@@ -34,8 +34,11 @@ class PatientPortalOut(CamelModel):
 
 class PatientOut(CamelModel):
     id: str
-    company_id: str
-    branch_id: str | None = None
+    # identity scope: one registry per country
+    country_id: str
+    # the facility that registered the patient (null: legacy, before units owned patients)
+    registered_unit_id: str | None = None
+    registered_unit_name: str | None = None
     full_name: str
     phone: str
     phone_extra: str | None = None
@@ -56,6 +59,13 @@ class PatientOut(CamelModel):
     created_by: str | None = None
 
 
+class PatientListQuery(PageQuery):
+    """PageQuery + `tag` (exact match) + `unitId` (a sub-unit of the path unit — only its subtree)."""
+
+    tag: str | None = None
+    unit_id: str | None = None
+
+
 class PatientUpsertIn(CamelModel):
     """`PatientUpsertInput` — create payload (fullName + phone required)."""
 
@@ -72,8 +82,8 @@ class PatientUpsertIn(CamelModel):
     contract_number: str | None = Field(default=None, max_length=60)
     note: str | None = Field(default=None, max_length=5000)
     tags: list[str] | None = None
-    # the branch registering the patient (default: the employee's own branch)
-    branch_id: str | None = Field(default=None, max_length=64)
+    # the facility registering the patient (default: the path unit when it is a facility)
+    registered_unit_id: str | None = Field(default=None, max_length=64)
 
 
 class PatientPatchIn(CamelModel):
@@ -109,8 +119,9 @@ class PortalAccessIn(CamelModel):
     login: str | None = Field(default=None, max_length=40)
     password: str | None = Field(default=None, min_length=6, max_length=128)
     send_sms: bool = False
-    # the branch the employee works in (top bar) — its SMS account sends the text; default: the patient's branch
-    branch_id: str | None = None
+    # the facility the employee works in (top bar) — its SMS account sends the text; default: the patient's
+    # registered facility (else the facility of their latest cheque)
+    unit_id: str | None = None
 
 
 class PortalAccessOut(CamelModel):
@@ -130,6 +141,12 @@ class CountryOut(CamelModel):
     name_ru: str | None = None
     name_en: str | None = None
     phone_code: str | None = None
+    # per-country operating settings
+    currency_code: str | None = None
+    default_locale: str | None = None
+    timezone: str | None = None
+    phone_mask: str | None = None
+    is_enabled: bool | None = None
 
 
 class RegionOut(CamelModel):
@@ -142,3 +159,5 @@ class DistrictOut(CamelModel):
     id: str
     region_id: str
     name: str
+    # tuman | shahar
+    kind: Literal["district", "city"] = "district"

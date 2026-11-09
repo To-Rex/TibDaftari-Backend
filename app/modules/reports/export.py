@@ -1,4 +1,4 @@
-"""Reports → Excel (.xlsx): patients × analyses with amounts, and the lab / service / branch /
+"""Reports → Excel (.xlsx): patients × analyses with amounts, and the lab / service / facility /
 employee / daily breakdowns. One sheet per cut; numbers stay numbers so Excel can sum them."""
 
 from __future__ import annotations
@@ -23,7 +23,8 @@ class DetailRow:
     phone: str
     service: str
     laboratory: str
-    branch: str
+    #: the facility (muassasa) the cheque was written in
+    unit: str
     price: int
     status: str
 
@@ -44,24 +45,24 @@ class DayRow:
 
 LABELS: dict[str, dict[str, str]] = {
     "uz": {
-        "patients_sheet": "Bemorlar", "lab_sheet": "Laboratoriya", "service_sheet": "Analiz turlari", "branch_sheet": "Filiallar",
+        "patients_sheet": "Bemorlar", "lab_sheet": "Laboratoriya", "service_sheet": "Analiz turlari", "unit_sheet": "Muassasalar",
         "employee_sheet": "Xodimlar", "daily_sheet": "Kunlik",
         "no": "№", "date": "Sana", "order": "Chek", "patient": "Bemor", "phone": "Telefon", "service": "Analiz turi",
-        "lab": "Laboratoriya", "branch": "Filial", "price": "Summa", "status": "Holat", "name": "Nomi", "count": "Soni",
+        "lab": "Laboratoriya", "unit": "Muassasa", "price": "Summa", "status": "Holat", "name": "Nomi", "count": "Soni",
         "revenue": "Tushum", "orders": "Buyurtmalar", "totals": "Jami", "generated": "Yaratildi: {at} · davr: {from_} – {to}",
     },
     "ru": {
-        "patients_sheet": "Пациенты", "lab_sheet": "Лаборатория", "service_sheet": "Виды анализов", "branch_sheet": "Филиалы",
+        "patients_sheet": "Пациенты", "lab_sheet": "Лаборатория", "service_sheet": "Виды анализов", "unit_sheet": "Учреждения",
         "employee_sheet": "Сотрудники", "daily_sheet": "По дням",
         "no": "№", "date": "Дата", "order": "Чек", "patient": "Пациент", "phone": "Телефон", "service": "Вид анализа",
-        "lab": "Лаборатория", "branch": "Филиал", "price": "Сумма", "status": "Статус", "name": "Название", "count": "Кол-во",
+        "lab": "Лаборатория", "unit": "Учреждение", "price": "Сумма", "status": "Статус", "name": "Название", "count": "Кол-во",
         "revenue": "Выручка", "orders": "Заказы", "totals": "Итого", "generated": "Создано: {at} · период: {from_} – {to}",
     },
     "en": {
-        "patients_sheet": "Patients", "lab_sheet": "Laboratory", "service_sheet": "Analyses", "branch_sheet": "Branches",
+        "patients_sheet": "Patients", "lab_sheet": "Laboratory", "service_sheet": "Analyses", "unit_sheet": "Facilities",
         "employee_sheet": "Employees", "daily_sheet": "Daily",
         "no": "#", "date": "Date", "order": "Order", "patient": "Patient", "phone": "Phone", "service": "Analysis",
-        "lab": "Laboratory", "branch": "Branch", "price": "Amount", "status": "Status", "name": "Name", "count": "Count",
+        "lab": "Laboratory", "unit": "Facility", "price": "Amount", "status": "Status", "name": "Name", "count": "Count",
         "revenue": "Revenue", "orders": "Orders", "totals": "Total", "generated": "Generated: {at} · period: {from_} – {to}",
     },
 }
@@ -80,7 +81,7 @@ def build_xlsx(
     detail: Sequence[DetailRow],
     labs: Sequence[AggRow],
     services: Sequence[AggRow],
-    branches: Sequence[AggRow],
+    units: Sequence[AggRow],
     employees: Sequence[AggRow],
     daily: Sequence[DayRow],
     *,
@@ -121,7 +122,7 @@ def build_xlsx(
     # --- patients × analyses (detail)
     ws = wb.add_worksheet(labels["patients_sheet"])
     cols: list[tuple[str, int]] = [
-        ("no", 6), ("date", 17), ("order", 13), ("patient", 26), ("phone", 18), ("service", 28), ("lab", 22), ("branch", 16), ("price", 12), ("status", 14),
+        ("no", 6), ("date", 17), ("order", 13), ("patient", 26), ("phone", 18), ("service", 28), ("lab", 22), ("unit", 22), ("price", 12), ("status", 14),
     ]
     head = head_row(ws, cols, labels["patients_sheet"])
     ci = {key: i for i, (key, _) in enumerate(cols)}
@@ -137,7 +138,7 @@ def build_xlsx(
         ws.write_string(r, ci["phone"], row.phone, text_f)
         ws.write_string(r, ci["service"], row.service, wrap_f)
         ws.write_string(r, ci["lab"], row.laboratory, wrap_f)
-        ws.write_string(r, ci["branch"], row.branch, text_f)
+        ws.write_string(r, ci["unit"], row.unit, text_f)
         ws.write_number(r, ci["price"], row.price, money_f)
         ws.write_string(r, ci["status"], ITEM_STATUS[lang].get(row.status, row.status), text_f)
         total += row.price
@@ -152,7 +153,7 @@ def build_xlsx(
     for sheet, rows in (
         (labels["lab_sheet"], labs),
         (labels["service_sheet"], services),
-        (labels["branch_sheet"], branches),
+        (labels["unit_sheet"], units),
         (labels["employee_sheet"], employees),
     ):
         ws = wb.add_worksheet(sheet)

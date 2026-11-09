@@ -1,4 +1,4 @@
-"""Telegram module rules: login/link flow, patient views (cheques, payments, results), status.
+"""Telegram module rules: bot specs, login/link flow, patient views (cheques, payments, results), status.
 
 Handlers (`handlers.py`) and the bot manager call these with a session from `session_scope()`;
 this module never touches python-telegram-bot objects, so every rule is unit-testable without a bot.
@@ -11,22 +11,26 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit
 from app.core.config import settings
+from app.core.crypto import decrypt
 from app.core.exceptions import RateLimitedError
 from app.core.security import random_digits, sha256_hex
 from app.core.textutil import fmt_money_ru, is_valid_uz_phone, norm_phone, slugify
 from app.core.timeutil import fmt_datetime
-from app.infrastructure.db.models import Company, OtpChallenge, Patient, ResultDocument
+from app.infrastructure.db.models import MessagingAccount, OtpChallenge, Patient, ResultDocument
 from app.infrastructure.redis import rate_limit
 from app.infrastructure.redis.client import get_redis
 from app.modules.messaging import service as messaging
 from app.modules.telegram import repository as repo
 from app.modules.telegram.schemas import TelegramStatusOut
 from app.modules.telegram.texts import DEFAULT_LANG, norm_lang, t
+from app.modules.units import repository as units_repo
+from app.modules.units import service as units_svc
 
 log = logging.getLogger("telegram")
 
@@ -35,6 +39,64 @@ PAYMENTS_LIMIT = 10
 RESULTS_LIMIT = 20
 TELEGRAM_TEXT_LIMIT = 4000
 OTP_PURPOSE = "telegram"
+WEBHOOK_SECRET_KEY = "telegramWebhookSecret"
+BOT_LOCALES = ("uz", "ru", "en")
+
+# ----------------------------------------------------------------------------- bot accounts
+
+
+@dataclass(slots=True, frozen=True)
+class BotSpec:
+    """What a running bot knows about its account — resolved once when the bot (re)starts."""
+
+    account_id: uuid.UUID
+    #: the unit the account sits on (any level); the bot serves that unit's subtree
+    unit_id: uuid.UUID
+    #: the patient registry the bot looks phones up in (the unit's country)
+    country_id: uuid.UUID | None
+    #: the account's own decrypted token, else the platform bot's; None = the bot cannot run
+    token: str | None
+    bot_username: str | None = None
+    #: `telegramWebhookSecret` present in the unit's effective settings → updates arrive by webhook, not polling
+    webhook: bool = False
+    default_lang: str = DEFAULT_LANG
+
+
+def account_token(account: MessagingAccount | None) -> str | None:
+    """The bot token of an account: its own (decrypted) key, else the platform bot's (`TELEGRAM_BOT_TOKEN`)."""
+    if account is None:
+        return None
+    if account.api_key_enc:
+        return decrypt(account.api_key_enc) or None
+    return settings.telegram_bot_token.strip() or None
+
+
+def default_lang_for(effective: dict[str, Any] | None) -> str:
+    """Language used before a chat picked one: the unit's effective `locale` when it is a bot language, else uz."""
+    locale = (effective or {}).get("locale")
+    return norm_lang(locale) if locale in BOT_LOCALES else DEFAULT_LANG
+
+
+def webhook_secret_ok(effective: dict[str, Any] | None, secret: str) -> bool:
+    """True when the unit's effective settings carry `telegramWebhookSecret` and it matches (constant time)."""
+    configured = str((effective or {}).get(WEBHOOK_SECRET_KEY) or "")
+    return bool(configured) and hmac.compare_digest(configured, secret)
+
+
+async def bot_spec(session: AsyncSession, account: MessagingAccount) -> BotSpec:
+    """Resolve an account into the spec its Application runs with (unit → country, effective settings)."""
+    unit = await units_repo.get_unit_any(session, account.unit_id)
+    effective = await units_svc.effective_settings(session, account.unit_id)
+    return BotSpec(
+        account_id=account.id,
+        unit_id=account.unit_id,
+        country_id=unit.country_id if unit is not None else None,
+        token=account_token(account),
+        bot_username=account.bot_username,
+        webhook=bool(effective.get(WEBHOOK_SECRET_KEY)),
+        default_lang=default_lang_for(effective),
+    )
+
 
 # ----------------------------------------------------------------------------- pure helpers
 
@@ -59,19 +121,27 @@ def display_name(patient: Patient | None, lang: str) -> str:
     return (patient.full_name if patient and patient.full_name else "") or t(lang, "default_user")
 
 
+def with_org(text: str, org: str | None) -> str:
+    """A greeting plus the patient's organisation line (🏥 …) when it is known."""
+    return f"{text}\n🏥 {org}" if org else text
+
+
 def clip(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> str:
     """Telegram messages are capped at 4096 chars — trim with an ellipsis like the legacy bot."""
     return text if len(text) <= limit else text[:limit] + "\n..."
 
 
-def format_orders(lang: str, rows: list[tuple[object, list[str]]]) -> str:
-    """"My cheques" message body: number, date, services bullets, sum, paid status."""
+def format_orders(lang: str, rows: list[tuple[object, list[str]]], unit_names: dict[uuid.UUID, str] | None = None) -> str:
+    """"My cheques" message body: number, date, facility (when known), services bullets, sum, paid status."""
     if not rows:
         return t(lang, "no_cheks")
     parts = [t(lang, "cheks_header", n=len(rows))]
     for order, services in rows:
         status = t(lang, "paid") if order.payment == "paid" else t(lang, "unpaid")  # type: ignore[attr-defined]
         block = f"{t(lang, 'chek_no')} {order.number or '—'} — {fmt_datetime(order.created_at)}\n"  # type: ignore[attr-defined]
+        unit_name = (unit_names or {}).get(getattr(order, "unit_id", None))
+        if unit_name:
+            block += f"   🏥 {unit_name}\n"
         for name in services:
             block += f"   • {name}\n"
         block += f"   {t(lang, 'sum_label')}: {fmt_money_ru(order.total)} {t(lang, 'som')}\n"  # type: ignore[attr-defined]
@@ -91,9 +161,10 @@ def format_payments(lang: str, rows: list[tuple[object, str]], total_count: int,
     return clip("\n".join(parts))
 
 
-def result_caption(lang: str, order_number: str | None, title: str | None) -> str:
-    """Caption of a result PDF sent to the patient."""
-    return f"🧾 {t(lang, 'chek_no')} {order_number or '—'} — {title or t(lang, 'result_default')}"
+def result_caption(lang: str, order_number: str | None, title: str | None, unit_name: str | None = None) -> str:
+    """Caption of a result PDF sent to the patient (the facility's name appended when known)."""
+    caption = f"🧾 {t(lang, 'chek_no')} {order_number or '—'} — {title or t(lang, 'result_default')}"
+    return f"{caption} · {unit_name}" if unit_name else caption
 
 
 def pdf_filename(document: ResultDocument) -> str:
@@ -101,26 +172,18 @@ def pdf_filename(document: ResultDocument) -> str:
     return f"{slugify(document.title)}.pdf"
 
 
-def webhook_secret_ok(company: Company | None, secret: str) -> bool:
-    """True when the company configured `settings.telegramWebhookSecret` and it matches (constant time)."""
-    if not company:
-        return False
-    configured = str((company.settings or {}).get("telegramWebhookSecret") or "")
-    return bool(configured) and hmac.compare_digest(configured, secret)
-
-
 # ----------------------------------------------------------------------------- language
 
 
-async def chat_lang(session: AsyncSession, company_id: uuid.UUID, chat_id: str) -> str:
-    """Language of a chat (default uz)."""
-    return norm_lang(await repo.get_lang(session, company_id, chat_id))
+async def chat_lang(session: AsyncSession, account_id: uuid.UUID, chat_id: str) -> str:
+    """Language of a chat with this bot (default uz)."""
+    return norm_lang(await repo.get_lang(session, account_id, chat_id))
 
 
-async def set_chat_lang(session: AsyncSession, company_id: uuid.UUID, chat_id: str, lang: str) -> str:
+async def set_chat_lang(session: AsyncSession, account_id: uuid.UUID, chat_id: str, lang: str) -> str:
     """Persist the chosen language for the chat; returns the effective language."""
     lang = norm_lang(lang)
-    await repo.set_lang(session, company_id, chat_id, lang)
+    await repo.set_lang(session, account_id, chat_id, lang)
     return lang
 
 
@@ -143,36 +206,39 @@ class VerifyResult:
     status: str
     attempts_left: int = 0
     patient_name: str = ""
+    #: the organisation the linked patient belongs to (for the greeting)
+    org_name: str = ""
     extra: dict[str, object] = field(default_factory=dict)
 
 
-async def begin_login(session: AsyncSession, company: Company, chat_id: str, raw_phone: str | None, lang: str) -> LoginStart:
-    """Phone step: validate → find the patient in THIS company → create an OTP challenge → enqueue the SMS."""
+async def begin_login(session: AsyncSession, bot: BotSpec, chat_id: str, raw_phone: str | None, lang: str) -> LoginStart:
+    """Phone step: validate → find the patient in the bot's country registry → create an OTP challenge → enqueue
+    the SMS through the patient's home unit (its SMS account and texts; the bot's unit when they have none)."""
     phone = parse_phone(raw_phone)
     if not phone:
         return LoginStart(status="bad_phone")
-    patient = await repo.patient_by_phone(session, company.id, phone)
+    patient = await repo.patient_by_phone(session, bot.country_id, phone)
     if not patient:
         return LoginStart(status="not_found")
     if not await _otp_send_allowed(phone, chat_id):
         return LoginStart(status="too_many")
     code = random_digits(settings.otp_length)
+    unit_id = await messaging.patient_home_unit(session, patient) or bot.unit_id
     challenge = OtpChallenge(
         phone=phone,
         purpose=OTP_PURPOSE,
         code_hash=sha256_hex(code),
         max_attempts=settings.otp_max_attempts,
         expires_at=datetime.now(UTC) + timedelta(seconds=settings.otp_ttl_seconds),
-        company_id=company.id,
-        meta={"chatId": chat_id, "patientId": str(patient.id), "lang": lang},
+        unit_id=unit_id,
+        meta={"chatId": chat_id, "patientId": str(patient.id), "accountId": str(bot.account_id), "lang": lang},
     )
     session.add(challenge)
     await session.flush()
-    await messaging.enqueue_sms_if_configured(
-        session, company, kind="otp", to=phone, text=t(lang, "otp_sms", otp=code), patient_id=patient.id, branch_id=patient.branch_id
-    )
+    text = await messaging.otp_text(session, unit_id, code) or t(lang, "otp_sms", otp=code)
+    await messaging.enqueue_sms_if_configured(session, unit_id, kind="otp", to=phone, text=text, patient_id=patient.id)
     if settings.otp_dev_mode:
-        log.info("telegram OTP for %s (company %s, chat %s): %s (dev mode)", phone, company.id, chat_id, code)
+        log.info("telegram OTP for %s (account %s, chat %s): %s (dev mode)", phone, bot.account_id, chat_id, code)
     try:
         await get_redis().set(f"otp:cooldown:{phone}", "1", ex=settings.otp_resend_cooldown_seconds)
     except Exception:  # pragma: no cover - Redis degraded
@@ -195,13 +261,14 @@ async def _otp_send_allowed(phone: str, chat_id: str) -> bool:
     return True
 
 
-async def verify_code(session: AsyncSession, company_id: uuid.UUID, chat_id: str, challenge_id: uuid.UUID | None, code: str, lang: str) -> VerifyResult:
-    """Code step: check the challenge (max attempts, expiry), then link the oldest patient with that phone."""
+async def verify_code(session: AsyncSession, bot: BotSpec, chat_id: str, challenge_id: uuid.UUID | None, code: str, lang: str) -> VerifyResult:
+    """Code step: check the challenge (this bot, this chat, max attempts, expiry), then link the oldest patient with that phone."""
     ch = await repo.get_challenge(session, challenge_id) if challenge_id else None
     now = datetime.now(UTC)
-    if not ch or ch.purpose != OTP_PURPOSE or ch.company_id != company_id or ch.consumed_at or ch.expires_at <= now:
+    if not ch or ch.purpose != OTP_PURPOSE or ch.consumed_at or ch.expires_at <= now:
         return VerifyResult(status="expired")
-    if (ch.meta or {}).get("chatId") != chat_id:
+    meta = ch.meta or {}
+    if meta.get("chatId") != chat_id or meta.get("accountId") != str(bot.account_id):
         return VerifyResult(status="expired")
     if sha256_hex(code.strip()) != ch.code_hash:
         ch.attempts = (ch.attempts or 0) + 1
@@ -211,41 +278,43 @@ async def verify_code(session: AsyncSession, company_id: uuid.UUID, chat_id: str
             return VerifyResult(status="over")
         return VerifyResult(status="wrong", attempts_left=left)
     ch.consumed_at = now
-    patient = await repo.patient_by_phone(session, company_id, ch.phone)
+    patient = await repo.patient_by_phone(session, bot.country_id, ch.phone)
     if not patient:
         return VerifyResult(status="expired")
-    await repo.unlink_chat(session, company_id, chat_id, now)  # one chat ↔ one patient per company
-    link = await repo.link_patient(session, patient, chat_id, lang, now)
+    await repo.unlink_chat(session, bot.country_id, chat_id, now)  # one chat ↔ one patient per country
+    link = await repo.link_patient(session, bot.account_id, patient, chat_id, lang, now)
     await audit(
         session,
         actor_type="patient",
         actor_id=patient.id,
-        company_id=company_id,
+        unit_id=ch.unit_id or bot.unit_id,
+        country_id=patient.country_id,
         action="telegram_link",
         entity="patient",
         entity_id=patient.id,
-        after={"chatId": chat_id, "linkId": str(link.id), "lang": lang},
+        after={"chatId": chat_id, "linkId": str(link.id), "accountId": str(bot.account_id), "lang": lang},
     )
-    return VerifyResult(status="linked", patient_name=display_name(patient, lang))
+    return VerifyResult(status="linked", patient_name=display_name(patient, lang), org_name=await patient_org_name(session, patient))
 
 
-async def logout(session: AsyncSession, company_id: uuid.UUID, chat_id: str, lang: str) -> str | None:
+async def logout(session: AsyncSession, bot: BotSpec, chat_id: str, lang: str) -> str | None:
     """Unlink the chat from its patient. Returns the patient's display name, or None when nothing was linked."""
-    patient = await repo.linked_patient(session, company_id, chat_id)
+    patient = await repo.linked_patient(session, bot.country_id, chat_id)
     if not patient:
         return None
     name = display_name(patient, lang)
     now = datetime.now(UTC)
-    ids = await repo.unlink_chat(session, company_id, chat_id, now)
+    ids = await repo.unlink_chat(session, bot.country_id, chat_id, now)
     await audit(
         session,
         actor_type="patient",
         actor_id=patient.id,
-        company_id=company_id,
+        unit_id=patient.registered_unit_id or bot.unit_id,
+        country_id=patient.country_id,
         action="telegram_unlink",
         entity="patient",
         entity_id=patient.id,
-        before={"chatId": chat_id, "patients": [str(i) for i in ids]},
+        before={"chatId": chat_id, "accountId": str(bot.account_id), "patients": [str(i) for i in ids]},
     )
     return name
 
@@ -253,18 +322,34 @@ async def logout(session: AsyncSession, company_id: uuid.UUID, chat_id: str, lan
 # ----------------------------------------------------------------------------- patient views
 
 
-async def orders_text(session: AsyncSession, company_id: uuid.UUID, patient_id: uuid.UUID, lang: str) -> str:
-    """Localised "my cheques" message (last 10 orders)."""
-    rows = await repo.last_orders(session, company_id, patient_id, ORDERS_LIMIT)
-    return format_orders(lang, rows)
+async def patient_org_name(session: AsyncSession, patient: Patient | None) -> str:
+    """The organisation a patient belongs to (greetings): of the facility that registered them, else of the
+    facility of their latest cheque; "" when neither is known."""
+    if patient is None:
+        return ""
+    unit_id = patient.registered_unit_id or await repo.latest_order_unit(session, patient.id)
+    return await units_svc.org_name(session, unit_id)
 
 
-async def payments_text(session: AsyncSession, company_id: uuid.UUID, patient_id: uuid.UUID, lang: str) -> str:
+async def unit_names(session: AsyncSession, rows: list[object]) -> dict[uuid.UUID, str]:
+    """facility id → display name for the rows' `unit_id`s (short name when set)."""
+    units = await units_repo.units_by_ids(session, repo.unit_ids_of(rows))
+    return {uid: (u.short_name or u.name) for uid, u in units.items()}
+
+
+async def orders_text(session: AsyncSession, patient_id: uuid.UUID, lang: str) -> str:
+    """Localised "my cheques" message (last 10 orders, each with its facility)."""
+    rows = await repo.last_orders(session, patient_id, ORDERS_LIMIT)
+    names = await unit_names(session, [o for o, _ in rows])
+    return format_orders(lang, rows, names)
+
+
+async def payments_text(session: AsyncSession, patient_id: uuid.UUID, lang: str) -> str:
     """Localised "my payments" message (last 10 payments + totals)."""
-    rows = await repo.last_payments(session, company_id, patient_id, PAYMENTS_LIMIT)
+    rows = await repo.last_payments(session, patient_id, PAYMENTS_LIMIT)
     if not rows:
         return format_payments(lang, [], 0, 0)
-    count, total = await repo.payments_total(session, company_id, patient_id)
+    count, total = await repo.payments_total(session, patient_id)
     return format_payments(lang, rows, count, total)
 
 
@@ -287,9 +372,10 @@ class ResultFile:
     caption: str
 
 
-async def result_files(session: AsyncSession, company_id: uuid.UUID, patient_id: uuid.UUID, lang: str) -> list[ResultFile]:
+async def result_files(session: AsyncSession, patient_id: uuid.UUID, lang: str) -> list[ResultFile]:
     """Newest 20 final result documents rendered to PDF (a document that fails to render is skipped + logged)."""
-    rows = await repo.latest_final_documents(session, company_id, patient_id, RESULTS_LIMIT)
+    rows = await repo.latest_final_documents(session, patient_id, RESULTS_LIMIT)
+    names = await unit_names(session, [d for d, _ in rows])
     out: list[ResultFile] = []
     for doc, number in rows:
         try:
@@ -297,18 +383,22 @@ async def result_files(session: AsyncSession, company_id: uuid.UUID, patient_id:
         except Exception:
             log.exception("telegram: result PDF %s could not be rendered", doc.id)
             continue
-        out.append(ResultFile(data=data, filename=pdf_filename(doc), caption=result_caption(lang, number, doc.title)))
+        out.append(ResultFile(data=data, filename=pdf_filename(doc), caption=result_caption(lang, number, doc.title, names.get(doc.unit_id))))
     return out
 
 
 # ----------------------------------------------------------------------------- staff API
 
 
-def status_out(company: Company, running: bool) -> TelegramStatusOut:
-    """`GET /companies/{id}/telegram/status` projection."""
-    return TelegramStatusOut(connected=bool(company.telegram_bot_token_enc), bot_username=company.telegram_bot_username, running=running)
-
-
-def default_lang_for(company: Company | None) -> str:
-    """Language used before a chat picked one: the company locale when it is a bot language, else uz."""
-    return norm_lang(company.locale) if company and company.locale in ("uz", "ru", "en") else DEFAULT_LANG
+def status_out(unit_id: uuid.UUID, account: MessagingAccount | None, running: bool) -> TelegramStatusOut:
+    """`GET /units/{id}/telegram/status` projection: the account the unit resolves to (own or inherited)."""
+    if account is None:
+        return TelegramStatusOut(connected=False, running=False)
+    return TelegramStatusOut(
+        connected=True,
+        running=running,
+        bot_username=account.bot_username,
+        account_id=str(account.id),
+        inherited=account.unit_id != unit_id,
+        effective_unit_id=str(account.unit_id),
+    )

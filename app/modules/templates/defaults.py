@@ -1,6 +1,9 @@
-"""Built-in documents: the standard cashier cheque every company starts with — seeded when a company gets
-its first branch, offered as the "Standart chek" start option on the receipt-template page, and created on
-demand through POST /companies/{id}/templates/default-receipt.
+"""Built-in documents: the standard cashier cheque every organisation starts with — seeded when a unit gets
+its first facility (`templates.service.ensure_default_receipt`), offered as the "Standart chek" start option on
+the receipt-template page, and created on demand through POST /units/{unit_id}/templates/default-receipt.
+
+Placeholders use the organisation-tree context (`{org.*}` = the organisation, `{unit.*}` = the facility);
+the renderer also accepts the older `{company.*}` / `{branch.*}` aliases in hand-written templates.
 
 Pure functions (no DB, no request context) so migrations can build the same document."""
 
@@ -67,7 +70,7 @@ def _style(size: float, weight: int = 400, align: str = "left") -> dict[str, Any
 
 
 def default_receipt_doc(paper: str = "Receipt80", language: str = "uz") -> dict[str, Any]:
-    """The standard cheque as a TemplateDoc: header (company, branch, phone), cheque number and time, patient,
+    """The standard cheque as a TemplateDoc: header (organisation, facility, phone), cheque number and time, patient,
     cashier, the services table, totals (discount and balance only when there is one), the payments table
     (only when something was paid) and a thank-you line. Both tables `grow` with their rows, so everything
     below them moves along."""
@@ -117,13 +120,13 @@ def default_receipt_doc(paper: str = "Receipt80", language: str = "uz") -> dict[
     # column widths are relative — the № column must still fit two digits on the narrow strip
     num_w, name_w, sum_w = (26, 129, 52) if narrow else (30, 172, 84)
     y = m
-    text("hdr", y, 34, "{company.name}", size=fs + 3.5, weight=700, align="center")  # two lines for long names
+    text("hdr", y, 34, "{org.name}", size=fs + 3.5, weight=700, align="center")  # two lines for long names
     y += 36
-    text("br", y, 14, "{branch.name}", align="center")
+    text("br", y, 14, "{unit.name}", align="center")
     y += 14
-    text("adr", y, 14, "{branch.address}", size=fs - 1, align="center", show_if="{branch.address}")
+    text("adr", y, 14, "{unit.address}", size=fs - 1, align="center", show_if="{unit.address}")
     y += 14
-    text("tel", y, 14, f"{lb['phone']}: {{branch.phone}}", align="center", show_if="{branch.phone}")
+    text("tel", y, 14, f"{lb['phone']}: {{unit.phone}}", align="center", show_if="{unit.phone}")
     y += 18
     line("l1", y)
     y += 6

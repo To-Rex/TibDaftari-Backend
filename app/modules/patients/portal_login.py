@@ -4,6 +4,8 @@ Phone + SMS code keeps working; the login is an extra way in. It is global (the 
 case-insensitive. The password is shown to the employee once (optionally sent by SMS, masked in the outbox); only
 its argon2 hash is stored. A session opened with the login sees this patient only, so relatives sharing one phone
 each get their own results. Renewing the password or switching the login off ends the login sessions at once.
+The SMS goes out through the facility's (inherited) messaging account — the employee's working facility when it
+is given and allowed, else the facility the patient belongs to.
 """
 
 from __future__ import annotations
@@ -23,11 +25,12 @@ from app.core.config import settings
 from app.core.exceptions import ConflictError, ValidationError
 from app.core.security import hash_password, random_digits, random_password
 from app.core.textutil import is_valid_uz_phone, latin_lower
-from app.infrastructure.db.models import Branch, Company, Patient
+from app.infrastructure.db.models import Patient
 from app.infrastructure.db.models import Session as SessionModel
 from app.modules.messaging import service as messaging
 from app.modules.patients.schemas import PatientOut, PortalAccessIn, PortalAccessOut
-from app.modules.patients.service import get_patient_or_404, patient_out, scope_company
+from app.modules.patients.service import get_patient_or_404, patient_dto
+from app.modules.units import repository as units_repo
 
 LOGIN_MAX = 40
 _LOGIN_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,39}$")
@@ -64,7 +67,7 @@ def portal_link(meta: RequestMeta | None) -> str:
 
 
 async def login_owner(session: AsyncSession, login: str) -> Patient | None:
-    """The alive patient holding `login` (any clinic)."""
+    """The alive patient holding `login` (anywhere — the login is system-wide)."""
     stmt = select(Patient).where(func.lower(Patient.portal_login) == login, Patient.deleted_at.is_(None)).limit(1)
     return (await session.execute(stmt)).scalar_one_or_none()
 
@@ -75,7 +78,7 @@ async def login_taken(session: AsyncSession, login: str, exclude_id: uuid.UUID |
 
 
 async def suggest_login(session: AsyncSession, full_name: str | None) -> str:
-    """`<name><4 digits>`, free across every clinic (6 digits after ten collisions)."""
+    """`<name><4 digits>`, free system-wide (6 digits after ten collisions)."""
     base = login_base(full_name)
     for _ in range(10):
         candidate = f"{base}{random_digits(4)}"
@@ -104,18 +107,20 @@ async def revoke_login_sessions(session: AsyncSession, patient_id: uuid.UUID, ke
     return ended
 
 
-async def _sms_branch(session: AsyncSession, p: Patient, staff: StaffPrincipal, requested: str | None) -> uuid.UUID | None:
-    """The employee's working branch when it is theirs and the patient's clinic's; else the patient's own branch."""
+async def _sms_unit(session: AsyncSession, p: Patient, staff: StaffPrincipal, requested: str | None) -> uuid.UUID | None:
+    """The facility whose (inherited) SMS account sends the text: the employee's working facility when it is an
+    alive facility of the patient's country inside their scope; else the patient's registered facility, else the
+    facility of their latest cheque. None = nobody can send."""
     if requested:
         try:
-            bid = uuid.UUID(requested)
+            uid = uuid.UUID(str(requested))
         except ValueError:
-            bid = None
-        if bid and staff.allows_branch(bid):
-            branch = await session.get(Branch, bid)
-            if branch and branch.company_id == p.company_id and branch.deleted_at is None:
-                return bid
-    return p.branch_id
+            uid = None
+        if uid and staff.can_see(uid):
+            unit = await units_repo.get_unit(session, uid)
+            if unit is not None and unit.level == "facility" and unit.country_id == p.country_id:
+                return uid
+    return await messaging.patient_home_unit(session, p)
 
 
 # ----------------------------------------------------------------------------- reception
@@ -125,7 +130,7 @@ async def set_portal_access(
     session: AsyncSession, patient_id: uuid.UUID, staff: StaffPrincipal, body: PortalAccessIn, meta: RequestMeta
 ) -> PortalAccessOut:
     """Issue or renew the login: a new password every time (given or generated), lockout cleared, old login sessions ended."""
-    p = await get_patient_or_404(session, patient_id, scope_company(staff))
+    p = await get_patient_or_404(session, patient_id, staff)
     wanted = norm_login(body.login)
     login = wanted or p.portal_login or await suggest_login(session, p.full_name)
     if not valid_login(login):
@@ -151,23 +156,23 @@ async def set_portal_access(
     ended = await revoke_login_sessions(session, p.id)
 
     sms: Literal["queued", "not_configured", "invalid_phone"] | None = None
+    sms_unit_id: uuid.UUID | None = None
     if body.send_sms:
         if not is_valid_uz_phone(p.phone):
             sms = "invalid_phone"
         else:
-            company = await session.get(Company, p.company_id)
-            link = portal_link(meta)
+            sms_unit_id = await _sms_unit(session, p, staff, body.unit_id)
             msg = None
-            if company:
+            if sms_unit_id is not None:
+                link = portal_link(meta)
                 msg = await messaging.enqueue_sms_if_configured(
                     session,
-                    company,
+                    sms_unit_id,
                     kind="portal_access",
                     to=p.phone,
-                    text=messaging.portal_access_text(company, login, password, link),
-                    masked_text=messaging.portal_access_text(company, login, "••••••", link),
+                    text=await messaging.portal_access_text(session, sms_unit_id, login, password, link),
+                    masked_text=await messaging.portal_access_text(session, sms_unit_id, login, "••••••", link),
                     patient_id=p.id,
-                    branch_id=await _sms_branch(session, p, staff, body.branch_id),
                 )
             sms = "queued" if msg is not None else "not_configured"
 
@@ -175,24 +180,32 @@ async def set_portal_access(
         session,
         actor_type="staff",
         actor_id=staff.id,
-        company_id=p.company_id,
+        unit_id=p.registered_unit_id or sms_unit_id,
+        country_id=p.country_id,
         action="portal_access_set",
         entity="patient",
         entity_id=p.id,
         before=before,
-        after={"login": login, "enabled": True, "generatedPassword": not body.password, "sms": sms, "endedSessions": ended},
+        after={
+            "login": login,
+            "enabled": True,
+            "generatedPassword": not body.password,
+            "sms": sms,
+            "smsUnitId": str(sms_unit_id) if sms_unit_id else None,
+            "endedSessions": ended,
+        },
         ip=meta.ip,
         request_id=meta.request_id,
     )
     await session.refresh(p)
-    return PortalAccessOut(login=login, password=password, sms=sms, patient=patient_out(p))
+    return PortalAccessOut(login=login, password=password, sms=sms, patient=await patient_dto(session, p))
 
 
 async def remove_portal_access(session: AsyncSession, patient_id: uuid.UUID, staff: StaffPrincipal, meta: RequestMeta) -> PatientOut:
     """Switch the login off: login and password cleared, login sessions ended (phone + SMS code still works)."""
-    p = await get_patient_or_404(session, patient_id, scope_company(staff))
+    p = await get_patient_or_404(session, patient_id, staff)
     if p.portal_login is None and p.portal_password_hash is None:
-        return patient_out(p)
+        return await patient_dto(session, p)
     before = {"login": p.portal_login, "enabled": p.portal_password_hash is not None}
     p.portal_login = None
     p.portal_password_hash = None
@@ -204,7 +217,8 @@ async def remove_portal_access(session: AsyncSession, patient_id: uuid.UUID, sta
         session,
         actor_type="staff",
         actor_id=staff.id,
-        company_id=p.company_id,
+        unit_id=p.registered_unit_id,
+        country_id=p.country_id,
         action="portal_access_remove",
         entity="patient",
         entity_id=p.id,
@@ -215,4 +229,4 @@ async def remove_portal_access(session: AsyncSession, patient_id: uuid.UUID, sta
     )
     await session.flush()
     await session.refresh(p)
-    return patient_out(p)
+    return await patient_dto(session, p)

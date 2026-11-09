@@ -15,13 +15,28 @@ class StaffLoginIn(CamelModel):
     password: str = Field(min_length=1, max_length=200)
 
 
+class SessionUnitOut(CamelModel):
+    """The employee's home unit as the UI needs it on first paint (the full card comes from `GET /units/{id}`)."""
+
+    id: str
+    level: Literal["country", "region", "district", "facility"]
+    name: str
+    code: str | None = None
+    country_id: str
+    #: "O‘zbekiston Respublikasi › Xorazm viloyati › Bog‘ot tumani › Bog‘ot tumani SES"
+    path: str
+
+
 class StaffSessionOut(CamelModel):
     actor: Literal["staff"] = "staff"
     employee_id: str
-    company_id: str
-    branch_id: str | None
-    # branches the employee is assigned to — the UI pins non-admins to these (admins may switch to any)
-    branch_ids: list[str] = []
+    #: home unit (any level); None for a superadmin, who picks any unit of the tree
+    unit_id: str | None
+    #: every scope root of the employee (home + extra units) — the UI lets them switch among these subtrees
+    unit_ids: list[str] = []
+    unit: SessionUnitOut | None = None
+    #: the home unit when it is a facility — where this employee's cheques are written
+    facility_id: str | None = None
     is_super_admin: bool
     role_key: str
     full_name: str

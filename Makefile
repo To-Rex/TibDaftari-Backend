@@ -4,7 +4,7 @@
 PY ?= python
 PORT ?= 8000
 
-.PHONY: help venv install dev run migrate revision seed seed-full superadmin partitions test lint format
+.PHONY: help venv install dev run migrate revision seed country-root superadmin partitions test lint format
 
 help:
 	@echo "make install    - create .venv and install dev requirements"
@@ -12,9 +12,9 @@ help:
 	@echo "make run        - production entrypoint (migrate + serve)"
 	@echo "make migrate    - alembic upgrade head"
 	@echo "make revision m=msg - alembic revision --autogenerate"
-	@echo "make seed       - reference data + demo core dataset"
-	@echo "make seed-full  - reference + demo core + transactions"
-	@echo "make superadmin LOGIN= PASSWORD= SLUG= NAME= - create platform superadmin"
+	@echo "make seed       - geo reference data (countries / regions / districts)"
+	@echo "make country-root COUNTRY=UZ NAME='O‘zbekiston Respublikasi' - create the country node of the org tree"
+	@echo "make superadmin LOGIN= PASSWORD= NAME= - create the platform superadmin"
 	@echo "make partitions - ensure audit_log partitions"
 	@echo "make test       - pytest"
 	@echo "make lint       - ruff check"
@@ -40,14 +40,12 @@ revision:
 
 seed:
 	$(PY) -m app.cli seed-reference
-	$(PY) -m app.cli seed-demo
 
-seed-full:
-	$(PY) -m app.cli seed-reference
-	$(PY) -m app.cli seed-demo --with-transactions
+country-root:
+	$(PY) -m app.cli create-country-root --country "$(COUNTRY)" --name "$(NAME)"
 
 superadmin:
-	$(PY) -m app.cli create-superadmin --login "$(LOGIN)" --password "$(PASSWORD)" --company-slug "$(SLUG)" --company-name "$(COMPANY)" --name "$(NAME)"
+	$(PY) -m app.cli create-superadmin --login "$(LOGIN)" --password "$(PASSWORD)" --name "$(NAME)"
 
 partitions:
 	$(PY) -m app.cli ensure-partitions

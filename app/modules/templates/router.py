@@ -1,4 +1,8 @@
-"""Templates endpoints: result templates, assets, preview PDF (see ARCHITECTURE.md endpoint map)."""
+"""Templates endpoints: result templates, assets, preview PDF (see ARCHITECTURE.md endpoint map).
+
+`/units/{unit_id}/…` routes take the selected unit as a `Scope` (access already checked); id-addressed routes
+(`/templates/{template_id}`) load the row and check that its owner unit is visible to the caller.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +11,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Body, Query, Response
 
-from app.api.deps import DbSession, Meta, Staff
+from app.api.deps import DbSession, Meta, Scope, Staff
 from app.modules.templates import service
 from app.modules.templates.schemas import (
     DefaultReceiptIn,
@@ -28,22 +32,21 @@ TEMPLATE_WRITE = "admin.template.write"
 TEMPLATE_PUBLISH = "admin.template.publish"
 
 
-@router.get("/companies/{company_id}/templates", response_model=list[TemplateOut], summary="Templates of a company (status, serviceTypeId, search)")
-async def list_templates(company_id: uuid.UUID, q: Annotated[TemplateQuery, Query()], staff: Staff, session: DbSession) -> list[TemplateOut]:
-    staff.scope(company_id)
-    return await service.list_templates(session, company_id, q)
+@router.get("/units/{unit_id}/templates", response_model=list[TemplateOut], summary="Templates managed from a unit (status, serviceTypeId, unitId, search)")
+async def list_templates(scope: Scope, q: Annotated[TemplateQuery, Query()], session: DbSession) -> list[TemplateOut]:
+    return await service.list_templates(session, scope, q)
 
 
-@router.post("/companies/{company_id}/templates", response_model=TemplateOut, status_code=201, summary="Create a template (draft v1)")
-async def create_template(company_id: uuid.UUID, body: TemplateCreateIn, staff: Staff, session: DbSession, meta: Meta) -> TemplateOut:
-    staff.require(TEMPLATE_WRITE).scope(company_id)
-    return await service.create_template(session, company_id, body, staff, meta)
+@router.post("/units/{unit_id}/templates", response_model=TemplateOut, status_code=201, summary="Create a template owned by the unit (draft v1)")
+async def create_template(scope: Scope, body: TemplateCreateIn, staff: Staff, session: DbSession, meta: Meta) -> TemplateOut:
+    staff.require(TEMPLATE_WRITE)
+    return await service.create_template(session, scope, body, staff, meta)
 
 
-@router.post("/companies/{company_id}/templates/default-receipt", response_model=TemplateOut, status_code=201, summary="Create the standard cheque as a new draft receipt template")
-async def create_default_receipt(company_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta, body: DefaultReceiptIn | None = None) -> TemplateOut:
-    staff.require(TEMPLATE_WRITE).scope(company_id)
-    return await service.create_default_receipt(session, company_id, body or DefaultReceiptIn(), staff, meta)
+@router.post("/units/{unit_id}/templates/default-receipt", response_model=TemplateOut, status_code=201, summary="Create the standard cheque as a new draft receipt template owned by the unit")
+async def create_default_receipt(scope: Scope, staff: Staff, session: DbSession, meta: Meta, body: DefaultReceiptIn | None = None) -> TemplateOut:
+    staff.require(TEMPLATE_WRITE)
+    return await service.create_default_receipt(session, scope, body or DefaultReceiptIn(), staff, meta)
 
 
 @router.get("/templates/{template_id}", response_model=TemplateOut, summary="Template details (full doc)")
@@ -63,7 +66,7 @@ async def set_status(template_id: uuid.UUID, body: TemplateStatusIn, staff: Staf
     return await service.set_status(session, template_id, body.status, staff, meta)
 
 
-@router.post("/templates/{template_id}/duplicate", response_model=TemplateOut, status_code=201, summary="Duplicate a template as a draft copy (optionally renamed / re-bound to branches)")
+@router.post("/templates/{template_id}/duplicate", response_model=TemplateOut, status_code=201, summary="Duplicate a template as a draft copy (optionally renamed / re-bound to units)")
 async def duplicate_template(template_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta, body: Annotated[TemplateDuplicateIn | None, Body()] = None) -> TemplateOut:
     staff.require(TEMPLATE_WRITE)
     return await service.duplicate_template(session, template_id, staff, meta, body)
@@ -82,20 +85,19 @@ async def preview_pdf(template_id: uuid.UUID, staff: Staff, session: DbSession, 
     return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": 'inline; filename="preview.pdf"', "Cache-Control": "no-store"})
 
 
-@router.get("/companies/{company_id}/assets", response_model=list[TemplateAssetOut], summary="Template assets of a company (logo, stamp, signature, image)")
-async def list_assets(company_id: uuid.UUID, staff: Staff, session: DbSession) -> list[TemplateAssetOut]:
-    staff.scope(company_id)
-    return await service.list_assets(session, company_id)
+@router.get("/units/{unit_id}/assets", response_model=list[TemplateAssetOut], summary="Template assets visible from a unit (logo, stamp, signature, image)")
+async def list_assets(scope: Scope, session: DbSession) -> list[TemplateAssetOut]:
+    return await service.list_assets(session, scope)
 
 
-@router.post("/companies/{company_id}/assets", response_model=TemplateAssetOut, status_code=201, summary="Upload an asset (data URL) → stored file")
-async def upload_asset(company_id: uuid.UUID, body: TemplateAssetIn, staff: Staff, session: DbSession, meta: Meta) -> TemplateAssetOut:
-    staff.require(TEMPLATE_WRITE).scope(company_id)
-    return await service.upload_asset(session, company_id, body, staff, meta)
+@router.post("/units/{unit_id}/assets", response_model=TemplateAssetOut, status_code=201, summary="Upload an asset owned by the unit (data URL) → stored file")
+async def upload_asset(scope: Scope, body: TemplateAssetIn, staff: Staff, session: DbSession, meta: Meta) -> TemplateAssetOut:
+    staff.require(TEMPLATE_WRITE)
+    return await service.upload_asset(session, scope, body, staff, meta)
 
 
-@router.delete("/companies/{company_id}/assets/{asset_id}", status_code=204, summary="Delete a template asset (soft; printed documents keep their bytes)")
-async def delete_asset(company_id: uuid.UUID, asset_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta) -> Response:
-    staff.require(TEMPLATE_WRITE).scope(company_id)
-    await service.delete_asset(session, company_id, asset_id, staff, meta)
+@router.delete("/units/{unit_id}/assets/{asset_id}", status_code=204, summary="Delete a template asset (soft; printed documents keep their bytes)")
+async def delete_asset(scope: Scope, asset_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta) -> Response:
+    staff.require(TEMPLATE_WRITE)
+    await service.delete_asset(session, scope, asset_id, staff, meta)
     return Response(status_code=204)

@@ -1,11 +1,16 @@
 """Orders workflow — cheques, items, payments/refunds, lab worklist, result values, submit/approve/reject,
 order-scope approval and result documents (DOMAIN_RULES section 7).
 
+Tenancy (docs/V2_PORT.md): a cheque, its items, payments and documents belong to ONE facility (`unit_id`). Lists
+take a `UnitScope` (the URL's unit and everything under it, optionally narrowed by `unitId`); row entry points load
+the row and call `staff.require_unit(row.unit_id)`. Services, prices, templates, SMS accounts and texts are
+resolved for the facility by the catalog / templates / messaging modules (owner on the facility's path, nearest wins).
+
 Every mutation ends with `recompute()` (totals, progress, payment + order status) and keeps the
 patient's denormalised stats in sync. Approval freezes a render snapshot (templates.service),
 renders + stores the PDF, bumps template usage and queues SMS/Telegram notifications.
-Other modules (portal, telegram) consume `get_order_bundle`, `order_out`, `item_out`,
-`document_out` and `ensure_document_pdf`.
+Other modules (portal, telegram) consume `order_out`, `item_out`, `document_out`, `ensure_document_pdf`,
+`mark_document_viewed`, `pdf_filename` and `allowed_category_ids`.
 """
 
 from __future__ import annotations
@@ -17,9 +22,11 @@ import math
 import re
 import secrets
 import uuid
+from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta
 from typing import Any
 
+from sqlalchemy import text as sql_text
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
@@ -38,14 +45,14 @@ from app.core.exceptions import (
 )
 from app.core.pagination import page_of
 from app.core.schemas import Page, iso_z
+from app.core.scope import UnitScope, ids_of
 from app.core.security import random_digits, sha256_hex
 from app.core.textutil import is_valid_uz_phone, norm_phone, slugify
 from app.core.timeutil import utcnow
 from app.infrastructure.db.models import (
-    Branch,
-    Company,
     Order,
     OrderItem,
+    OrgUnit,
     OtpChallenge,
     Patient,
     Payment,
@@ -55,6 +62,7 @@ from app.infrastructure.db.models import (
 )
 from app.infrastructure.redis import cache, rate_limit
 from app.infrastructure.redis.client import get_redis
+from app.modules.catalog import service as catalog_svc
 from app.modules.files import service as files_svc
 from app.modules.messaging import service as messaging
 from app.modules.orders import export as order_export
@@ -94,15 +102,20 @@ from app.modules.orders.schemas import (
     WorklistItemOut,
     WorklistQuery,
 )
+from app.modules.patients import service as patients_svc
 from app.modules.templates import service as templates_svc
 from app.modules.templates.renderer.context import build_render_context, item_status_label, to_render_item
-from app.modules.tenant.schemas import document_free_view_days
+from app.modules.units import repository as units_repo
+from app.modules.units import service as units_svc
+from app.modules.units.schemas import document_free_view_days
 
 log = logging.getLogger("app.orders")
 
 ORDER_NOT_FOUND = "Chek topilmadi"
 ITEM_NOT_FOUND = "Tahlil topilmadi"
 DOC_NOT_FOUND = "Hujjat topilmadi"
+UNIT_NOT_FOUND = "Muassasa topilmadi"
+PATIENT_NOT_FOUND = "Bemor topilmadi"
 
 
 def _round_half_up(x: float) -> int:
@@ -120,20 +133,28 @@ def _s(v: uuid.UUID | None) -> str | None:
     return str(v) if v is not None else None
 
 
-def scope_company(staff: StaffPrincipal) -> uuid.UUID | None:
-    """Tenant filter for the caller: superadmin sees every company (None), others only their own."""
-    return None if staff.is_super_admin else staff.company_id
+def _unit_filter(scope: UnitScope, unit_id: str | None) -> list[uuid.UUID]:
+    """The facilities a list covers: everything under the URL's unit, narrowed to `unitId` when given (a unit
+    outside the scope — or a malformed id — matches nothing)."""
+    if not unit_id:
+        return scope.descendant_ids
+    return scope.narrow(ids_of([unit_id]) or [uuid.UUID(int=0)])
+
+
+async def _unit_names(session: AsyncSession, ids: Iterable[uuid.UUID | None]) -> dict[uuid.UUID, str]:
+    """facility id → name, for the `unitName` of list rows (one IN query per list; closed facilities included)."""
+    return {u.id: u.name for u in (await units_repo.units_by_ids(session, ids)).values()}
 
 
 # ----------------------------------------------------------------------------- projections
 
 
-def order_out(o: Order) -> OrderOut:
+def order_out(o: Order, unit_name: str | None = None) -> OrderOut:
     """ORM row -> frontend `Order`."""
     return OrderOut(
         id=str(o.id),
-        company_id=str(o.company_id),
-        branch_id=str(o.branch_id),
+        unit_id=str(o.unit_id),
+        unit_name=unit_name,
         number=o.number,
         patient_id=str(o.patient_id),
         patient_name=o.patient_name,
@@ -154,6 +175,7 @@ def order_out(o: Order) -> OrderOut:
         created_at=o.created_at,
         updated_at=o.updated_at,
         created_by=_s(o.created_by),
+        first_paid_at=o.first_paid_at,
     )
 
 
@@ -166,8 +188,7 @@ def _item_fields(i: OrderItem) -> dict[str, Any]:
     return {
         "id": str(i.id),
         "order_id": str(i.order_id),
-        "company_id": str(i.company_id),
-        "branch_id": str(i.branch_id),
+        "unit_id": str(i.unit_id),
         "service_type_id": str(i.service_type_id),
         "service_name": i.service_name,
         "category_id": str(i.category_id),
@@ -241,8 +262,7 @@ def payment_out(p: Payment) -> PaymentOut:
     return PaymentOut(
         id=str(p.id),
         order_id=str(p.order_id),
-        company_id=str(p.company_id),
-        branch_id=str(p.branch_id),
+        unit_id=str(p.unit_id),
         amount=p.amount,
         method=p.method,  # type: ignore[arg-type]
         employee_id=str(p.employee_id),
@@ -286,11 +306,12 @@ def document_qr_link(d: ResultDocument) -> str | None:
     return (ctx.get("doc") or {}).get("link") or None
 
 
-def document_out(d: ResultDocument) -> ResultDocumentOut:
+def document_out(d: ResultDocument, unit_name: str | None = None) -> ResultDocumentOut:
     """ORM row -> frontend `ResultDocument` (`pdfUrl` always points at the staff PDF endpoint)."""
     return ResultDocumentOut(
         id=str(d.id),
-        company_id=str(d.company_id),
+        unit_id=str(d.unit_id),
+        unit_name=unit_name,
         order_id=str(d.order_id),
         order_item_id=_s(d.order_item_id),
         order_item_ids=[str(x) for x in d.order_item_ids] if d.order_item_ids else None,
@@ -311,57 +332,66 @@ def document_out(d: ResultDocument) -> ResultDocumentOut:
 # ----------------------------------------------------------------------------- look-ups
 
 
-async def get_order_or_404(session: AsyncSession, order_id: uuid.UUID, company_id: uuid.UUID | None, *, for_update: bool = False, staff: StaffPrincipal | None = None) -> Order:
-    """Company-scoped order or 404 'Chek topilmadi'; `for_update` locks the row (all order mutations).
-
-    With `staff`, an order of a branch outside the employee's branch scope is a 404 too."""
-    o = await repo.get_order(session, order_id, company_id, for_update=for_update)
-    if not o or (staff is not None and not staff.allows_branch(o.branch_id)):
+async def get_order_or_404(session: AsyncSession, order_id: uuid.UUID, staff: StaffPrincipal, *, for_update: bool = False) -> Order:
+    """Order or 404 'Chek topilmadi'; 403 when its facility is outside the employee's units.
+    `for_update` locks the row (all order mutations)."""
+    o = await repo.get_order(session, order_id, for_update=for_update)
+    if not o:
         raise NotFoundError(ORDER_NOT_FOUND)
+    staff.require_unit(o.unit_id)
     return o
 
 
-async def _lock_order_of_item(session: AsyncSession, item: OrderItem) -> Order:
+async def _lock_order_of_item(session: AsyncSession, item: OrderItem, staff: StaffPrincipal) -> Order:
     """Lock the parent order (serialises item mutations per order) and re-read the item's committed state."""
-    order = await get_order_or_404(session, item.order_id, item.company_id, for_update=True)
+    order = await get_order_or_404(session, item.order_id, staff, for_update=True)
     await session.refresh(item)
     return order
 
 
-async def get_item_or_404(session: AsyncSession, item_id: uuid.UUID, company_id: uuid.UUID | None, staff: StaffPrincipal | None = None) -> OrderItem:
-    """Company-scoped item or 404 'Tahlil topilmadi' (also for a branch outside `staff`'s scope)."""
-    it = await repo.get_item(session, item_id, company_id)
-    if not it or (staff is not None and not staff.allows_branch(it.branch_id)):
+async def get_item_or_404(session: AsyncSession, item_id: uuid.UUID, staff: StaffPrincipal) -> OrderItem:
+    """Item or 404 'Tahlil topilmadi'; 403 outside the employee's units."""
+    it = await repo.get_item(session, item_id)
+    if not it:
         raise NotFoundError(ITEM_NOT_FOUND)
+    staff.require_unit(it.unit_id)
     return it
 
 
-async def get_document_or_404(
-    session: AsyncSession, document_id: uuid.UUID, company_id: uuid.UUID | None, staff: StaffPrincipal | None = None
-) -> ResultDocument:
-    """Company-scoped document or 404 'Hujjat topilmadi' (also when its order is outside `staff`'s branch scope)."""
-    d = await repo.get_document(session, document_id, company_id)
+async def get_document_or_404(session: AsyncSession, document_id: uuid.UUID, staff: StaffPrincipal) -> ResultDocument:
+    """Document or 404 'Hujjat topilmadi'; 403 outside the employee's units."""
+    d = await repo.get_document(session, document_id)
     if not d:
         raise NotFoundError(DOC_NOT_FOUND)
-    if staff is not None and staff.branch_scope() is not None and not staff.allows_branch(await repo.order_branch_id(session, d.order_id)):
-        raise NotFoundError(DOC_NOT_FOUND)
+    staff.require_unit(d.unit_id)
     return d
 
 
-async def get_order_bundle(
-    session: AsyncSession, order_id: uuid.UUID, company_id: uuid.UUID | None = None, staff: StaffPrincipal | None = None
-) -> OrderBundleOut:
-    """{order, items, payments} — the shape of `GET /orders/{id}` (also used by portal/telegram)."""
-    o = await get_order_or_404(session, order_id, company_id, staff=staff)
+async def get_document_dto(session: AsyncSession, document_id: uuid.UUID, staff: StaffPrincipal) -> ResultDocumentOut:
+    doc = await get_document_or_404(session, document_id, staff)
+    return document_out(doc, (await _unit_names(session, [doc.unit_id])).get(doc.unit_id))
+
+
+async def get_order_bundle(session: AsyncSession, order_id: uuid.UUID, staff: StaffPrincipal) -> OrderBundleOut:
+    """{order, items, payments} — the shape of `GET /orders/{id}`."""
+    o = await get_order_or_404(session, order_id, staff)
     items = await repo.items_of_order(session, o.id)
     payments = await repo.payments_of_order(session, o.id)
     return OrderBundleOut(
-        order=order_out(o), items=[item_out(i) for i in items], payments=[payment_out(p) for p in payments]
+        order=order_out(o, (await _unit_names(session, [o.unit_id])).get(o.unit_id)),
+        items=[item_out(i) for i in items],
+        payments=[payment_out(p) for p in payments],
     )
 
 
 async def _order_items_out(session: AsyncSession, o: Order) -> OrderItemsOut:
-    return OrderItemsOut(order=order_out(o), items=[item_out(i) for i in await repo.items_of_order(session, o.id)])
+    return OrderItemsOut(order=order_out(o, (await _unit_names(session, [o.unit_id])).get(o.unit_id)), items=[item_out(i) for i in await repo.items_of_order(session, o.id)])
+
+
+async def _order_payments_out(session: AsyncSession, o: Order) -> OrderPaymentsOut:
+    return OrderPaymentsOut(
+        order=order_out(o, (await _unit_names(session, [o.unit_id])).get(o.unit_id)), payments=[payment_out(p) for p in await repo.payments_of_order(session, o.id)]
+    )
 
 
 def _patient_ctx(p: Any) -> dict[str, Any]:
@@ -381,29 +411,90 @@ def _patient_ctx(p: Any) -> dict[str, Any]:
     }
 
 
-async def render_receipt_pdf(session: AsyncSession, order_id: uuid.UUID, company_scope: uuid.UUID | None, template_id: uuid.UUID | None, staff: StaffPrincipal | None = None) -> tuple[bytes, str]:
-    """The cheque rendered with a receipt template (explicit `template_id`, else the branch's active one).
-    404 `no_template` when the company has none — the client then prints its built-in cheque."""
-    from app.modules.templates import service as templates_service
+# ----------------------------------------------------------------------------- facility / templates
 
-    o = await get_order_or_404(session, order_id, company_scope, staff=staff)
-    tpl = await repo.get_template(session, template_id, o.company_id) if template_id else None
-    if tpl is not None and (tpl.scope != "receipt" or (tpl.branch_ids and o.branch_id not in tpl.branch_ids)):
+
+async def _facility_or_404(session: AsyncSession, unit_id: uuid.UUID) -> OrgUnit:
+    """The facility a row belongs to (closed facilities included — their history still renders)."""
+    unit = await units_repo.get_unit_any(session, unit_id)
+    if unit is None:
+        raise NotFoundError(UNIT_NOT_FOUND)
+    return unit
+
+
+def _template_rank(tpl: ResultTemplate, bound: set[uuid.UUID], path: list[uuid.UUID]) -> tuple[int, int] | None:
+    """How specific a template is for the facility whose root → facility path is `path`:
+    (depth of its nearest explicit `template_units` binding on the path — -1 when unbound; depth of its owner).
+    None = not usable there (owner off the path, or bound only to units off the path)."""
+    depth = {u: i for i, u in enumerate(path)}
+    owner_depth = depth.get(tpl.owner_unit_id)
+    if owner_depth is None:
+        return None
+    if bound:
+        on_path = [depth[u] for u in bound if u in depth]
+        if not on_path:
+            return None
+        return max(on_path), owner_depth
+    return -1, owner_depth
+
+
+def _rank_key(ranked: tuple[tuple[int, int], ResultTemplate]) -> tuple[int, int, float, str]:
+    (binding, owner), tpl = ranked
+    created = tpl.created_at.timestamp() if getattr(tpl, "created_at", None) else 0.0
+    # the most specific binding first, then the nearest owner, then the oldest
+    return (-binding, -owner, created, str(tpl.id))
+
+
+async def _pick_template(session: AsyncSession, facility_id: uuid.UUID, *predicates: Callable[[ResultTemplate], bool]) -> ResultTemplate | None:
+    """The best active template usable at the facility for the first predicate that matches any — explicit
+    `template_units` binding to the facility > binding to a nearer ancestor > unbound; a nearer owner wins ties."""
+    scope = await units_svc.scope_or_404(session, facility_id)
+    active = await templates_svc.list_active_templates(session, facility_id)
+    for predicate in predicates:
+        candidates = [t for t in active if predicate(t)]
+        if not candidates:
+            continue
+        bindings = await repo.template_units_for(session, [t.id for t in candidates])
+        ranked = []
+        for t in candidates:
+            rank = _template_rank(t, bindings.get(t.id) or set(), scope.ancestor_ids)
+            if rank is not None:
+                ranked.append((rank, t))
+        if ranked:
+            ranked.sort(key=_rank_key)
+            return ranked[0][1]
+    return None
+
+
+async def _template_usable_at(session: AsyncSession, tpl: ResultTemplate, facility_id: uuid.UUID) -> bool:
+    """An explicitly chosen template may be used at the facility: owned on its path and not limited to other units."""
+    scope = await units_svc.scope_or_404(session, facility_id)
+    bound = (await repo.template_units_for(session, [tpl.id])).get(tpl.id) or set()
+    return _template_rank(tpl, bound, scope.ancestor_ids) is not None
+
+
+async def render_receipt_pdf(session: AsyncSession, order_id: uuid.UUID, template_id: uuid.UUID | None, staff: StaffPrincipal) -> tuple[bytes, str]:
+    """The cheque rendered with a receipt template (explicit `template_id`, else the facility's active one — bound
+    to it, else the nearest owner's). 404 `no_template` when there is none — the client then prints its built-in cheque."""
+    o = await get_order_or_404(session, order_id, staff)
+    tpl = await repo.get_template(session, template_id) if template_id else None
+    if tpl is not None and (tpl.scope != "receipt" or not await _template_usable_at(session, tpl, o.unit_id)):
         tpl = None
     if tpl is None:
-        tpl = await repo.find_receipt_template(session, o.company_id, o.branch_id)
+        tpl = await _pick_template(session, o.unit_id, lambda t: t.scope == "receipt")
     if tpl is None:
         raise NotFoundError("Chek andozasi yo‘q", code="no_template")
     items = [i for i in await repo.items_of_order(session, o.id) if i.status != "cancelled"]
     payments = [p for p in await repo.payments_of_order(session, o.id) if p.refunded_at is None]
-    patient = await repo.get_patient(session, o.patient_id, o.company_id)
-    company = await session.get(Company, o.company_id)
-    branch = await repo.get_branch(session, o.branch_id, o.company_id)
+    patient = await repo.get_patient(session, o.patient_id)
+    # the renderer builds the `org` (organisation) and `unit` (facility) blocks — and their company / branch aliases
+    org, unit = await templates_svc.org_context(session, o.unit_id)
+    effective = await units_svc.effective_settings(session, o.unit_id)
     cashier = await repo.get_employee_name(session, o.created_by_employee_id)
     district_name = await repo.get_district_name(session, patient.district_id) if patient else None
     region_name = await repo.get_region_name(session, patient.region_id) if patient else None
-    sts = await repo.service_types_by_ids(session, o.company_id, {i.service_type_id for i in items})
-    language = str(tpl.language or (company.locale if company else "uz"))
+    sts = await catalog_svc.get_service_types_by_ids(session, {i.service_type_id for i in items})
+    language = str(tpl.language or effective.get("locale") or "uz")
     ctx = build_render_context(
         patient=_patient_ctx(patient) if patient else None,
         order={
@@ -419,15 +510,8 @@ async def render_receipt_pdf(session: AsyncSession, order_id: uuid.UUID, company
             "status": o.status,
             "payment": o.payment,
         },
-        company={
-            "name": company.name,
-            "legalName": company.legal_name,
-            "slug": company.slug,
-            "phone": company.phone,
-            "email": company.email,
-            "address": company.address,
-        } if company else None,
-        branch={"name": branch.name, "code": branch.code, "address": branch.address, "phone": branch.phone, "timezone": branch.timezone} if branch else None,
+        org=org,
+        unit=unit,
         items=[
             to_render_item(
                 code=(sts[i.service_type_id].code if i.service_type_id in sts and sts[i.service_type_id].code else str(i.service_type_id)),
@@ -455,14 +539,8 @@ async def render_receipt_pdf(session: AsyncSession, order_id: uuid.UUID, company
         region_name=region_name,
         language=language,
     )
-    pdf = await templates_service.render_doc_pdf(session, tpl.company_id, tpl.doc or {}, ctx)
+    pdf = await templates_svc.render_doc_pdf(session, tpl.doc or {}, ctx)
     return pdf, f"chek-{o.number}.pdf"
-
-
-async def _order_payments_out(session: AsyncSession, o: Order) -> OrderPaymentsOut:
-    return OrderPaymentsOut(
-        order=order_out(o), payments=[payment_out(p) for p in await repo.payments_of_order(session, o.id)]
-    )
 
 
 # ----------------------------------------------------------------------------- recompute
@@ -502,25 +580,32 @@ async def recompute(session: AsyncSession, order: Order, now: datetime | None = 
     return order
 
 
+def _note_first_payment(order: Order, at: datetime) -> None:
+    """Keep `first_paid_at` exact in the same transaction the DB trigger sets it (the service's own view of the
+    cheque never lags behind the row): the first live payment opens the day-long reception edit window."""
+    if order.first_paid_at is None:
+        order.first_paid_at = at
+
+
 # ----------------------------------------------------------------------------- list / get
 
 
-async def list_orders(session: AsyncSession, company_id: uuid.UUID, q: OrderListQuery, staff: StaffPrincipal | None = None) -> Page[OrderOut]:
-    """Paged company orders, confined to the caller's branch scope."""
-    rows, total = await repo.list_orders(session, company_id, q, staff.branch_scope(q.branch_id) if staff else None)
+async def list_orders(session: AsyncSession, scope: UnitScope, q: OrderListQuery) -> Page[OrderOut]:
+    """Paged cheques of the unit and everything under it (narrowed by `unitId`)."""
+    rows, total = await repo.list_orders(session, _unit_filter(scope, q.unit_id), q)
     ids = [o.id for o in rows]
     paid = await repo.payments_by_order(session, ids)
-    first = await repo.first_payment_at_by_order(session, ids)
-    return page_of([_with_methods(order_out(o), paid.get(o.id, {})).model_copy(update={"first_paid_at": first.get(o.id)}) for o in rows], q, total)
+    names = await _unit_names(session, {o.unit_id for o in rows})
+    return page_of([_with_methods(order_out(o, names.get(o.unit_id)), paid.get(o.id, {})) for o in rows], q, total)
 
 
 def _with_methods(dto: OrderOut, by_method: dict[str, int]) -> OrderOut:
     return dto.model_copy(update={"payments_by_method": [MethodSumOut(method=m, amount=a) for m, a in sorted(by_method.items(), key=lambda x: -x[1])]})  # type: ignore[arg-type]
 
 
-async def export_orders_xlsx(session: AsyncSession, company_id: uuid.UUID, q: OrderExportQuery, staff: StaffPrincipal | None = None) -> tuple[bytes, str, int]:
+async def export_orders_xlsx(session: AsyncSession, scope: UnitScope, q: OrderExportQuery) -> tuple[bytes, str, int]:
     """The cheques the list's filters + sort select, as an Excel workbook (bytes, file name, rows)."""
-    rows, truncated = await repo.export_orders(session, company_id, q, staff.branch_scope(q.branch_id) if staff else None, order_export.EXPORT_LIMIT)
+    rows, truncated = await repo.export_orders(session, _unit_filter(scope, q.unit_id), q, order_export.EXPORT_LIMIT)
     ids = [r.Order.id for r in rows]
     data = order_export.build_xlsx(
         rows, await repo.payments_by_order(session, ids), await repo.service_names_by_order(session, ids),
@@ -530,9 +615,9 @@ async def export_orders_xlsx(session: AsyncSession, company_id: uuid.UUID, q: Or
     return data, f"cheklar{'-' + stamp if stamp else ''}.xlsx", len(rows)
 
 
-async def orders_summary(session: AsyncSession, company_id: uuid.UUID, q: OrderListQuery, staff: StaffPrincipal | None = None) -> OrderSummaryOut:
-    """The list's filters at a glance (same branch scope as the list)."""
-    data = await repo.orders_summary(session, company_id, q, staff.branch_scope(q.branch_id) if staff else None)
+async def orders_summary(session: AsyncSession, scope: UnitScope, q: OrderListQuery) -> OrderSummaryOut:
+    """The list's filters at a glance (same unit scope as the list)."""
+    data = await repo.orders_summary(session, _unit_filter(scope, q.unit_id), q)
     return OrderSummaryOut.model_validate(data)
 
 
@@ -550,29 +635,35 @@ def _seed_values(fields: list[dict[str, Any]]) -> dict[str, Any]:
     return values
 
 
+NOT_IN_UNIT = "«{name}» xizmati bu muassasada ko‘rsatilmaydi"
+
+
 async def _add_items(
     session: AsyncSession, order: Order, service_type_ids: list[str], actor_id: uuid.UUID, now: datetime
 ) -> list[OrderItem]:
-    """Append items for the given service types (unknown ids skipped, duplicates allowed; a service switched off
-    in the cheque's branch is refused with 409 not_in_branch — reception never lists it there, this is the safety net)."""
+    """Append items for the given service types (unknown ids skipped, duplicates allowed). A service the cheque's
+    facility does not offer — owned outside its path, or switched off for it (`service_unit_settings`, nearest level
+    wins) — is refused with 409 not_in_branch; reception never lists it there, this is the safety net. The price is
+    the facility's effective one (nearest override, else the base price)."""
     wanted = repo.parse_uuids(service_type_ids)
-    sts = await repo.service_types_by_ids(session, order.company_id, set(wanted))
-    cats = await repo.categories_by_ids(session, order.company_id, {s.category_id for s in sts.values()})
+    sts = await catalog_svc.get_service_types_by_ids(session, set(wanted))
+    path = set((await units_svc.scope_or_404(session, order.unit_id)).ancestor_ids)
+    effective = await catalog_svc.effective_for_unit(session, list(sts.values()), order.unit_id) if sts else {}
+    cats = await repo.categories_by_ids(session, {s.category_id for s in sts.values()})
     schemas = await repo.schemas_by_ids(session, [s.schema_id for s in sts.values()])
     created: list[OrderItem] = []
     for st_id in wanted:
         st = sts.get(st_id)
         if st is None:
             continue
-        if order.branch_id in (st.disabled_branch_ids or []):
-            raise ConflictError(f"«{st.name}» xizmati bu filialda ko‘rsatilmaydi", code="not_in_branch")
+        enabled, price = effective.get(st.id, (True, st.price))
+        if st.owner_unit_id not in path or not enabled:
+            raise ConflictError(NOT_IN_UNIT.format(name=st.name), code="not_in_branch")
         schema = schemas.get(st.schema_id) if st.schema_id else None
-        branch_price = (st.branch_prices or {}).get(str(order.branch_id))
-        price = int(branch_price if branch_price is not None else st.price)
+        price = int(price if price is not None else st.price)
         item = OrderItem(
             order_id=order.id,
-            company_id=order.company_id,
-            branch_id=order.branch_id,
+            unit_id=order.unit_id,
             service_type_id=st.id,
             service_name=st.name,
             category_id=st.category_id,
@@ -593,24 +684,17 @@ async def _add_items(
     return created
 
 
-async def create_order(
-    session: AsyncSession, company_id: uuid.UUID, staff: StaffPrincipal, body: CreateOrderIn, meta: RequestMeta
-) -> OrderItemsOut:
-    """New cheque: number allocated per branch, patient snapshots, patient stats, then items."""
-    patient_id, branch_id = repo.to_uuid(body.patient_id), repo.to_uuid(body.branch_id)
-    patient = await repo.get_patient(session, patient_id, company_id) if patient_id else None
-    branch = await repo.get_branch(session, branch_id, company_id) if branch_id else None
-    if not patient or not branch:
-        raise NotFoundError("Bemor yoki filial topilmadi")
-    if not staff.allows_branch(branch.id):
-        raise ForbiddenError("Bu filialda chek ochishga ruxsat yo‘q")
-    number = await repo.allocate_order_number(session, branch.id, company_id)
-    if number is None:
-        raise NotFoundError("Bemor yoki filial topilmadi")
+async def create_order(session: AsyncSession, scope: UnitScope, staff: StaffPrincipal, body: CreateOrderIn, meta: RequestMeta) -> OrderItemsOut:
+    """New cheque in a facility (the URL's unit when it is one, else `unitId` under it): number from the facility's
+    counter (`next_order_number`), patient snapshots, patient stats, then items."""
+    facility = await units_svc.facility_or_422(session, scope, body.unit_id)
+    patient = await patients_svc.get_patient_or_404(session, body.patient_id, staff)
+    if patient.country_id != facility.country_id:
+        raise NotFoundError(PATIENT_NOT_FOUND)
+    number = (await session.execute(sql_text("SELECT next_order_number(:u)"), {"u": facility.id})).scalar_one()
     now = utcnow()
     order = Order(
-        company_id=company_id,
-        branch_id=branch.id,
+        unit_id=facility.id,
         number=number,
         patient_id=patient.id,
         patient_name=patient.full_name,
@@ -634,14 +718,15 @@ async def create_order(
         session,
         actor_type="staff",
         actor_id=staff.id,
-        company_id=company_id,
+        unit_id=facility.id,
+        country_id=facility.country_id,
         action="order.create",
         entity="order",
         entity_id=order.id,
         after={
             "number": order.number,
             "patientId": str(patient.id),
-            "branchId": str(branch.id),
+            "unitId": str(facility.id),
             "total": order.total,
             "itemCount": order.item_count,
         },
@@ -651,11 +736,9 @@ async def create_order(
     return await _order_items_out(session, order)
 
 
-async def add_items(
-    session: AsyncSession, order_id: uuid.UUID, staff: StaffPrincipal, body: AddItemsIn, meta: RequestMeta
-) -> OrderItemsOut:
+async def add_items(session: AsyncSession, order_id: uuid.UUID, staff: StaffPrincipal, body: AddItemsIn, meta: RequestMeta) -> OrderItemsOut:
     """Append services to an open/in-progress cheque (closed -> 409)."""
-    order = await get_order_or_404(session, order_id, scope_company(staff), for_update=True, staff=staff)
+    order = await get_order_or_404(session, order_id, staff, for_update=True)
     if order.status in ("cancelled", "completed"):
         raise ConflictError("Chek yopilgan", code="closed")
     now = utcnow()
@@ -665,7 +748,7 @@ async def add_items(
         session,
         actor_type="staff",
         actor_id=staff.id,
-        company_id=order.company_id,
+        unit_id=order.unit_id,
         action="order.items.add",
         entity="order",
         entity_id=order.id,
@@ -728,9 +811,8 @@ async def _return_overpayment(session: AsyncSession, order: Order, staff: StaffP
         last = refunded[-1]
         session.add(
             Payment(
-                company_id=order.company_id,
                 order_id=order.id,
-                branch_id=last.branch_id,
+                unit_id=last.unit_id,
                 amount=keep,
                 method=last.method,
                 employee_id=last.employee_id,
@@ -740,8 +822,9 @@ async def _return_overpayment(session: AsyncSession, order: Order, staff: StaffP
                 created_by=staff.id,
             )
         )
+        _note_first_payment(order, last.created_at)
     await recompute(session, order, now)
-    patient = await repo.get_patient(session, order.patient_id, order.company_id)
+    patient = await repo.get_patient(session, order.patient_id)
     if patient:
         await repo.bump_patient_stats(session, patient.id, spent=-excess, now=now)
     return excess, refunded
@@ -754,8 +837,8 @@ async def remove_item(
 
     Paid or not: on a (partly) paid cheque whatever is now paid over the new total goes back to the patient
     (`_return_overpayment`) and the response says how much (`refunded`; 0 when the remaining debt just shrinks)."""
-    order = await get_order_or_404(session, order_id, scope_company(staff), for_update=True, staff=staff)
-    item = await repo.get_item(session, item_id, order.company_id)
+    order = await get_order_or_404(session, order_id, staff, for_update=True)
+    item = await repo.get_item(session, item_id)
     if not item or item.order_id != order.id:
         raise NotFoundError(ITEM_NOT_FOUND)
     if item.status != "pending":
@@ -772,7 +855,7 @@ async def remove_item(
         session,
         actor_type="staff",
         actor_id=staff.id,
-        company_id=order.company_id,
+        unit_id=order.unit_id,
         action="order.items.remove",
         entity="order_item",
         entity_id=item.id,
@@ -801,12 +884,11 @@ async def _telegram_push(
     if patient and patient.telegram_chat_id:
         await messaging.enqueue(
             session,
-            company_id=order.company_id,
+            unit_id=order.unit_id,
             channel="telegram",
             kind=kind,
             to=patient.telegram_chat_id,
             text=text,
-            branch_id=order.branch_id,
             patient_id=order.patient_id,
             order_id=order.id,
             document_id=document_id,
@@ -825,11 +907,9 @@ def payment_parts(body: PayIn) -> list[tuple[str, int]]:
     return list(merged.items())
 
 
-async def pay(
-    session: AsyncSession, order_id: uuid.UUID, staff: StaffPrincipal, body: PayIn, meta: RequestMeta
-) -> OrderPaymentsOut:
+async def pay(session: AsyncSession, order_id: uuid.UUID, staff: StaffPrincipal, body: PayIn, meta: RequestMeta) -> OrderPaymentsOut:
     """Record a payment (partial allowed), keep patient totalSpent, optionally SMS + Telegram receipt."""
-    order = await get_order_or_404(session, order_id, scope_company(staff), for_update=True, staff=staff)
+    order = await get_order_or_404(session, order_id, staff, for_update=True)
     if order.item_count == 0:
         raise ValidationError("Chekda xizmat yo‘q", code="empty")
     if order.payment == "paid":
@@ -846,8 +926,7 @@ async def pay(
     payments = [
         Payment(
             order_id=order.id,
-            company_id=order.company_id,
-            branch_id=order.branch_id,
+            unit_id=order.unit_id,
             amount=part_amount,
             method=method,
             employee_id=staff.id,
@@ -859,42 +938,40 @@ async def pay(
     ]
     session.add_all(payments)
     payment = payments[0]
+    _note_first_payment(order, now)
     await recompute(session, order, now)
-    patient = await repo.get_patient(session, order.patient_id, order.company_id)
+    patient = await repo.get_patient(session, order.patient_id)
     if patient:
         await repo.bump_patient_stats(session, patient.id, spent=amount, now=now)
-    company = await repo.get_company(session, order.company_id)
-    if company:
-        text = messaging.payment_receipt_text(
-            company, order.number, amount, order.patient_name, branch=await session.get(Branch, order.branch_id),
-            total=order.total, remaining=max(0, order.total - order.paid_amount),  # after this payment
-        )
-        if body.send_sms:
-            await messaging.enqueue_sms_if_configured(
-                session,
-                company,
-                kind="payment_receipt",
-                to=order.patient_phone,
-                text=text,
-                patient_id=order.patient_id,
-                order_id=order.id,
-                branch_id=order.branch_id,
-                created_by=staff.id,
-            )
-        await _telegram_push(
+    text = await messaging.payment_receipt_text(
+        session, order.unit_id, order.number, amount, order.patient_name,
+        total=order.total, remaining=max(0, order.total - order.paid_amount),  # after this payment
+    )
+    if body.send_sms:
+        await messaging.enqueue_sms_if_configured(
             session,
-            patient,
-            order,
+            order.unit_id,
             kind="payment_receipt",
+            to=order.patient_phone,
             text=text,
-            document_id=None,
-            payload={"orderId": str(order.id)},
+            patient_id=order.patient_id,
+            order_id=order.id,
+            created_by=staff.id,
         )
+    await _telegram_push(
+        session,
+        patient,
+        order,
+        kind="payment_receipt",
+        text=text,
+        document_id=None,
+        payload={"orderId": str(order.id)},
+    )
     await audit(
         session,
         actor_type="staff",
         actor_id=staff.id,
-        company_id=order.company_id,
+        unit_id=order.unit_id,
         action="order.pay",
         entity="payment",
         entity_id=payment.id,
@@ -905,16 +982,20 @@ async def pay(
     return await _order_payments_out(session, order)
 
 
-async def refund(
-    session: AsyncSession, payment_id: uuid.UUID, staff: StaffPrincipal, reason: str, meta: RequestMeta
-) -> OrderPaymentsOut:
-    """Mark a payment refunded; the order's paid amount / payment status and patient totalSpent follow."""
-    payment = await repo.get_payment(session, payment_id, scope_company(staff))
+async def _payment_or_404(session: AsyncSession, payment_id: uuid.UUID, staff: StaffPrincipal) -> Payment:
+    payment = await repo.get_payment(session, payment_id)
     if not payment:
         raise NotFoundError("To‘lov topilmadi")
+    staff.require_unit(payment.unit_id)
+    return payment
+
+
+async def refund(session: AsyncSession, payment_id: uuid.UUID, staff: StaffPrincipal, reason: str, meta: RequestMeta) -> OrderPaymentsOut:
+    """Mark a payment refunded; the order's paid amount / payment status and patient totalSpent follow."""
+    payment = await _payment_or_404(session, payment_id, staff)
     if payment.refunded_at is not None:
         raise StateError("To‘lov allaqachon qaytarilgan", code="state")
-    order = await get_order_or_404(session, payment.order_id, payment.company_id, for_update=True, staff=staff)
+    order = await get_order_or_404(session, payment.order_id, staff, for_update=True)
     await session.refresh(payment)
     if payment.refunded_at is not None:
         raise StateError("To‘lov allaqachon qaytarilgan", code="state")
@@ -924,14 +1005,14 @@ async def refund(
     payment.refund_reason = reason or None
     _touch(payment, now)
     await recompute(session, order, now)
-    patient = await repo.get_patient(session, order.patient_id, order.company_id)
+    patient = await repo.get_patient(session, order.patient_id)
     if patient:
         await repo.bump_patient_stats(session, patient.id, spent=-payment.amount, now=now)
     await audit(
         session,
         actor_type="staff",
         actor_id=staff.id,
-        company_id=order.company_id,
+        unit_id=order.unit_id,
         action="payment.refund",
         entity="payment",
         entity_id=payment.id,
@@ -956,18 +1037,14 @@ def method_change_parts(current: str, amount: int, body: PaymentMethodIn) -> lis
     return sorted(parts, key=lambda p: p[0] != current)
 
 
-async def change_payment_method(
-    session: AsyncSession, payment_id: uuid.UUID, staff: StaffPrincipal, body: PaymentMethodIn, meta: RequestMeta
-) -> OrderPaymentsOut:
-    """Correct how a payment was taken (e.g. card typed as cash) — the amount, time, cashier and branch stay.
+async def change_payment_method(session: AsyncSession, payment_id: uuid.UUID, staff: StaffPrincipal, body: PaymentMethodIn, meta: RequestMeta) -> OrderPaymentsOut:
+    """Correct how a payment was taken (e.g. card typed as cash) — the amount, time, cashier and facility stay.
 
     One part: the row just gets the new method. Several: the row keeps the first part and the rest become new rows
-    with the same time / cashier / branch, so the day and the cashier of the money don't move; every touched row
+    with the same time / cashier / facility, so the day and the cashier of the money don't move; every touched row
     records what it was (`corrections`). Refunded → 409 state; reception only within a day (`late_edit` any time)."""
-    payment = await repo.get_payment(session, payment_id, scope_company(staff))
-    if not payment:
-        raise NotFoundError("To‘lov topilmadi")
-    order = await get_order_or_404(session, payment.order_id, payment.company_id, for_update=True, staff=staff)
+    payment = await _payment_or_404(session, payment_id, staff)
+    order = await get_order_or_404(session, payment.order_id, staff, for_update=True)
     await session.refresh(payment)
     if payment.refunded_at is not None:
         raise StateError("Qaytarilgan to‘lovni o‘zgartirib bo‘lmaydi", code="state")
@@ -987,9 +1064,8 @@ async def change_payment_method(
     _touch(payment, now)
     split_off = [
         Payment(
-            company_id=payment.company_id,
             order_id=payment.order_id,
-            branch_id=payment.branch_id,
+            unit_id=payment.unit_id,
             amount=part_amount,
             method=part_method,
             employee_id=payment.employee_id,
@@ -1002,12 +1078,14 @@ async def change_payment_method(
         for part_method, part_amount in rest
     ]
     session.add_all(split_off)
+    if split_off:
+        _note_first_payment(order, payment.created_at)
     await recompute(session, order, now)
     await audit(
         session,
         actor_type="staff",
         actor_id=staff.id,
-        company_id=order.company_id,
+        unit_id=order.unit_id,
         action="payment.method_change",
         entity="payment",
         entity_id=payment.id,
@@ -1019,11 +1097,9 @@ async def change_payment_method(
     return await _order_payments_out(session, order)
 
 
-async def cancel_order(
-    session: AsyncSession, order_id: uuid.UUID, staff: StaffPrincipal, reason: str, meta: RequestMeta
-) -> OrderOut:
+async def cancel_order(session: AsyncSession, order_id: uuid.UUID, staff: StaffPrincipal, reason: str, meta: RequestMeta) -> OrderOut:
     """Cancel an unpaid cheque: order + all items -> cancelled; `note` untouched, reason kept separately."""
-    order = await get_order_or_404(session, order_id, scope_company(staff), for_update=True, staff=staff)
+    order = await get_order_or_404(session, order_id, staff, for_update=True)
     if order.payment != "unpaid":
         raise ConflictError("To‘langan chekni bekor qilish uchun avval qaytarish qiling", code="paid")
     now = utcnow()
@@ -1039,7 +1115,7 @@ async def cancel_order(
         session,
         actor_type="staff",
         actor_id=staff.id,
-        company_id=order.company_id,
+        unit_id=order.unit_id,
         action="order.cancel",
         entity="order",
         entity_id=order.id,
@@ -1048,7 +1124,7 @@ async def cancel_order(
         ip=meta.ip,
         request_id=meta.request_id,
     )
-    return order_out(order)
+    return order_out(order, (await _unit_names(session, [order.unit_id])).get(order.unit_id))
 
 
 async def delete_order(session: AsyncSession, order_id: uuid.UUID, staff: StaffPrincipal, meta: RequestMeta) -> OrderOut:
@@ -1057,7 +1133,7 @@ async def delete_order(session: AsyncSession, order_id: uuid.UUID, staff: StaffP
     Paid or not — the cheque (and its payments) disappear from every list, report and the dashboard, and the
     patient's stats (orders, total spent) are rolled back. The rows stay in the database with `deleted_at` —
     nothing is physically removed, so the payment history and audit trail survive."""
-    order = await get_order_or_404(session, order_id, scope_company(staff), for_update=True, staff=staff)
+    order = await get_order_or_404(session, order_id, staff, for_update=True)
     items = await repo.items_of_order(session, order.id)
     for it in items:
         if it.status not in ("pending", "cancelled"):
@@ -1083,7 +1159,7 @@ async def delete_order(session: AsyncSession, order_id: uuid.UUID, staff: StaffP
         session,
         actor_type="staff",
         actor_id=staff.id,
-        company_id=order.company_id,
+        unit_id=order.unit_id,
         action="order.delete",
         entity="order",
         entity_id=order.id,
@@ -1092,7 +1168,7 @@ async def delete_order(session: AsyncSession, order_id: uuid.UUID, staff: StaffP
         ip=meta.ip,
         request_id=meta.request_id,
     )
-    return order_out(order)
+    return order_out(order, (await _unit_names(session, [order.unit_id])).get(order.unit_id))
 
 
 # ----------------------------------------------------------------------------- category restriction
@@ -1100,7 +1176,7 @@ async def delete_order(session: AsyncSession, order_id: uuid.UUID, staff: StaffP
 CATEGORY_FORBIDDEN = "Bu kategoriya sizga biriktirilmagan"
 
 
-async def allowed_category_ids(session: AsyncSession, staff: StaffPrincipal, company_id: uuid.UUID) -> set[uuid.UUID] | None:
+async def allowed_category_ids(session: AsyncSession, staff: StaffPrincipal) -> set[uuid.UUID] | None:
     """Categories the employee may work with (own `category_ids` + all descendants).
 
     `None` = unrestricted (superadmin, or no categories assigned). Cached per employee for 60 s
@@ -1108,16 +1184,12 @@ async def allowed_category_ids(session: AsyncSession, staff: StaffPrincipal, com
     ids = list(staff.employee.category_ids or [])
     if staff.is_super_admin or not ids:
         return None
-    key = f"co:{company_id}:empcats:{staff.id}"
+    key = f"emp:{staff.id}:cats"
     cached = await cache.get_json(key)
     if isinstance(cached, list):
         return {uuid.UUID(x) for x in cached}
-    from app.modules.catalog import repository as catalog_repo
-
-    allowed: set[uuid.UUID] = set()
-    for root in ids:
-        allowed |= await catalog_repo.descendant_category_ids(session, company_id, root)
-        allowed.add(root)  # keep the id even if the category was archived/deleted (harmless)
+    allowed = await repo.descendant_category_ids(session, ids)
+    allowed |= set(ids)  # keep the ids even if a category was archived/deleted (harmless)
     await cache.set_json(key, [str(x) for x in allowed], 60)
     return allowed
 
@@ -1128,25 +1200,34 @@ def ensure_category_access(item: OrderItem, allowed: set[uuid.UUID] | None) -> N
         raise ForbiddenError(CATEGORY_FORBIDDEN)
 
 
-
 # ----------------------------------------------------------------------------- lab
 
 
-async def worklist(session: AsyncSession, company_id: uuid.UUID, q: WorklistQuery, staff: StaffPrincipal | None = None) -> Page[WorklistItemOut]:
-    """Lab worklist rows (item + order snapshots + live patient gender/birth date).
+async def _restrict_categories(session: AsyncSession, q: WorklistQuery, staff: StaffPrincipal) -> WorklistQuery | None:
+    """The worklist query narrowed to the employee's categories; None = nothing may be shown."""
+    allowed = await allowed_category_ids(session, staff)
+    if allowed is None:
+        return q
+    wanted = set(repo.parse_uuids(q.category_ids)) if q.category_ids else None
+    effective = (wanted & allowed) if wanted is not None else allowed
+    if not effective:
+        return None
+    return q.model_copy(update={"category_ids": [str(x) for x in effective]})
+
+
+async def worklist(session: AsyncSession, scope: UnitScope, q: WorklistQuery, staff: StaffPrincipal) -> Page[WorklistItemOut]:
+    """Lab worklist rows (item + order snapshots + live patient gender/birth date) of the unit's facilities.
 
     Employees bound to categories only ever see items of those categories (server-side)."""
-    allowed = await allowed_category_ids(session, staff, company_id) if staff else None
-    if allowed is not None:
-        wanted = set(repo.parse_uuids(q.category_ids)) if q.category_ids else None
-        effective = (wanted & allowed) if wanted is not None else allowed
-        if not effective:
-            return page_of([], q, 0)
-        q = q.model_copy(update={"category_ids": [str(x) for x in effective]})
-    rows, total = await repo.worklist(session, company_id, q, staff.branch_scope(q.branch_id) if staff else None)
+    restricted = await _restrict_categories(session, q, staff)
+    if restricted is None:
+        return page_of([], q, 0)
+    rows, total = await repo.worklist(session, _unit_filter(scope, q.unit_id), restricted)
+    names = await _unit_names(session, {item.unit_id for item, *_ in rows})
     out = [
         WorklistItemOut(
             **_item_fields(item),
+            unit_name=names.get(item.unit_id),
             order_number=number,
             patient_name=patient_name,
             patient_phone=patient_phone,
@@ -1158,32 +1239,26 @@ async def worklist(session: AsyncSession, company_id: uuid.UUID, q: WorklistQuer
     return page_of(out, q, total)
 
 
-async def worklist_counts(session: AsyncSession, company_id: uuid.UUID, q: WorklistQuery, staff: StaffPrincipal | None = None) -> WorklistCountsOut:
+async def worklist_counts(session: AsyncSession, scope: UnitScope, q: WorklistQuery, staff: StaffPrincipal) -> WorklistCountsOut:
     """Status-tab counters for the lab/confirm pages (same filters & category restriction as `worklist`)."""
-    allowed = await allowed_category_ids(session, staff, company_id) if staff else None
-    if allowed is not None:
-        wanted = set(repo.parse_uuids(q.category_ids)) if q.category_ids else None
-        effective = (wanted & allowed) if wanted is not None else allowed
-        if not effective:
-            return WorklistCountsOut(all=0, pending=0, entered=0, submitted=0, approved=0, rejected=0, cancelled=0)
-        q = q.model_copy(update={"category_ids": [str(x) for x in effective]})
-    counts = await repo.worklist_counts(session, company_id, q, staff.branch_scope(q.branch_id) if staff else None)
     keys = ("pending", "entered", "submitted", "approved", "rejected", "cancelled")
+    restricted = await _restrict_categories(session, q, staff)
+    if restricted is None:
+        return WorklistCountsOut(all=0, **{k: 0 for k in keys})
+    counts = await repo.worklist_counts(session, _unit_filter(scope, q.unit_id), restricted)
     return WorklistCountsOut(all=sum(counts.get(k, 0) for k in keys), **{k: counts.get(k, 0) for k in keys})
 
 
 async def get_item_dto(session: AsyncSession, item_id: uuid.UUID, staff: StaffPrincipal) -> OrderItemOut:
-    """Company-scoped item."""
-    return item_out(await get_item_or_404(session, item_id, scope_company(staff), staff))
+    """Item of a facility the employee may act in."""
+    return item_out(await get_item_or_404(session, item_id, staff))
 
 
-async def save_values(
-    session: AsyncSession, item_id: uuid.UUID, staff: StaffPrincipal, body: SaveValuesIn, meta: RequestMeta
-) -> OrderItemOut:
+async def save_values(session: AsyncSession, item_id: uuid.UUID, staff: StaffPrincipal, body: SaveValuesIn, meta: RequestMeta) -> OrderItemOut:
     """Replace result values wholesale; pending/rejected -> entered, entered/submitted keep their status."""
-    item = await get_item_or_404(session, item_id, scope_company(staff), staff)
-    order = await _lock_order_of_item(session, item)
-    ensure_category_access(item, await allowed_category_ids(session, staff, item.company_id))
+    item = await get_item_or_404(session, item_id, staff)
+    order = await _lock_order_of_item(session, item, staff)
+    ensure_category_access(item, await allowed_category_ids(session, staff))
     if item.status == "approved":
         raise ConflictError("Tasdiqlangan natijani o‘zgartirib bo‘lmaydi", code="approved")
     if item.status == "cancelled":
@@ -1203,7 +1278,7 @@ async def save_values(
         session,
         actor_type="staff",
         actor_id=staff.id,
-        company_id=item.company_id,
+        unit_id=item.unit_id,
         action="item.values",
         entity="order_item",
         entity_id=item.id,
@@ -1218,13 +1293,11 @@ def _is_blank(v: Any) -> bool:
     return v is None or v == "" or (isinstance(v, list) and len(v) == 0)
 
 
-async def submit_item(
-    session: AsyncSession, item_id: uuid.UUID, staff: StaffPrincipal, meta: RequestMeta
-) -> OrderItemOut:
+async def submit_item(session: AsyncSession, item_id: uuid.UUID, staff: StaffPrincipal, meta: RequestMeta) -> OrderItemOut:
     """Toggle entered <-> submitted after validating required schema fields."""
-    item = await get_item_or_404(session, item_id, scope_company(staff), staff)
-    order = await _lock_order_of_item(session, item)
-    ensure_category_access(item, await allowed_category_ids(session, staff, item.company_id))
+    item = await get_item_or_404(session, item_id, staff)
+    order = await _lock_order_of_item(session, item, staff)
+    ensure_category_access(item, await allowed_category_ids(session, staff))
     if item.status not in ("entered", "submitted"):
         raise StateError("Avval natijalarni saqlang", code="state")
     schema = (await repo.schemas_by_ids(session, [item.schema_id])).get(item.schema_id) if item.schema_id else None
@@ -1251,7 +1324,7 @@ async def submit_item(
         session,
         actor_type="staff",
         actor_id=staff.id,
-        company_id=item.company_id,
+        unit_id=item.unit_id,
         action="item.submit" if item.status == "submitted" else "item.unsubmit",
         entity="order_item",
         entity_id=item.id,
@@ -1262,13 +1335,11 @@ async def submit_item(
     return item_out(item)
 
 
-async def reject_item(
-    session: AsyncSession, item_id: uuid.UUID, staff: StaffPrincipal, reason: str, meta: RequestMeta
-) -> OrderItemOut:
+async def reject_item(session: AsyncSession, item_id: uuid.UUID, staff: StaffPrincipal, reason: str, meta: RequestMeta) -> OrderItemOut:
     """Doctor sends a submitted result back to the lab."""
-    item = await get_item_or_404(session, item_id, scope_company(staff), staff)
-    order = await _lock_order_of_item(session, item)
-    ensure_category_access(item, await allowed_category_ids(session, staff, item.company_id))
+    item = await get_item_or_404(session, item_id, staff)
+    order = await _lock_order_of_item(session, item, staff)
+    ensure_category_access(item, await allowed_category_ids(session, staff))
     if item.status != "submitted":
         raise StateError("Faqat yuborilgan natijani qaytarish mumkin", code="state")
     now = utcnow()
@@ -1283,7 +1354,7 @@ async def reject_item(
         session,
         actor_type="staff",
         actor_id=staff.id,
-        company_id=item.company_id,
+        unit_id=item.unit_id,
         action="item.reject",
         entity="order_item",
         entity_id=item.id,
@@ -1298,26 +1369,29 @@ async def reject_item(
 
 
 async def _resolve_item_template(session: AsyncSession, item: OrderItem, template_id: str | None) -> ResultTemplate:
-    """DOMAIN_RULES section 7 chain: explicit/default (any status) -> active bound -> active generic -> 422."""
-    st = await repo.service_types_by_ids(session, item.company_id, [item.service_type_id])
-    wanted = repo.to_uuid(template_id) or (
-        st[item.service_type_id].default_template_id if item.service_type_id in st else None
-    )
-    tpl = await repo.get_template(session, wanted, item.company_id) if wanted else None
-    if tpl is not None and tpl.branch_ids and item.branch_id not in tpl.branch_ids:
-        tpl = None  # bound to other branches — fall through the chain
+    """DOMAIN_RULES section 7 chain: explicit/default (any status) -> active bound -> active generic -> 422.
+    Every step only considers templates usable at the item's facility (owner on its path, bindings on its path)."""
+    st = (await catalog_svc.get_service_types_by_ids(session, [item.service_type_id])).get(item.service_type_id)
+    wanted = repo.to_uuid(template_id) or (st.default_template_id if st is not None else None)
+    tpl = await repo.get_template(session, wanted) if wanted else None
+    if tpl is not None and not await _template_usable_at(session, tpl, item.unit_id):
+        tpl = None  # belongs to other units — fall through the chain
     if tpl is None:
-        tpl = await repo.find_active_template(session, item.company_id, item.service_type_id, item.category_id, item.branch_id)
-    if tpl is None:
-        tpl = await repo.find_generic_template(session, item.company_id, item.branch_id)
+        tpl = await _pick_template(
+            session,
+            item.unit_id,
+            # bound to the service type or its category (the most specific binding first, then the oldest)
+            lambda t: t.scope != "receipt" and (item.service_type_id in (t.service_type_ids or []) or item.category_id in (t.category_ids or [])),
+            # the catch-all: no service-type bindings
+            lambda t: t.scope != "receipt" and not (t.service_type_ids or []),
+        )
     if tpl is None:
         raise ValidationError("Bu xizmat uchun faol shablon yo‘q", code="no_template")
     return tpl
 
 
 def _covers(tpl: ResultTemplate, item: OrderItem) -> bool:
-    if tpl.branch_ids and item.branch_id not in tpl.branch_ids:
-        return False  # template belongs to other branches
+    """The (already facility-checked) template covers the item: bound to its service / category, or unbound."""
     st_ids, cat_ids = list(tpl.service_type_ids or []), list(tpl.category_ids or [])
     return item.service_type_id in st_ids or item.category_id in cat_ids or (not st_ids and not cat_ids)
 
@@ -1334,18 +1408,15 @@ async def _issue_document(
     now: datetime,
     actor_id: uuid.UUID,
     meta: RequestMeta | None = None,
-) -> tuple[ResultDocument, Company | None, Patient | None]:
+) -> tuple[ResultDocument, OrgUnit, Patient]:
     """Freeze the render snapshot, create the final document, render + store the PDF (best effort)."""
-    company = await repo.get_company(session, order.company_id)
-    branch = await repo.get_branch(session, order.branch_id, order.company_id)
-    patient = await repo.get_patient(session, order.patient_id, order.company_id)
-    if company is None or patient is None:
+    facility = await _facility_or_404(session, order.unit_id)
+    patient = await repo.get_patient(session, order.patient_id)
+    if patient is None:
         raise NotFoundError(ORDER_NOT_FOUND)
-    category = (await repo.categories_by_ids(session, order.company_id, [primary_item.category_id])).get(
-        primary_item.category_id
-    )
+    category = (await repo.categories_by_ids(session, [primary_item.category_id])).get(primary_item.category_id)
     schemas = await repo.schemas_by_ids(session, [i.schema_id for i in items])
-    sts = await repo.service_types_by_ids(session, order.company_id, {i.service_type_id for i in items})
+    sts = await catalog_svc.get_service_types_by_ids(session, {i.service_type_id for i in items})
     service_codes = {
         i.service_type_id: (
             sts[i.service_type_id].code
@@ -1363,8 +1434,7 @@ async def _issue_document(
         template=template,
         order=order,
         patient=patient,
-        company=company,
-        branch=branch,
+        unit_id=facility.id,
         category=category,
         primary_item=primary_item,
         items=items,
@@ -1377,7 +1447,7 @@ async def _issue_document(
     )
     at = iso_z(now)
     doc = ResultDocument(
-        company_id=order.company_id,
+        unit_id=order.unit_id,
         order_id=order.id,
         patient_id=order.patient_id,
         order_item_id=primary_item.id,
@@ -1406,7 +1476,7 @@ async def _issue_document(
             pdf = await templates_svc.render_snapshot_pdf(session, snapshot)
             stored = await files_svc.store_bytes(
                 session,
-                company_id=order.company_id,
+                unit_id=order.unit_id,
                 data=pdf,
                 mime="application/pdf",
                 filename=f"{order.number}-{slugify(title)}.pdf",
@@ -1417,30 +1487,26 @@ async def _issue_document(
     except Exception:  # renderer failure must not block approval — PDF is rendered lazily later
         log.exception("PDF render failed for document %s (order %s)", doc.id, order.number)
     await templates_svc.increment_usage(session, template.id)
-    return doc, company, patient
+    return doc, facility, patient
 
 
 async def _notify_result_ready(
     session: AsyncSession,
     *,
     order: Order,
-    company: Company | None,
     patient: Patient | None,
     doc: ResultDocument,
     text: str,
     actor_id: uuid.UUID,
 ) -> None:
-    if company is None:
-        return
     await messaging.enqueue_sms_if_configured(
         session,
-        company,
+        order.unit_id,
         kind="result_ready",
         to=order.patient_phone,
         text=text,
         patient_id=order.patient_id,
         order_id=order.id,
-        branch_id=order.branch_id,
         document_id=doc.id,
         created_by=actor_id,
     )
@@ -1455,13 +1521,11 @@ async def _notify_result_ready(
     )
 
 
-async def approve_item(
-    session: AsyncSession, item_id: uuid.UUID, staff: StaffPrincipal, body: ApproveItemIn, meta: RequestMeta
-) -> ApproveItemOut:
+async def approve_item(session: AsyncSession, item_id: uuid.UUID, staff: StaffPrincipal, body: ApproveItemIn, meta: RequestMeta) -> ApproveItemOut:
     """Doctor approves one submitted item -> item-scoped document + PDF + notifications."""
-    item = await get_item_or_404(session, item_id, scope_company(staff), staff)
-    order = await _lock_order_of_item(session, item)
-    ensure_category_access(item, await allowed_category_ids(session, staff, item.company_id))
+    item = await get_item_or_404(session, item_id, staff)
+    order = await _lock_order_of_item(session, item, staff)
+    ensure_category_access(item, await allowed_category_ids(session, staff))
     if item.status != "submitted":
         raise StateError("Faqat yuborilgan natijani tasdiqlash mumkin", code="state")
     template = await _resolve_item_template(session, item, body.template_id)
@@ -1472,7 +1536,7 @@ async def approve_item(
     item.doctor_name = staff.employee.full_name
     item.approved_at = now
     _touch(item, now)
-    doc, company, patient = await _issue_document(
+    doc, facility, patient = await _issue_document(
         session,
         order=order,
         template=template,
@@ -1488,16 +1552,14 @@ async def approve_item(
     _push_history(item, "approved", staff, now, document_id=doc.id)
     _touch(item, now)
     await recompute(session, order, now)
-    if company:
-        text = messaging.result_ready_text(company, item.service_name, order.patient_name, order.number, public_result_link(doc, meta), branch=await session.get(Branch, order.branch_id))
-        await _notify_result_ready(
-            session, order=order, company=company, patient=patient, doc=doc, text=text, actor_id=staff.id
-        )
+    text = await messaging.result_ready_text(session, order.unit_id, item.service_name, order.patient_name, order.number, public_result_link(doc, meta))
+    await _notify_result_ready(session, order=order, patient=patient, doc=doc, text=text, actor_id=staff.id)
     await audit(
         session,
         actor_type="staff",
         actor_id=staff.id,
-        company_id=item.company_id,
+        unit_id=item.unit_id,
+        country_id=facility.country_id,
         action="item.approve",
         entity="order_item",
         entity_id=item.id,
@@ -1505,7 +1567,7 @@ async def approve_item(
         ip=meta.ip,
         request_id=meta.request_id,
     )
-    return ApproveItemOut(item=item_out(item), document=document_out(doc))
+    return ApproveItemOut(item=item_out(item), document=document_out(doc, facility.name))
 
 
 async def revoke_item(session: AsyncSession, item_id: uuid.UUID, staff: StaffPrincipal, reason: str, meta: RequestMeta) -> RevokeOut:
@@ -1515,14 +1577,14 @@ async def revoke_item(session: AsyncSession, item_id: uuid.UUID, staff: StaffPri
     reason = (reason or "").strip()
     if not reason:
         raise ValidationError("Bekor qilish sababini yozing", code="reason")
-    item = await get_item_or_404(session, item_id, scope_company(staff), staff)
-    order = await _lock_order_of_item(session, item)
-    ensure_category_access(item, await allowed_category_ids(session, staff, item.company_id))
+    item = await get_item_or_404(session, item_id, staff)
+    order = await _lock_order_of_item(session, item, staff)
+    ensure_category_access(item, await allowed_category_ids(session, staff))
     if item.status != "approved":
         raise StateError("Faqat tasdiqlangan natijani bekor qilish mumkin", code="state")
     now = utcnow()
     _seed_history(item)
-    doc = await repo.get_document(session, item.document_id, item.company_id) if item.document_id else None
+    doc = await repo.get_document(session, item.document_id) if item.document_id else None
     affected: list[OrderItem] = [item]
     if doc is not None:
         doc.status = "revoked"
@@ -1555,7 +1617,7 @@ async def revoke_item(session: AsyncSession, item_id: uuid.UUID, staff: StaffPri
         session,
         actor_type="staff",
         actor_id=staff.id,
-        company_id=item.company_id,
+        unit_id=item.unit_id,
         action="item.revoke",
         entity="order_item",
         entity_id=item.id,
@@ -1567,26 +1629,22 @@ async def revoke_item(session: AsyncSession, item_id: uuid.UUID, staff: StaffPri
     return RevokeOut(item=item_out(item), items=[item_out(x) for x in affected], document_id=str(doc.id) if doc else None)
 
 
-async def order_scope_items(
-    session: AsyncSession, order_id: uuid.UUID, template_id: uuid.UUID, staff: StaffPrincipal
-) -> list[OrderItemOut]:
+async def order_scope_items(session: AsyncSession, order_id: uuid.UUID, template_id: uuid.UUID, staff: StaffPrincipal) -> list[OrderItemOut]:
     """Non-cancelled items of the order an order-scope template would cover (any status)."""
-    order = await get_order_or_404(session, order_id, scope_company(staff), staff=staff)
-    tpl = await repo.get_template(session, template_id, order.company_id)
-    if not tpl:
+    order = await get_order_or_404(session, order_id, staff)
+    tpl = await repo.get_template(session, template_id)
+    if not tpl or not await _template_usable_at(session, tpl, order.unit_id):
         raise NotFoundError("Shablon topilmadi")
     items = [i for i in await repo.items_of_order(session, order.id) if i.status != "cancelled" and _covers(tpl, i)]
     return [item_out(i) for i in items]
 
 
-async def approve_order(
-    session: AsyncSession, order_id: uuid.UUID, staff: StaffPrincipal, body: ApproveOrderIn, meta: RequestMeta
-) -> ApproveOrderOut:
+async def approve_order(session: AsyncSession, order_id: uuid.UUID, staff: StaffPrincipal, body: ApproveOrderIn, meta: RequestMeta) -> ApproveOrderOut:
     """Approve every submitted covered item with ONE order-scope document (covered approved items share it)."""
-    order = await get_order_or_404(session, order_id, scope_company(staff), for_update=True, staff=staff)
+    order = await get_order_or_404(session, order_id, staff, for_update=True)
     tpl_id = repo.to_uuid(body.template_id)
-    tpl = await repo.get_template(session, tpl_id, order.company_id) if tpl_id else None
-    if not tpl or tpl.status != "active":
+    tpl = await repo.get_template(session, tpl_id) if tpl_id else None
+    if not tpl or tpl.status != "active" or not await _template_usable_at(session, tpl, order.unit_id):
         raise ValidationError("Faol shablon topilmadi", code="no_template")
     if tpl.scope != "order":
         raise ValidationError("Bu shablon chek darajasidagi hujjat emas", code="scope")
@@ -1601,7 +1659,7 @@ async def approve_order(
     to_approve = [i for i in covered if i.status == "submitted"]
     if not to_approve:
         raise StateError("Tasdiqlash uchun yuborilgan tahlil yo‘q", code="state")
-    allowed = await allowed_category_ids(session, staff, order.company_id)
+    allowed = await allowed_category_ids(session, staff)
     for it in to_approve:
         ensure_category_access(it, allowed)
     now = utcnow()
@@ -1612,7 +1670,7 @@ async def approve_order(
         it.doctor_name = staff.employee.full_name
         it.approved_at = now
         _touch(it, now)
-    doc, company, patient = await _issue_document(
+    doc, facility, patient = await _issue_document(
         session,
         order=order,
         template=tpl,
@@ -1631,16 +1689,14 @@ async def approve_order(
     for it in to_approve:
         _push_history(it, "approved", staff, now, document_id=doc.id)
     await recompute(session, order, now)
-    if company:
-        text = messaging.result_ready_order_text(company, tpl.name, len(to_approve), order.patient_name, order.number, public_result_link(doc, meta), branch=await session.get(Branch, order.branch_id))
-        await _notify_result_ready(
-            session, order=order, company=company, patient=patient, doc=doc, text=text, actor_id=staff.id
-        )
+    text = await messaging.result_ready_order_text(session, order.unit_id, tpl.name, len(to_approve), order.patient_name, order.number, public_result_link(doc, meta))
+    await _notify_result_ready(session, order=order, patient=patient, doc=doc, text=text, actor_id=staff.id)
     await audit(
         session,
         actor_type="staff",
         actor_id=staff.id,
-        company_id=order.company_id,
+        unit_id=order.unit_id,
+        country_id=facility.country_id,
         action="order.approve",
         entity="order",
         entity_id=order.id,
@@ -1653,7 +1709,7 @@ async def approve_order(
         ip=meta.ip,
         request_id=meta.request_id,
     )
-    return ApproveOrderOut(items=[item_out(i) for i in covered], document=document_out(doc))
+    return ApproveOrderOut(items=[item_out(i) for i in covered], document=document_out(doc, facility.name))
 
 
 # ----------------------------------------------------------------------------- documents
@@ -1664,29 +1720,26 @@ RESEND_COOLDOWN_SECONDS = 60
 
 async def resend_result_sms(session: AsyncSession, document_id: uuid.UUID, staff: StaffPrincipal, body: ResultSmsIn, meta: RequestMeta) -> ResultSmsOut:
     """Queue the result's "ready" SMS again — the same text the approval sent (with the result link), to the
-    patient's current phone or the number given. A dry run only returns the recipient and the text."""
-    doc = await get_document_or_404(session, document_id, scope_company(staff), staff)
-    order = await get_order_or_404(session, doc.order_id, doc.company_id, staff=staff)
-    company = await session.get(Company, order.company_id)
-    if company is None:
-        raise NotFoundError("Kompaniya topilmadi")
-    patient = await repo.get_patient(session, order.patient_id, order.company_id) if order.patient_id else None
+    patient's current phone or the number given. A dry run only returns the recipient and the text.
+    The SMS goes out through the document's facility (its own account, else the nearest inherited one)."""
+    doc = await get_document_or_404(session, document_id, staff)
+    order = await get_order_or_404(session, doc.order_id, staff)
+    patient = await repo.get_patient(session, order.patient_id) if order.patient_id else None
     to = norm_phone(body.to if body.to and body.to.strip() else (patient.phone if patient else order.patient_phone))
     if not is_valid_uz_phone(to):
         raise ValidationError("Telefon raqam noto‘g‘ri", code="invalid_phone")
     link = public_result_link(doc, meta)
-    branch = await session.get(Branch, order.branch_id)
     if doc.order_item_ids:  # one document for several services of the cheque (order-scope template)
-        tpl = await repo.get_template(session, doc.template_id, doc.company_id)
-        text = messaging.result_ready_order_text(company, tpl.name if tpl else doc.title, len(doc.order_item_ids), order.patient_name, order.number, link, branch=branch)
+        tpl = await repo.get_template(session, doc.template_id)
+        text = await messaging.result_ready_order_text(session, doc.unit_id, tpl.name if tpl else doc.title, len(doc.order_item_ids), order.patient_name, order.number, link)
     else:
-        item = await repo.get_item(session, doc.order_item_id, doc.company_id) if doc.order_item_id else None
-        text = messaging.result_ready_text(company, item.service_name if item else doc.title, order.patient_name, order.number, link, branch=branch)
-    configured = messaging.sms_account(company, branch) is not None
+        item = await repo.get_item(session, doc.order_item_id) if doc.order_item_id else None
+        text = await messaging.result_ready_text(session, doc.unit_id, item.service_name if item else doc.title, order.patient_name, order.number, link)
+    configured = await messaging.sms_account_for(session, doc.unit_id) is not None
     if body.dry_run:
         return ResultSmsOut(to=to, text=text, configured=configured, queued=False)
     # a double click (or an impatient second press) must not send the same SMS twice
-    key = f"co:{company.id}:resend-sms:{doc.id}"
+    key = f"doc:{doc.id}:resend-sms"
     try:
         fresh = await get_redis().set(key, "1", ex=RESEND_COOLDOWN_SECONDS, nx=True)
     except Exception:  # pragma: no cover - Redis degraded: do not block the resend
@@ -1694,25 +1747,26 @@ async def resend_result_sms(session: AsyncSession, document_id: uuid.UUID, staff
     if not fresh:
         raise RateLimitedError("SMS hozirgina yuborildi. Bir daqiqadan keyin qayta urinib ko‘ring.", details={"retryAfter": RESEND_COOLDOWN_SECONDS})
     msg = await messaging.enqueue_sms_if_configured(
-        session, company, kind="result_ready", to=to, text=text, patient_id=order.patient_id, order_id=order.id,
-        branch_id=order.branch_id, document_id=doc.id, created_by=staff.id,
+        session, doc.unit_id, kind="result_ready", to=to, text=text, patient_id=order.patient_id, order_id=order.id,
+        document_id=doc.id, created_by=staff.id,
     )
     status = msg.status if msg else None
     await messaging.mark_document_delivery(session, doc.id, "sms", "failed" if status == "failed" else "queued", msg.error if msg and status == "failed" else None)
-    await audit(session, actor_type="staff", actor_id=staff.id, company_id=order.company_id, action="document.sms_resend", entity="result_document", entity_id=doc.id, after={"to": to, "status": status}, ip=meta.ip, request_id=meta.request_id)
+    await audit(session, actor_type="staff", actor_id=staff.id, unit_id=doc.unit_id, action="document.sms_resend", entity="result_document", entity_id=doc.id, after={"to": to, "status": status}, ip=meta.ip, request_id=meta.request_id)
     return ResultSmsOut(to=to, text=text, configured=configured, queued=status is not None and status != "failed", status=status, message_id=str(msg.id) if msg else None)
 
 
 async def list_documents(
-    session: AsyncSession, company_id: uuid.UUID, *, order_id: str | None, patient_id: str | None, branches: list[uuid.UUID] | None = None
+    session: AsyncSession, scope: UnitScope, *, order_id: str | None, patient_id: str | None, unit_id: str | None = None
 ) -> list[ResultDocumentOut]:
-    """Company documents by order and/or patient, newest first (malformed ids -> empty list)."""
+    """Documents of the unit's facilities by order and/or patient, newest first (malformed ids -> empty list)."""
     oid = repo.to_uuid(order_id) if order_id else None
     pid = repo.to_uuid(patient_id) if patient_id else None
     if (order_id and oid is None) or (patient_id and pid is None):
         return []
-    rows = await repo.list_documents(session, company_id, order_id=oid, patient_id=pid, branches=branches)
-    return [document_out(d) for d in rows]
+    rows = await repo.list_documents(session, _unit_filter(scope, unit_id), order_id=oid, patient_id=pid)
+    names = await _unit_names(session, {d.unit_id for d in rows})
+    return [document_out(d, names.get(d.unit_id)) for d in rows]
 
 
 async def ensure_document_pdf(session: AsyncSession, document: ResultDocument) -> bytes:
@@ -1724,7 +1778,7 @@ async def ensure_document_pdf(session: AsyncSession, document: ResultDocument) -
     pdf = await templates_svc.render_snapshot_pdf(session, document.snapshot or {})
     stored = await files_svc.store_bytes(
         session,
-        company_id=document.company_id,
+        unit_id=document.unit_id,
         data=pdf,
         mime="application/pdf",
         filename=f"{slugify(document.title)}.pdf",
@@ -1754,8 +1808,9 @@ async def mark_document_viewed(session: AsyncSession, doc: ResultDocument) -> No
 
 async def mark_document_printed(session: AsyncSession, document_id: uuid.UUID, staff: StaffPrincipal) -> int:
     """Staff printed the result (TPrints or the browser dialog) — counts as handed over to the patient."""
-    doc = await get_document_or_404(session, document_id, scope_company(staff), staff)
+    doc = await get_document_or_404(session, document_id, staff)
     return await repo.mark_document_printed(session, doc.id, utcnow())
+
 
 # ----------------------------------------------------------------------------- public link access
 
@@ -1784,22 +1839,16 @@ async def _public_document_patient(session: AsyncSession, doc: ResultDocument) -
     patient = await session.get(Patient, doc.patient_id)
     order = await session.get(Order, doc.order_id)
     if not patient or patient.deleted_at is not None:
-        raise NotFoundError("Bemor topilmadi")
+        raise NotFoundError(PATIENT_NOT_FOUND)
     phone = norm_phone((order.patient_phone if order else None) or patient.phone or "")
     if not is_valid_uz_phone(phone):
         raise StateError("Hujjatga telefon raqami bog‘lanmagan — SMS kod yuborib bo‘lmaydi. Klinikaga murojaat qiling.", code="no_phone")
     return patient, order, phone
 
 
-async def _otp_sms_branch(session: AsyncSession, company: Company | None, order: Order | None, patient: Patient) -> tuple[Branch | None, bool]:
-    """Which branch's SMS account sends a public-link code: the cheque's branch first (it issued the result and sent
-    the result SMS), then the patient's registration branch — see `messaging.sms_branch_for`."""
-    branch_ids: list[uuid.UUID] = []
-    for branch_id in ((order.branch_id if order else None), patient.branch_id):
-        if branch_id and branch_id not in branch_ids:
-            branch_ids.append(branch_id)
-    branches = [await session.get(Branch, branch_id) for branch_id in branch_ids]
-    return messaging.sms_branch_for(company, *branches)
+async def _public_free_view_days(session: AsyncSession, doc: ResultDocument) -> int:
+    """The code-free window of the document's facility (`documentFreeViewDays`, inherited root → leaf)."""
+    return document_free_view_days(await units_svc.effective_settings(session, doc.unit_id))
 
 
 def public_free_until(issued_at: datetime, days: int) -> datetime | None:
@@ -1817,15 +1866,14 @@ async def public_document_info(session: AsyncSession, token: str) -> PublicDocum
     """Public verification info for a result link (QR / SMS): who issued it, when, and that it is authentic.
 
     Scanned any number of times — nothing is consumed. The PDF itself is behind an SMS code, except during the
-    clinic's code-free window (`documentFreeViewDays` after issue): then `otpRequired` is false and `freeUntil` says
-    until when the link opens it directly."""
+    organisation's code-free window (`documentFreeViewDays` after issue): then `otpRequired` is false and `freeUntil`
+    says until when the link opens it directly."""
     doc = await _public_document(session, token)
-    company = await repo.get_company(session, doc.company_id)
-    free_until = public_code_free(doc.created_at, document_free_view_days(company.settings if company else None), utcnow())
+    free_until = public_code_free(doc.created_at, await _public_free_view_days(session, doc), utcnow())
     return PublicDocumentInfoOut(
         id=str(doc.id),
         title=doc.title,
-        company_name=company.name if company else "",
+        org_name=await units_svc.org_name(session, doc.unit_id),
         issued_at=iso_z(doc.created_at),
         otp_required=free_until is None,
         free_until=iso_z(free_until) if free_until else None,
@@ -1833,22 +1881,21 @@ async def public_document_info(session: AsyncSession, token: str) -> PublicDocum
 
 
 async def public_document_open(session: AsyncSession, token: str, meta: RequestMeta) -> tuple[bytes, str]:
-    """The PDF straight from the SMS link — only inside the clinic's code-free window (`documentFreeViewDays` days
-    after the result was issued); otherwise 403 `otp_required` and the page falls back to the SMS code.
+    """The PDF straight from the SMS link — only inside the organisation's code-free window (`documentFreeViewDays`
+    days after the result was issued); otherwise 403 `otp_required` and the page falls back to the SMS code.
 
     The window is read from the current setting on every request, so shortening it (or 0) closes the links at once."""
     doc = await _public_document(session, token)
     ip = meta.ip or "?"
     await rate_limit.enforce(f"rl:docopen:ip:{ip}", settings.auth_rate_limit_per_minute, 60)
     await rate_limit.enforce(f"rl:docopen:token:{token}", 30, 3600, "Juda ko'p urinish. Keyinroq qayta urinib ko'ring.")
-    company = await session.get(Company, doc.company_id)
     now = utcnow()
-    free_until = public_code_free(doc.created_at, document_free_view_days(company.settings if company else None), now)
+    free_until = public_code_free(doc.created_at, await _public_free_view_days(session, doc), now)
     if free_until is None:
         raise ForbiddenError("Hujjatni ochish uchun SMS kod kerak", code="otp_required")
     patient = await session.get(Patient, doc.patient_id)
     if not patient or patient.deleted_at is not None:
-        raise NotFoundError("Bemor topilmadi")
+        raise NotFoundError(PATIENT_NOT_FOUND)
     await repo.mark_public_viewed(session, doc.id, now)
     await mark_document_viewed(session, doc)
     pdf = await ensure_document_pdf(session, doc)
@@ -1856,7 +1903,7 @@ async def public_document_open(session: AsyncSession, token: str, meta: RequestM
         session,
         actor_type="patient",
         actor_id=patient.id,
-        company_id=doc.company_id,
+        unit_id=doc.unit_id,
         action="document_public_open",
         entity="result_document",
         entity_id=doc.id,
@@ -1874,7 +1921,7 @@ def mask_name(full_name: str | None) -> str:
 
 
 async def public_document_verify(session: AsyncSession, token: str) -> PublicDocumentVerifyOut:
-    """QR authenticity check (`GET /v/{token}`): was this document issued by the clinic and is it still valid.
+    """QR authenticity check (`GET /v/{token}`): was this document issued by the organisation and is it still valid.
 
     Only what lets someone holding the paper match it — issuer, date, numbers, masked holder; never the results, the
     PDF or an SMS code. A withdrawn result (revoked) or a cancelled / deleted cheque answers `revoked`."""
@@ -1883,20 +1930,23 @@ async def public_document_verify(session: AsyncSession, token: str) -> PublicDoc
         raise NotFoundError(DOC_NOT_FOUND)
     ctx = (doc.snapshot or {}).get("context") or {}
     order = await session.get(Order, doc.order_id)
-    company = await session.get(Company, doc.company_id)
-    branch = await session.get(Branch, order.branch_id) if order else None
+    unit = (await units_repo.units_by_ids(session, [doc.unit_id])).get(doc.unit_id)
+    org_name = await units_svc.org_name(session, doc.unit_id)
     revoked_at: datetime | None = None
     if doc.status == "revoked" or doc.deleted_at:
         revoked_at = doc.deleted_at or doc.updated_at
     elif order is None or order.deleted_at or order.status == "cancelled":
         revoked_at = (order.deleted_at or order.cancelled_at or order.updated_at) if order else doc.updated_at
     doctor = (ctx.get("item") or {}).get("doctor") or (await repo.get_employee_name(session, doc.created_by) if doc.created_by else None)
+    # documents issued before the port froze `company` / `branch` blocks — they still answer the check
+    frozen_org = (ctx.get("org") or ctx.get("company") or {}).get("name") or ""
+    frozen_unit = (ctx.get("unit") or ctx.get("branch") or {}).get("name") or ""
     return PublicDocumentVerifyOut(
         id=str(doc.id),
         status="revoked" if revoked_at else "valid",
         title=doc.title,
-        company_name=(company.name if company else None) or (ctx.get("company") or {}).get("name") or "",
-        branch_name=(branch.name if branch else None) or (ctx.get("branch") or {}).get("name") or "",
+        org_name=org_name or frozen_org,
+        unit_name=(unit.name if unit else None) or frozen_unit,
         order_number=(order.number if order else None) or (ctx.get("order") or {}).get("number") or "",
         doctor_name=doctor or "",
         patient=mask_name((ctx.get("patient") or {}).get("fullName") or (order.patient_name if order else None)),
@@ -1908,17 +1958,16 @@ async def public_document_verify(session: AsyncSession, token: str) -> PublicDoc
 async def public_document_otp_request(session: AsyncSession, token: str, meta: RequestMeta) -> PublicDocumentOtpOut:
     """Send an SMS code to the phone the document belongs to (shown masked) — viewing the PDF needs it.
 
-    The code goes out through the cheque's branch (the one that issued the result and sent the result SMS), else the
-    patient's registration branch — whichever can send. When neither can, the request fails with
+    The code goes out through the document's facility (the one that issued the result and sent the result SMS — its
+    own SMS account, else the nearest inherited one). When it cannot send, the request fails with
     `sms_not_configured` instead of pretending a code is on its way (dev mode still answers with `devCode`)."""
     doc = await _public_document(session, token)
     patient, order, phone = await _public_document_patient(session, doc)
-    company = await session.get(Company, doc.company_id)
-    branch, configured = await _otp_sms_branch(session, company, order, patient)
+    configured = await messaging.sms_account_for(session, doc.unit_id) is not None
     if not configured and not settings.otp_dev_mode:
         raise StateError(
-            "Bu klinikada SMS yuborish sozlanmagan — hujjatni havola orqali ochib bo‘lmaydi. "
-            "Natijani bemor kabinetidan ko‘ring yoki klinikaga murojaat qiling.",
+            "Bu muassasada SMS yuborish sozlanmagan — hujjatni havola orqali ochib bo‘lmaydi. "
+            "Natijani bemor kabinetidan ko‘ring yoki muassasaga murojaat qiling.",
             code="sms_not_configured",
         )
     ip = meta.ip or "?"
@@ -1943,21 +1992,20 @@ async def public_document_otp_request(session: AsyncSession, token: str, meta: R
         code_hash=sha256_hex(code),
         max_attempts=settings.otp_max_attempts,
         expires_at=utcnow() + timedelta(seconds=settings.otp_ttl_seconds),
-        company_id=doc.company_id,
+        unit_id=doc.unit_id,
         meta={"token": token, "documentId": str(doc.id), "ip": meta.ip},
     )
     session.add(challenge)
     await session.flush()
-    if company and configured:
+    if configured:
         await messaging.enqueue_sms_if_configured(
             session,
-            company,
+            doc.unit_id,
             kind="otp",
             to=phone,
-            text=messaging.otp_text(company, code),
+            text=await messaging.otp_text(session, doc.unit_id, code),
             patient_id=patient.id,
             order_id=order.id if order else None,
-            branch_id=branch.id if branch else None,
         )
     try:
         await get_redis().set(cooldown_key, "1", ex=settings.otp_resend_cooldown_seconds)
@@ -1969,11 +2017,11 @@ async def public_document_otp_request(session: AsyncSession, token: str, meta: R
         session,
         actor_type="patient",
         actor_id=patient.id,
-        company_id=doc.company_id,
+        unit_id=doc.unit_id,
         action="document_otp_request",
         entity="result_document",
         entity_id=doc.id,
-        after={"branchId": str(branch.id) if branch else None, "sent": configured},
+        after={"unitId": str(doc.unit_id), "sent": configured},
         ip=meta.ip,
         request_id=meta.request_id,
     )
@@ -2024,7 +2072,7 @@ async def public_document_otp_verify(session: AsyncSession, token: str, challeng
         session,
         actor_type="patient",
         actor_id=patient.id,
-        company_id=doc.company_id,
+        unit_id=doc.unit_id,
         action="document_otp_verify",
         entity="result_document",
         entity_id=doc.id,

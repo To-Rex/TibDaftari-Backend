@@ -1,7 +1,7 @@
-"""python-telegram-bot handlers — the NavbatApp conversation, one Application per company.
+"""python-telegram-bot handlers — the NavbatApp conversation, one Application per bot account.
 
 Flow: /start → language (inline) → already linked? welcome back + menu : ask phone (contact button or text)
-→ patient lookup in the company → OTP SMS → code (3 attempts) → link → menu.
+→ patient lookup in the bot's country registry → OTP SMS → code (3 attempts) → link → menu.
 Menu: 🧾 cheques · 💰 payments · 📄 results (PDFs) · 🚪 logout · 🌐 language. Commands: /lang /logout /cancel.
 
 python-telegram-bot is imported lazily inside `build_application()` so the API boots even when the
@@ -21,6 +21,7 @@ from app.core.config import settings
 from app.infrastructure.db.session import session_scope
 from app.modules.telegram import repository as repo
 from app.modules.telegram import service
+from app.modules.telegram.service import BotSpec
 from app.modules.telegram.texts import COMMANDS, LANGS, PICK_LANG, button_regex, norm_lang, t
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -60,8 +61,8 @@ def _phone_keyboard(lang: str) -> Any:
     return ReplyKeyboardMarkup([[KeyboardButton(t(lang, "btn_share_phone"), request_contact=True)]], resize_keyboard=True, one_time_keyboard=True)
 
 
-def build_application(token: str, company_id: uuid.UUID) -> Application:
-    """Create the PTB Application for one company with all handlers registered (not started)."""
+def build_application(bot: BotSpec) -> Application:
+    """Create the PTB Application for one bot account with all handlers registered (not started)."""
     from telegram import BotCommand, ReplyKeyboardRemove, Update
     from telegram.ext import (
         Application,
@@ -74,6 +75,9 @@ def build_application(token: str, company_id: uuid.UUID) -> Application:
     )
     from telegram.warnings import PTBUserWarning
 
+    if not bot.token:
+        raise ValueError("bot token missing")
+    account_id = bot.account_id
     Ctx = ContextTypes.DEFAULT_TYPE  # noqa: N806 - type alias
 
     # ------------------------------------------------------------------ helpers
@@ -82,27 +86,27 @@ def build_application(token: str, company_id: uuid.UUID) -> Application:
         return str(update.effective_chat.id) if update.effective_chat else ""
 
     async def _lang(update: Update, context: Ctx) -> str:
-        """Chat language: cached in user_data, loaded from telegram_chat_prefs once."""
+        """Chat language: cached in user_data, loaded from telegram_chat_prefs once (else the unit's locale)."""
         cached = context.user_data.get(UD_LANG) if context.user_data is not None else None
         if cached:
             return str(cached)
         async with session_scope() as s:
-            stored = await repo.get_lang(s, company_id, _chat_id(update))
-            lang = norm_lang(stored) if stored else service.default_lang_for(await repo.get_company(s, company_id))
+            stored = await repo.get_lang(s, account_id, _chat_id(update))
+        lang = norm_lang(stored) if stored else bot.default_lang
         if context.user_data is not None:
             context.user_data[UD_LANG] = lang
         return lang
 
     async def _set_lang(update: Update, context: Ctx, lang: str) -> str:
         async with session_scope() as s:
-            lang = await service.set_chat_lang(s, company_id, _chat_id(update), lang)
+            lang = await service.set_chat_lang(s, account_id, _chat_id(update), lang)
         if context.user_data is not None:
             context.user_data[UD_LANG] = lang
         return lang
 
     async def _linked(update: Update) -> Any:
         async with session_scope() as s:
-            return await repo.linked_patient(s, company_id, _chat_id(update))
+            return await repo.linked_patient(s, bot.country_id, _chat_id(update))
 
     async def _reply(update: Update, text: str, reply_markup: Any = None) -> None:
         if update.effective_chat:
@@ -115,7 +119,7 @@ def build_application(token: str, company_id: uuid.UUID) -> Application:
             try:
                 return await fn(update, context)
             except Exception:
-                log.exception("telegram[%s]: handler %s failed", company_id, fn.__name__)
+                log.exception("telegram[%s]: handler %s failed", account_id, fn.__name__)
                 try:
                     await _reply(update, t(context.user_data.get(UD_LANG) if context.user_data else None, "error"))
                 except Exception:
@@ -145,9 +149,11 @@ def build_application(token: str, company_id: uuid.UUID) -> Application:
 
     async def lang_chosen(update: Update, context: Ctx) -> int:
         lang = await _apply_lang_choice(update, context)
-        patient = await _linked(update)
+        async with session_scope() as s:
+            patient = await repo.linked_patient(s, bot.country_id, _chat_id(update))
+            org = await service.patient_org_name(s, patient) if patient else ""
         if patient:
-            await _reply(update, t(lang, "welcome_back", name=service.display_name(patient, lang)), main_keyboard(lang))
+            await _reply(update, service.with_org(t(lang, "welcome_back", name=service.display_name(patient, lang)), org), main_keyboard(lang))
             return ConversationHandler.END
         await _reply(update, t(lang, "ask_phone"), _phone_keyboard(lang))
         return WAITING_FOR_PHONE
@@ -157,11 +163,7 @@ def build_application(token: str, company_id: uuid.UUID) -> Application:
         msg = update.message
         raw = msg.contact.phone_number if msg and msg.contact else (msg.text if msg else None)
         async with session_scope() as s:
-            company = await repo.get_company(s, company_id)
-            if not company:
-                await _reply(update, t(lang, "error"))
-                return ConversationHandler.END
-            result = await service.begin_login(s, company, _chat_id(update), raw, lang)
+            result = await service.begin_login(s, bot, _chat_id(update), raw, lang)
         if result.status == "bad_phone":
             await _reply(update, t(lang, "bad_phone"), _phone_keyboard(lang))
             return WAITING_FOR_PHONE
@@ -182,14 +184,14 @@ def build_application(token: str, company_id: uuid.UUID) -> Application:
         challenge_id = uuid.UUID(str(raw)) if raw else None
         code = (update.message.text if update.message else "") or ""
         async with session_scope() as s:
-            result = await service.verify_code(s, company_id, _chat_id(update), challenge_id, code, lang)
+            result = await service.verify_code(s, bot, _chat_id(update), challenge_id, code, lang)
         if result.status == "wrong":
             await _reply(update, t(lang, "wrong_code", attempts=result.attempts_left))
             return WAITING_FOR_OTP
         if context.user_data is not None:
             context.user_data.pop(UD_CHALLENGE, None)
         if result.status == "linked":
-            await _reply(update, t(lang, "verified", name=result.patient_name), main_keyboard(lang))
+            await _reply(update, service.with_org(t(lang, "verified", name=result.patient_name), result.org_name), main_keyboard(lang))
         elif result.status == "over":
             await _reply(update, t(lang, "attempts_over"), ReplyKeyboardRemove())
         else:
@@ -220,7 +222,7 @@ def build_application(token: str, company_id: uuid.UUID) -> Application:
         if context.user_data is not None:
             context.user_data.pop(UD_CHALLENGE, None)
         async with session_scope() as s:
-            name = await service.logout(s, company_id, _chat_id(update), lang)
+            name = await service.logout(s, bot, _chat_id(update), lang)
         if name:
             await _reply(update, t(lang, "logged_out", name=name), ReplyKeyboardRemove())
         else:
@@ -239,7 +241,7 @@ def build_application(token: str, company_id: uuid.UUID) -> Application:
         if not patient:
             return
         async with session_scope() as s:
-            text = await service.orders_text(s, company_id, patient.id, lang)
+            text = await service.orders_text(s, patient.id, lang)
         await _reply(update, text, main_keyboard(lang))
 
     async def my_payments(update: Update, context: Ctx) -> None:
@@ -248,7 +250,7 @@ def build_application(token: str, company_id: uuid.UUID) -> Application:
         if not patient:
             return
         async with session_scope() as s:
-            text = await service.payments_text(s, company_id, patient.id, lang)
+            text = await service.payments_text(s, patient.id, lang)
         await _reply(update, text, main_keyboard(lang))
 
     async def my_results(update: Update, context: Ctx) -> None:
@@ -258,7 +260,7 @@ def build_application(token: str, company_id: uuid.UUID) -> Application:
             return
         await _reply(update, t(lang, "results_wait"))
         async with session_scope() as s:
-            files = await service.result_files(s, company_id, patient.id, lang)
+            files = await service.result_files(s, patient.id, lang)
         if not files:
             await _reply(update, t(lang, "no_results"), main_keyboard(lang))
             return
@@ -268,7 +270,7 @@ def build_application(token: str, company_id: uuid.UUID) -> Application:
                 await update.effective_chat.send_document(document=f.data, filename=f.filename, caption=f.caption)
                 sent += 1
             except Exception:
-                log.exception("telegram[%s]: result document not sent (%s)", company_id, f.filename)
+                log.exception("telegram[%s]: result document not sent (%s)", account_id, f.filename)
         await _reply(update, t(lang, "results_done", n=sent), main_keyboard(lang))
 
     async def fallback_text(update: Update, context: Ctx) -> None:
@@ -280,14 +282,14 @@ def build_application(token: str, company_id: uuid.UUID) -> Application:
             await _reply(update, t(lang, "need_login"))
 
     async def on_error(update: object, context: Ctx) -> None:
-        log.error("telegram[%s]: unhandled error: %s", company_id, context.error)
+        log.error("telegram[%s]: unhandled error: %s", account_id, context.error)
 
     async def post_init(application: Application) -> None:
         for lang_code, cmds in COMMANDS.items():
             try:
                 await application.bot.set_my_commands([BotCommand(c, d) for c, d in cmds], language_code=lang_code)
             except Exception as exc:
-                log.warning("telegram[%s]: set_my_commands(%s) failed: %s", company_id, lang_code, exc)
+                log.warning("telegram[%s]: set_my_commands(%s) failed: %s", account_id, lang_code, exc)
 
     # ------------------------------------------------------------------ wiring
 
@@ -304,7 +306,7 @@ def build_application(token: str, company_id: uuid.UUID) -> Application:
             fallbacks=[CommandHandler("cancel", guarded(cancel, ConversationHandler.END)), CommandHandler("logout", guarded(logout, ConversationHandler.END))],
         )
 
-    application = Application.builder().token(token).connect_timeout(10).read_timeout(30).post_init(post_init).build()
+    application = Application.builder().token(bot.token).connect_timeout(10).read_timeout(30).post_init(post_init).build()
     application.add_handler(conversation)
     application.add_handler(CommandHandler("logout", guarded(logout)))
     application.add_handler(CommandHandler("lang", guarded(send_lang_picker)))

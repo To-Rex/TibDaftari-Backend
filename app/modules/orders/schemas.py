@@ -1,4 +1,8 @@
-"""Order DTOs — mirror of Clinic-Web `src/domain/order.ts` (Order, OrderItem, Payment, ResultDocument, inputs)."""
+"""Order DTOs — mirror of Clinic-Web `src/domain/order.ts` (Order, OrderItem, Payment, ResultDocument, inputs).
+
+Tenancy: every row carries `unitId` — the facility (org unit of level `facility`) that did the work — and lists add
+the facility's `unitName`. There is no company id any more; the scope of a list is the `{unit_id}` of its URL.
+"""
 
 from __future__ import annotations
 
@@ -36,8 +40,9 @@ class MethodSumOut(CamelModel):
 
 class OrderOut(CamelModel):
     id: str
-    company_id: str
-    branch_id: str
+    #: the facility the cheque was written in
+    unit_id: str
+    unit_name: str | None = None
     number: str
     patient_id: str
     patient_name: str
@@ -60,7 +65,7 @@ class OrderOut(CamelModel):
     created_by: str | None = None
     #: non-refunded payments by method (filled in the cheque list)
     payments_by_method: list[MethodSumOut] = Field(default_factory=list)
-    #: oldest payment, refunded or not (cheque list) — a day later reception can no longer delete the cheque
+    #: the first payment, refunded or not — a day later reception can no longer change the cheque's money
     first_paid_at: datetime | None = None
 
 
@@ -80,8 +85,7 @@ class ItemEventOut(CamelModel):
 class OrderItemOut(CamelModel):
     id: str
     order_id: str
-    company_id: str
-    branch_id: str
+    unit_id: str
     service_type_id: str
     service_name: str
     category_id: str
@@ -111,6 +115,7 @@ class OrderItemOut(CamelModel):
 class WorklistItemOut(OrderItemOut):
     """OrderItem + order/patient join columns for the lab worklist."""
 
+    unit_name: str | None = None
     order_number: str
     patient_name: str
     patient_phone: str
@@ -134,8 +139,7 @@ class PaymentCorrectionOut(CamelModel):
 class PaymentOut(CamelModel):
     id: str
     order_id: str
-    company_id: str
-    branch_id: str
+    unit_id: str
     amount: int
     method: PaymentMethod
     employee_id: str
@@ -171,7 +175,7 @@ class ResultSmsOut(CamelModel):
 
     to: str
     text: str
-    #: the company has an SMS provider; without one the message is only recorded as failed
+    #: the facility (or a unit above it) has an SMS provider; without one the message is only recorded as failed
     configured: bool
     queued: bool
     status: str | None = None
@@ -180,7 +184,9 @@ class ResultSmsOut(CamelModel):
 
 class ResultDocumentOut(CamelModel):
     id: str
-    company_id: str
+    #: the facility that issued the document (the cheque's)
+    unit_id: str
+    unit_name: str | None = None
     order_id: str
     order_item_id: str | None = None
     order_item_ids: list[str] | None = None
@@ -232,10 +238,11 @@ class ApproveOrderOut(CamelModel):
 
 
 class CreateOrderIn(CamelModel):
-    """`CreateOrderInput`."""
+    """`CreateOrderInput`. `unitId` = the facility the cheque is written in — optional when the URL's unit is a
+    facility itself, required (a facility under the URL's unit) when the staff works from a higher level."""
 
     patient_id: str = Field(min_length=1, max_length=64)
-    branch_id: str = Field(min_length=1, max_length=64)
+    unit_id: str | None = Field(default=None, max_length=64)
     service_type_ids: list[str] = Field(default_factory=list, max_length=200)
     note: str | None = Field(default=None, max_length=2000)
 
@@ -297,7 +304,8 @@ class ApproveOrderIn(CamelModel):
 
 
 class OrderListQuery(PageQuery):
-    branch_id: str | None = None
+    #: narrow the list to one unit under the URL's unit (a facility, or a district / region with its facilities)
+    unit_id: str | None = None
     status: OrderStatus | None = None
     payment: PaymentStatus | None = None
     date_from: str | None = Field(default=None, max_length=10)
@@ -362,7 +370,8 @@ class WorklistCountsOut(CamelModel):
 
 
 class WorklistQuery(PageQuery):
-    branch_id: str | None = None
+    #: narrow to one unit under the URL's unit
+    unit_id: str | None = None
     category_ids: list[str] = Field(default_factory=list)
     status: list[ItemStatus] = Field(default_factory=list)
     date_from: str | None = Field(default=None, max_length=10)
@@ -374,10 +383,11 @@ class PublicDocumentInfoOut(CamelModel):
 
     id: str
     title: str
-    company_name: str
+    #: the organisation that issued it (the nearest non-facility unit above the facility)
+    org_name: str
     issued_at: str
-    # the clinic's code-free window (`documentFreeViewDays` after issue): while it runs the PDF opens straight away
-    # (`POST /d/{token}/open`) and `freeUntil` says until when; afterwards an SMS code is needed again
+    # the organisation's code-free window (`documentFreeViewDays` after issue): while it runs the PDF opens straight
+    # away (`POST /d/{token}/open`) and `freeUntil` says until when; afterwards an SMS code is needed again
     otp_required: bool = True
     free_until: str | None = None
 
@@ -388,8 +398,8 @@ class PublicDocumentVerifyOut(CamelModel):
     id: str
     status: Literal["valid", "revoked"]
     title: str
-    company_name: str
-    branch_name: str
+    org_name: str
+    unit_name: str
     order_number: str
     doctor_name: str
     # `H*** D***` — enough to match the paper, not enough to identify the patient

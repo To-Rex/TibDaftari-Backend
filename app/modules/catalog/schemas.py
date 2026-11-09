@@ -1,4 +1,10 @@
-"""Catalog DTOs — mirror of Clinic-Web `src/domain/catalog.ts` (Category, ServiceType, AttributeSchema)."""
+"""Catalog DTOs — mirror of Clinic-Web `src/domain/catalog.ts` (Category, ServiceType, AttributeSchema).
+
+Every catalogue row carries `ownerUnitId` — the organisation unit (any level) that defines it; the row is
+visible to that unit's whole subtree. A service's per-unit overrides travel as `unitPrices` / `disabledUnitIds`
+(rows of `service_unit_settings`); when listed for a concrete unit the DTO also carries the resolved
+`effectivePrice` / `available`.
+"""
 
 from __future__ import annotations
 
@@ -19,7 +25,7 @@ FieldType = Literal["text", "longtext", "number", "select", "multiselect", "bool
 
 class CategoryOut(CamelModel):
     id: str
-    company_id: str
+    owner_unit_id: str
     parent_id: str | None
     name: str
     code: str | None = None
@@ -68,17 +74,27 @@ class ServiceStats(CamelModel):
     ordered30d: int = Field(default=0, alias="ordered30d")
 
 
+def _prices_non_negative(v: dict[str, int] | None) -> dict[str, int] | None:
+    if v and any(p < 0 for p in v.values()):
+        raise ValueError("narx manfiy bo‘lmasligi kerak")
+    return v
+
+
 class ServiceTypeOut(CamelModel):
     id: str
-    company_id: str
+    owner_unit_id: str
     category_id: str
     name: str
     code: str | None = None
     description: str | None = None
+    #: base price; `unitPrices` override it for a unit and everything under it (nearest level wins)
     price: int
-    branch_prices: dict[str, int]
-    # branches where the service is switched off; empty = every branch (rows cached before the field lack it)
-    disabled_branch_ids: list[str] = Field(default_factory=list)
+    unit_prices: dict[str, int] = Field(default_factory=dict)
+    #: units (and their subtrees) where the service is switched off; empty = offered everywhere it is visible
+    disabled_unit_ids: list[str] = Field(default_factory=list)
+    #: resolved for the `unitId` of the query (None on management lists)
+    effective_price: int | None = None
+    available: bool | None = None
     turnaround_days: int
     order: int
     is_active: bool
@@ -96,8 +112,8 @@ class ServiceTypeCreateIn(CamelModel):
     code: str | None = Field(default=None, max_length=40)
     description: str | None = None
     price: int = Field(default=0, ge=0)
-    branch_prices: dict[str, int] = Field(default_factory=dict)
-    disabled_branch_ids: list[str] = Field(default_factory=list, max_length=200)
+    unit_prices: dict[str, int] = Field(default_factory=dict)
+    disabled_unit_ids: list[str] = Field(default_factory=list, max_length=200)
     turnaround_days: int = Field(default=1, ge=0, le=365)
     order: int = Field(default=99, ge=0)
     is_active: bool = True
@@ -105,17 +121,19 @@ class ServiceTypeCreateIn(CamelModel):
     document_scope: DocumentScope = "item"
     default_template_id: str | None = None
 
+    _check_prices = field_validator("unit_prices")(_prices_non_negative)
+
 
 class ServiceTypeUpdateIn(CamelModel):
-    """Partial merge; `branchPrices` and `disabledBranchIds` are replaced wholesale when present."""
+    """Partial merge; `unitPrices` and `disabledUnitIds` are replaced wholesale when present."""
 
     category_id: str | None = None
     name: str | None = Field(default=None, min_length=1, max_length=300)
     code: str | None = Field(default=None, max_length=40)
     description: str | None = None
     price: int | None = Field(default=None, ge=0)
-    branch_prices: dict[str, int] | None = None
-    disabled_branch_ids: list[str] | None = Field(default=None, max_length=200)
+    unit_prices: dict[str, int] | None = None
+    disabled_unit_ids: list[str] | None = Field(default=None, max_length=200)
     turnaround_days: int | None = Field(default=None, ge=0, le=365)
     order: int | None = Field(default=None, ge=0)
     is_active: bool | None = None
@@ -123,13 +141,16 @@ class ServiceTypeUpdateIn(CamelModel):
     document_scope: DocumentScope | None = None
     default_template_id: str | None = None
 
+    _check_prices = field_validator("unit_prices")(_prices_non_negative)
+
 
 class ServiceTypeQuery(CamelModel):
     category_id: str | None = None
     search: str | None = Field(default=None, max_length=200)
     active_only: bool = False
-    # only what this branch offers: services switched off there are dropped (reception passes the cheque's branch)
-    branch_id: str | None = None
+    #: only what is usable AT this unit (a facility or any unit under the path unit), with the price and
+    #: on/off state resolved for it; without it the list is the management view of the whole lineage
+    unit_id: str | None = None
 
 
 # ----------------------------------------------------------------------------- attribute schemas
@@ -157,7 +178,7 @@ class FieldDefIn(BaseModel):
 
 class AttributeSchemaOut(CamelModel):
     id: str
-    company_id: str
+    owner_unit_id: str
     name: str
     description: str | None = None
     version: int
