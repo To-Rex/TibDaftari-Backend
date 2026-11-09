@@ -48,6 +48,7 @@ from sqlalchemy.sql import ColumnElement
 from app.api.deps import RequestMeta, StaffPrincipal, invalidate_principal_cache, invalidate_session_cache
 from app.core.audit import audit
 from app.core.exceptions import ForbiddenError, ValidationError
+from app.core.permissions import INSTALLER_ROLE_KEY, RESET_PERMISSION
 from app.core.scope import descendant_ids, invalidate_scope_cache
 from app.core.timeutil import utcnow
 from app.infrastructure.db.base import alive
@@ -129,9 +130,13 @@ def close_parts(parts: Iterable[str], allowed: tuple[str, ...], requires: dict[s
     return [p for p in allowed if p in wanted]
 
 
-def require_superadmin(staff: StaffPrincipal) -> None:
-    if not staff.is_super_admin:
-        raise ForbiddenError("Faqat superadmin uchun")
+def require_reset_right(staff: StaffPrincipal, unit: OrgUnit) -> None:
+    """A superadmin resets any unit; an installer (`admin.unit.reset`) only a unit inside their own scope."""
+    if staff.is_super_admin:
+        return
+    if not staff.has(RESET_PERMISSION):
+        raise ForbiddenError("Faqat superadmin yoki o‘rnatuvchi uchun")
+    staff.require_unit(unit.id)
 
 
 # --------------------------------------------------------------------------------------------- SQL helpers
@@ -226,8 +231,10 @@ def _preds(unit: OrgUnit, scope: list[uuid.UUID], staff: StaffPrincipal) -> dict
         templates_unbound = and_(~owned_in, bound_in)
     assets = TemplateAsset.owner_unit_id.in_(scope)
 
-    # staff: homed inside; superadmins and the caller stay; who also serves outside moves there instead
-    keep = or_(Employee.is_super_admin.is_(True), Employee.id == staff.id)
+    # staff: homed inside; superadmins, installers (accounts a superadmin handed out) and the caller stay; who also
+    # serves outside moves there instead
+    installers = select(Role.id).where(Role.scope_unit_id.is_(None), Role.key == INSTALLER_ROLE_KEY)
+    keep = or_(Employee.is_super_admin.is_(True), Employee.id == staff.id, Employee.role_id.in_(installers))
     extra_out = exists().where(EmployeeUnit.employee_id == Employee.id, EmployeeUnit.unit_id.not_in(scope))
     worked_outside = or_(
         exists().where(Order.created_by_employee_id == Employee.id, Order.unit_id.not_in(scope)),
@@ -289,7 +296,7 @@ UNIT_COUNTS: dict[str, tuple[str, ...]] = {
 
 async def preview(session: AsyncSession, unit: OrgUnit, staff: StaffPrincipal) -> dict[str, dict[str, int]]:
     """What each part would remove — counts only, nothing is changed."""
-    require_superadmin(staff)
+    require_reset_right(staff, unit)
     scope = await _scope_ids(session, unit)
     preds = _preds(unit, scope, staff)
     table = FACILITY_COUNTS if unit.level == "facility" else UNIT_COUNTS
@@ -412,7 +419,7 @@ async def _drop_units(session: AsyncSession, unit: OrgUnit, p: dict[str, Pred], 
 
 async def reset_unit(session: AsyncSession, unit: OrgUnit, parts: list[str], staff: StaffPrincipal, meta: RequestMeta) -> dict[str, int]:
     """Run the chosen (closed) parts for the unit inside the current transaction. Returns what was removed."""
-    require_superadmin(staff)
+    require_reset_right(staff, unit)
     scope = await _scope_ids(session, unit)
     # serialise with cheque creation (`next_order_number` bumps the counter row): the counters stay locked until commit
     await session.execute(select(OrderCounter.unit_id).where(OrderCounter.unit_id.in_(scope)).with_for_update())

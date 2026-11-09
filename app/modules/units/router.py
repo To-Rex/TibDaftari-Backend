@@ -94,13 +94,13 @@ async def set_telegram(unit_id: uuid.UUID, body: TelegramSettingsIn, staff: Staf
     return await service.set_telegram(session, unit_id, body, staff, meta)
 
 
-# ----------------------------------------------------------------------------- superadmin reset ("like newborn")
+# ------------------------------------------------------------------ reset ("like newborn") — superadmin, or an installer inside their scope
 
 
-@router.get("/units/{unit_id}/reset", response_model=ResetPreviewOut, summary="Superadmin: what a reset of the unit (and everything under it) would remove — no changes")
+@router.get("/units/{unit_id}/reset", response_model=ResetPreviewOut, summary="Superadmin / o‘rnatuvchi: what a reset of the unit (and everything under it) would remove — no changes")
 async def reset_preview(unit_id: uuid.UUID, staff: Staff, session: DbSession) -> ResetPreviewOut:
-    reset.require_superadmin(staff)
     unit = await service.get_unit_or_404(session, unit_id)
+    reset.require_reset_right(staff, unit)
     parts, requires = reset.parts_for(unit)
     counts = await reset.preview(session, unit, staff)
     return ResetPreviewOut(
@@ -112,10 +112,10 @@ async def reset_preview(unit_id: uuid.UUID, staff: Staff, session: DbSession) ->
     )
 
 
-@router.post("/units/{unit_id}/reset", response_model=ResetOut, summary="Superadmin: irreversibly reset the unit (chosen parts)")
+@router.post("/units/{unit_id}/reset", response_model=ResetOut, summary="Superadmin / o‘rnatuvchi: irreversibly reset the unit (chosen parts)")
 async def reset_unit(unit_id: uuid.UUID, body: ResetIn, staff: Staff, session: DbSession, meta: Meta) -> ResetOut:
-    reset.require_superadmin(staff)
     unit = await service.get_unit_or_404(session, unit_id)
+    reset.require_reset_right(staff, unit)
     if body.confirm.strip().lower() != reset.confirm_word(unit).lower():
         raise ValidationError(reset.CONFIRM_MISMATCH, code="confirm")
     parts, requires = reset.parts_for(unit)

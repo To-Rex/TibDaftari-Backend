@@ -115,6 +115,7 @@ raqamlari davom etadi). `29_`/`30_` Alembic baseline’ga kirmaydi — ular faqa
 | `seed-reference` | Davlatlar (`seed/reference/countries.json`), O‘zbekiston viloyat/tumanlari (`seed/reference/uz-regions.json`), idempotent upsert |
 | `create-country-root --country UZ --name "…" [--short-name …] [--code UZ]` | Daraxtning davlat tuguni (bo‘lmasa yaratadi) va davlatni yoqadi |
 | `create-superadmin --login L --password P --name "F.I.O."` | Platforma superadmini: tizim `superadmin` roli, birliksiz (`is_super_admin`), hamma narsani ko‘radi |
+| *(UI: Xodimlar → rol «O‘rnatuvchi»)* | Hudud o‘rnatuvchisi: superadmin kabi, lekin faqat o‘z viloyati (yoki butun davlati) va superadmin bergan qo‘shimcha viloyatlar ichida; boshqa davlatga chiqolmaydi. Faqat superadmin beradi |
 | `set-password --login L --password P` | Xodim parolini almashtiradi, blokirovkani tozalaydi |
 | `ensure-partitions [--months 3]` | `SELECT ensure_audit_partitions(n)` |
 

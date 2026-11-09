@@ -26,12 +26,18 @@ PERMISSIONS: tuple[str, ...] = (
     "admin.catalog.read", "admin.catalog.write", "admin.schema.write",
     "admin.template.read", "admin.template.write", "admin.template.publish",
     "admin.settings.write",
+    # wipe a unit (and everything under it) back to "newborn" — superadmin and the installer, inside their scope
+    "admin.unit.reset",
     # the whole tree, every country (superadmin)
     "platform.unit.manage",
 )
 PERMISSION_SET = frozenset(PERMISSIONS)
 PLATFORM_PERMISSIONS = frozenset(p for p in PERMISSIONS if p.startswith("platform."))
-UNIT_ADMIN_PERMISSIONS = tuple(p for p in PERMISSIONS if not p.startswith("platform."))
+RESET_PERMISSION = "admin.unit.reset"
+#: what a unit administrator may hold: everything but the platform keys and the reset
+UNIT_ADMIN_PERMISSIONS = tuple(p for p in PERMISSIONS if not p.startswith("platform.") and p != RESET_PERMISSION)
+#: the installer: a unit administrator who may also reset units — a "superadmin of their own territory"
+INSTALLER_PERMISSIONS = (*UNIT_ADMIN_PERMISSIONS, RESET_PERMISSION)
 
 #: v1 → v2 key renames (roles / overrides saved before the port are read through this map)
 RENAMED: dict[str, str] = {
@@ -42,7 +48,15 @@ RENAMED: dict[str, str] = {
 }
 
 SUPERADMIN_ROLE_KEY = "superadmin"
+#: O‘rnatuvchi — like a superadmin, but only inside the units a superadmin gave them (their viloyat, several
+#: viloyats, or a whole country); they never cross into another country
+INSTALLER_ROLE_KEY = "installer"
 ADMIN_ROLE_KEY = "admin"
+#: roles only a superadmin may grant, and whose holders only a superadmin may edit or remove
+PROTECTED_ROLE_KEYS = frozenset({SUPERADMIN_ROLE_KEY, INSTALLER_ROLE_KEY})
+#: where an installer may be homed (extra units: regions of the same country)
+INSTALLER_HOME_LEVELS = frozenset({"country", "region"})
+INSTALLER_EXTRA_LEVELS = frozenset({"region"})
 
 
 def normalize_key(key: str) -> str:
@@ -70,6 +84,7 @@ def invalid_permission_keys(keys: Iterable[str]) -> list[str]:
 # used by the frontend. WHERE a role applies comes from the employee's unit.
 SYSTEM_ROLES: tuple[dict, ...] = (
     {"key": SUPERADMIN_ROLE_KEY, "name": "Superadmin", "is_system": True, "permissions": list(PERMISSIONS)},
+    {"key": INSTALLER_ROLE_KEY, "name": "O‘rnatuvchi", "is_system": True, "permissions": list(INSTALLER_PERMISSIONS)},
     {"key": ADMIN_ROLE_KEY, "name": "Administrator", "is_system": True, "permissions": list(UNIT_ADMIN_PERMISSIONS)},
     {
         "key": "registrator",

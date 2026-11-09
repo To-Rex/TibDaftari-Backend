@@ -333,7 +333,7 @@ def test_superadmin_reset(ctx: dict) -> None:
     assert order.json()["order"]["number"] == f"{ctx['code_a']}-000001"
     # superadmin only; the preview changes nothing
     r = c.get(f"{API}/units/{fac}/reset", headers=ha)
-    assert r.status_code == 403 and r.json()["error"]["message"] == "Faqat superadmin uchun"
+    assert r.status_code == 403 and r.json()["error"]["message"] == "Faqat superadmin yoki o‘rnatuvchi uchun"
     r = c.get(f"{API}/units/{fac}/reset", headers=h(ctx, "super"))
     assert r.status_code == 200, r.text
     preview = r.json()

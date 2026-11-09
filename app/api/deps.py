@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.exceptions import AuthError, ForbiddenError, NotFoundError
-from app.core.permissions import PLATFORM_PERMISSIONS, resolve_permissions
+from app.core.permissions import INSTALLER_ROLE_KEY, PLATFORM_PERMISSIONS, resolve_permissions
 from app.core.scope import UnitScope, descendant_ids, load_scope
 from app.core.security import decode_token
 from app.infrastructure.db.base import alive
@@ -113,6 +113,11 @@ class StaffPrincipal:
     @property
     def role_key(self) -> str:
         return self.role.key if self.role else "user"
+
+    @property
+    def is_installer(self) -> bool:
+        """O‘rnatuvchi: superadmin-like inside their own units (see `INSTALLER_ROLE_KEY`)."""
+        return self.role is not None and self.role.scope_unit_id is None and self.role.key == INSTALLER_ROLE_KEY
 
     @property
     def home_unit_id(self) -> uuid.UUID | None:

@@ -77,7 +77,11 @@ DB helper functions available from SQL: `unit_descendants(uuid)`, `unit_ancestor
 | `admin.branch.write`      | `admin.unit.manage`    | create / edit units under it (tumanlar, muassasalar)|
 | `platform.company.manage` | `platform.unit.manage` | the whole tree, every country (superadmin)         |
 
-Everything else is unchanged (35 keys in total). Roles are system-wide (`scope_unit_id NULL`) or scoped to a unit.
+New in v2: `admin.unit.reset` — wipe a unit and its subtree (superadmin, or the installer inside their scope).
+36 keys in total. Roles are system-wide (`scope_unit_id NULL`) or scoped to a unit. System role `installer`
+("O‘rnatuvchi", `db/v2/32_installer_role.sql`, alembic `v2_0002`): a superadmin of one territory — homed at a region
+or the country node, extra units = regions of the same country, granted and edited by superadmins only
+(`app/core/permissions.py PROTECTED_ROLE_KEYS`, `staff/service.py _check_installer_scope`).
 
 ## Wire naming (DTOs — the frontend mirrors these exactly)
 

@@ -37,11 +37,24 @@ SCRIPTS = (
     "20_seed_reference.sql",
     "21_seed_roles.sql",
     "31_permissions_rename.sql",
+    "32_installer_role.sql",
 )
 
 
 def _sql_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "db" / "v2"
+
+
+def _run_script(conn, body: str) -> None:
+    """Run a multi-statement SQL script. Under asyncpg a prepared statement may hold ONE command, so the script goes
+    through the driver's simple-query protocol (`asyncpg.Connection.execute` without arguments); other drivers
+    take it as is."""
+    if conn.dialect.driver == "asyncpg":
+        from sqlalchemy.util import await_only
+
+        await_only(conn.connection.driver_connection.execute(body))
+    else:
+        conn.exec_driver_sql(body)
 
 
 def upgrade() -> None:
@@ -55,7 +68,7 @@ def upgrade() -> None:
             continue
         path = _sql_dir() / name
         body = path.read_text(encoding="utf-8")
-        conn.exec_driver_sql(body)
+        _run_script(conn, body)
         conn.execute(
             sa.text("INSERT INTO schema_migrations (version, name, checksum) VALUES (:v, :n, :c) ON CONFLICT (version) DO NOTHING"),
             {"v": version, "n": name.split("_", 1)[1].removesuffix(".sql"), "c": hashlib.sha256(body.encode("utf-8")).hexdigest()},

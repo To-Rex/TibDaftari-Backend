@@ -56,7 +56,7 @@ def test_roles_list_create_update_delete(ctx: dict) -> None:
     roles = c.get(f"{API}/units/{a['region']}/roles", headers=h(ctx, "admin-a")).json()
     by_key = {r["key"]: r for r in roles}
     # the six system roles are available everywhere (scopeUnitId null), with the number of employees under the unit
-    assert {"superadmin", "admin", "registrator", "laborant", "vrach", "rahbar"} <= set(by_key)
+    assert {"superadmin", "installer", "admin", "registrator", "laborant", "vrach", "rahbar"} <= set(by_key)
     assert all(by_key[k]["scopeUnitId"] is None and by_key[k]["isSystem"] for k in SYSTEM_ROLE_IDS)
     assert by_key["admin"]["id"] == SYSTEM_ROLE_IDS["admin"] and by_key["admin"]["employeeCount"] == 1 and by_key["superadmin"]["employeeCount"] == 0
     # create a role scoped to the region: usable in its subtree, invisible to the other tree

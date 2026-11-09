@@ -18,7 +18,15 @@ from app.api.deps import RequestMeta, StaffPrincipal, invalidate_principal_cache
 from app.core.audit import audit
 from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from app.core.pagination import page_of
-from app.core.permissions import PLATFORM_PERMISSIONS, SUPERADMIN_ROLE_KEY, invalid_permission_keys, normalize_key
+from app.core.permissions import (
+    INSTALLER_EXTRA_LEVELS,
+    INSTALLER_HOME_LEVELS,
+    INSTALLER_ROLE_KEY,
+    PLATFORM_PERMISSIONS,
+    PROTECTED_ROLE_KEYS,
+    invalid_permission_keys,
+    normalize_key,
+)
 from app.core.schemas import Page
 from app.core.scope import UnitScope, ancestor_ids, ids_of, narrow_to
 from app.core.security import hash_password
@@ -168,6 +176,38 @@ def _guard_super_admin_target(emp: Employee, staff: StaffPrincipal) -> None:
         raise ForbiddenError("Ruxsat yo‘q")
 
 
+async def _guard_protected_target(session: AsyncSession, emp: Employee, staff: StaffPrincipal) -> None:
+    """Superadmins and installers (accounts a superadmin handed out) are edited, re-scoped, reset or removed by
+    superadmins only — a unit administrator must not widen or hijack them."""
+    _guard_super_admin_target(emp, staff)
+    if staff.is_super_admin or not emp.role_id:
+        return
+    role = await session.get(Role, emp.role_id)
+    if role is not None and role.scope_unit_id is None and role.key in PROTECTED_ROLE_KEYS:
+        raise ForbiddenError("Ruxsat yo‘q")
+
+
+def _is_installer_role(role: Role) -> bool:
+    return role.scope_unit_id is None and role.key == INSTALLER_ROLE_KEY
+
+
+INSTALLER_SCOPE_ERROR = "O‘rnatuvchi davlat yoki viloyat tuguniga biriktiriladi; qo‘shimcha birliklar — shu davlatning viloyatlari"
+
+
+def _check_installer_scope(role: Role, unit_id: uuid.UUID | None, extra: Sequence[uuid.UUID], units: dict[uuid.UUID, OrgUnit]) -> None:
+    """An installer is homed at a country or a region and may get other regions of the SAME country as extra units —
+    never a facility, never another country (422 `installer_scope`)."""
+    if not _is_installer_role(role):
+        return
+    home = units.get(unit_id) if unit_id else None
+    if home is None or home.level not in INSTALLER_HOME_LEVELS:
+        raise ValidationError(INSTALLER_SCOPE_ERROR, code="installer_scope", details={"field": "unitId"})
+    for u in extra:
+        row = units.get(u)
+        if row is None or row.level not in INSTALLER_EXTRA_LEVELS or row.country_id != home.country_id:
+            raise ValidationError(INSTALLER_SCOPE_ERROR, code="installer_scope", details={"field": "unitIds"})
+
+
 def _guard_super_admin_flag(value: bool | None, staff: StaffPrincipal) -> bool | None:
     if value is not None and not staff.is_super_admin:
         raise ForbiddenError("Ruxsat yo‘q")
@@ -230,13 +270,13 @@ async def get_employee_dto(session: AsyncSession, employee_id: uuid.UUID, staff:
 
 async def _resolve_role(session: AsyncSession, role_id_raw: str, unit_id: uuid.UUID | None, staff: StaffPrincipal) -> Role:
     """A role the employee of `unit_id` may hold: system, or scoped to a unit on the path of `unit_id`
-    (404 "Rol topilmadi" otherwise); the superadmin role is assigned by superadmins only."""
+    (404 "Rol topilmadi" otherwise); the superadmin and installer roles are assigned by superadmins only."""
     role_id = _parse_ids([role_id_raw], "roleId")[0]
     path = await ancestor_ids(session, unit_id) if unit_id else []
     role = await repo.get_assignable_role(session, role_id, path)
     if not role:
         raise NotFoundError("Rol topilmadi")
-    if role.key == SUPERADMIN_ROLE_KEY and not staff.is_super_admin:
+    if role.scope_unit_id is None and role.key in PROTECTED_ROLE_KEYS and not staff.is_super_admin:
         raise ForbiddenError("Ruxsat yo‘q")
     return role
 
@@ -272,6 +312,7 @@ async def create_employee(session: AsyncSession, scope: UnitScope, body: Employe
             raise NotFoundError(UNIT_NOT_FOUND)
         units = await _alive_units(session, [unit_id, *extra])
     role = await _resolve_role(session, body.role_id, unit_id, staff)
+    _check_installer_scope(role, unit_id, extra, units)
     emp = Employee(
         unit_id=unit_id,
         full_name=body.full_name,
@@ -315,7 +356,7 @@ async def update_employee(session: AsyncSession, employee_id: uuid.UUID, body: E
     """Partial merge; `unitIds` / `categoryIds` / overrides replaced wholesale; moving `unitId` needs the new unit
     inside the caller's scope; password change or deactivation revokes sessions. A superadmin loses unit and extras."""
     emp = await get_employee_or_404(session, employee_id, staff)
-    _guard_super_admin_target(emp, staff)
+    await _guard_protected_target(session, emp, staff)
     extra_before = (await repo.extra_unit_ids(session, [emp.id])).get(emp.id, [])
     before = _employee_snapshot(emp, extra_before)
     old_unit_id = emp.unit_id
@@ -357,9 +398,16 @@ async def update_employee(session: AsyncSession, employee_id: uuid.UUID, body: E
         await _alive_units(session, [emp.unit_id])
     if extra:
         await _alive_units(session, extra)
+    role: Role | None = None
     if data.get("role_id") or unit_changed:
         # the role must be assignable on the (new) home unit's path
-        emp.role_id = (await _resolve_role(session, data.get("role_id") or str(emp.role_id), emp.unit_id, staff)).id
+        role = await _resolve_role(session, data.get("role_id") or str(emp.role_id), emp.unit_id, staff)
+        emp.role_id = role.id
+    if not emp.is_super_admin and (role is not None or extra is not None):
+        role = role or (await session.get(Role, emp.role_id) if emp.role_id else None)
+        if role is not None and _is_installer_role(role):
+            scope_ids = [emp.unit_id, *(extra if extra is not None else extra_before)]
+            _check_installer_scope(role, emp.unit_id, scope_ids[1:], await _alive_units(session, [u for u in scope_ids if u]))
 
     if body.category_ids is not None:
         emp.category_ids = _parse_ids(body.category_ids, "categoryId")
@@ -406,7 +454,7 @@ async def update_employee(session: AsyncSession, employee_id: uuid.UUID, body: E
 async def set_overrides(session: AsyncSession, employee_id: uuid.UUID, overrides: PermissionOverrides, staff: StaffPrincipal, meta: RequestMeta) -> EmployeeOut:
     """Replace `{allow, deny}` wholesale (keys must be catalogue permissions → else 422)."""
     emp = await get_employee_or_404(session, employee_id, staff)
-    _guard_super_admin_target(emp, staff)
+    await _guard_protected_target(session, emp, staff)
     before = {"overrides": emp.overrides}
     emp.overrides = _validate_overrides(overrides, staff)
     await session.flush()
@@ -474,7 +522,7 @@ def _role_snapshot(r: Role) -> dict[str, Any]:
 
 def _validate_role_key(key: str) -> str:
     key = slugify(key)
-    if key == SUPERADMIN_ROLE_KEY:
+    if key in PROTECTED_ROLE_KEYS:
         raise ValidationError("Bu rol kaliti band (tizim uchun ajratilgan)", code="reserved")
     return key
 

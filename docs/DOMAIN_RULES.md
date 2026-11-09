@@ -84,9 +84,11 @@ verbatim in the UI.
 | 429 | rate_limited | Juda ko‘p urinish. Keyinroq urinib ko‘ring. |
 
 ## 2. Auth
-* Permission catalogue (35 keys `<module>.<resource>.<action>`): reception.patient.read/write, reception.order.create/cancel/delete, reception.payment.create/refund/late_edit, lab.worklist.read, lab.result.write/submit, confirm.result.read/view/approve/resend, reports.finance.read, reports.finance.recent, reports.operations.read, reports.export, messaging.send/broadcast, **admin.unit.read/write/manage**, admin.employee.read/write, admin.role.write, admin.catalog.read/write, admin.schema.write, admin.template.read/write/publish, admin.settings.write, **platform.unit.manage**.
+* Permission catalogue (36 keys `<module>.<resource>.<action>`): reception.patient.read/write, reception.order.create/cancel/delete, reception.payment.create/refund/late_edit, lab.worklist.read, lab.result.write/submit, confirm.result.read/view/approve/resend, reports.finance.read, reports.finance.recent, reports.operations.read, reports.export, messaging.send/broadcast, **admin.unit.read/write/manage**, admin.employee.read/write, admin.role.write, admin.catalog.read/write, admin.schema.write, admin.template.read/write/publish, admin.settings.write, **admin.unit.reset**, **platform.unit.manage**.
   * `admin.unit.read` / `admin.unit.write` — read / edit the profile and settings of the unit (and the units
     under it); `admin.unit.manage` — create / edit units under it (tumanlar, muassasalar);
+    `admin.unit.reset` — wipe a unit and everything under it ("like newborn"; superadmin and the installer, inside
+    their scope — `GET/POST /units/{id}/reset`, 403 "Faqat superadmin yoki o‘rnatuvchi uchun" for everyone else);
     `platform.unit.manage` — the whole tree, every country (superadmin).
   * **WHERE a permission applies is not part of the key**: it is the employee's scope — the subtree(s) of their
     home unit and extra units. The same `admin.unit.write` edits one facility for a facility administrator and a
@@ -104,8 +106,17 @@ verbatim in the UI.
   units (scope subtree). `reports.finance.recent` stays on the role: if an admin takes `reports.finance.read`
   away, the 7-day cap applies again.
   Effective = role.permissions ∪ overrides.allow − overrides.deny (deny wins).
-* System roles (`scopeUnitId` null — available everywhere; fixed ids in `21_seed_roles.sql`): `superadmin` (all 35),
-  `admin` (all except platform.*), `registrator`, `laborant`, `vrach`, `rahbar`. A role says WHAT; the employee's
+* System roles (`scopeUnitId` null — available everywhere; fixed ids in `21_seed_roles.sql` + `32_installer_role.sql`):
+  `superadmin` (all 36), `installer` ("O‘rnatuvchi": all except platform.* — incl. `admin.unit.reset`), `admin` (all
+  except platform.* and reset), `registrator`, `laborant`, `vrach`, `rahbar`.
+* **O‘rnatuvchi (installer)** — a superadmin of one territory. Works like a superadmin inside the units a superadmin
+  gave the employee and nowhere else: home unit = a **region** (their viloyat) or the **country** node (the whole
+  country); extra units = other **regions of the same country**. Any other shape → 422 `installer_scope`. The role
+  (and the superadmin role) is granted, re-scoped, edited, password-reset or deactivated by **superadmins only**
+  (`PROTECTED_ROLE_KEYS`; 403 "Ruxsat yo‘q" for a unit administrator, also on `/overrides`); its key is reserved
+  (422 `reserved`). A staff reset keeps installer accounts like it keeps superadmins. Installers never get
+  `platform.*` (no other countries, no country roots, no Davlatlar tab); the session says `roleKey = "installer"`,
+  `isSuperAdmin = false`. A role says WHAT; the employee's
   unit says WHERE — the same `rahbar` attached to a region node is a viloyat rahbari, on a facility a muassasa
   rahbari. Unit-scoped roles (`scopeUnitId` = a unit; usable in its subtree) are created under a unit (§3).
 * **StaffSession** `{actor:'staff', employeeId, unitId, unitIds, unit {id, level, name, code, countryId, path}, facilityId, isSuperAdmin, roleKey, fullName, permissions[], accessToken, expiresAt}`; `unitId` = the home unit (any level; null for a superadmin, who picks any unit of the tree); `unitIds` = every scope root (home + extra units — the UI switches among these subtrees); `facilityId` = the home unit when it is a facility (where this employee's cheques are written); `isSuperAdmin = employee.is_super_admin` (**FIX**: not derived from a client-editable role key); `roleKey = role.key`; staff token TTL 12h (fixed - the JWT `exp` is immutable and the SPA keeps the login token; `staffMe` only records `lastSeenAt`).
