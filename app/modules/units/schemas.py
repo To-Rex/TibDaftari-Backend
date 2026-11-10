@@ -237,3 +237,139 @@ class ResetIn(CamelModel):
 class ResetOut(CamelModel):
     parts: list[str]
     counts: dict[str, int]
+
+
+# ----------------------------------------------------------------------------- quick start ("tezkor ishga tushirish")
+
+QuickStartRole = Literal["registrator", "vrach", "laborant", "rahbar", "admin"]
+QuickStartOwner = Literal["region", "district", "facility"]
+
+
+class QuickStartQuery(BaseModel):
+    """Preview filters: the geo region / district the new facility goes into (when the path unit sits above them)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    region_id: str | None = Field(default=None, alias="regionId")
+    district_id: str | None = Field(default=None, alias="districtId")
+
+
+class QuickStartCounts(CamelModel):
+    categories: int = 0
+    service_types: int = 0
+    schemas: int = 0
+    templates: int = 0
+    receipts: int = 0
+
+
+class QuickStartNodeOut(CamelModel):
+    id: str
+    name: str
+    level: UnitLevel
+    path: str
+
+
+class QuickStartSampleOut(CamelModel):
+    """A facility whose working set (catalogue it uses + the templates bound to it) can be copied onto the new one."""
+
+    id: str
+    name: str
+    code: str | None = None
+    kind: FacilityKind | None = None
+    path: str
+    counts: QuickStartCounts
+    #: the catalogue it uses is owned above the new facility too — only the templates would be copied
+    same_catalogue: bool = False
+
+
+class QuickStartRoleOut(CamelModel):
+    key: QuickStartRole
+    id: str
+    name: str
+    #: the login suffix proposed by the UI: `<facility code>-<suffix>`
+    suffix: str
+
+
+class QuickStartPreviewOut(CamelModel):
+    parent: QuickStartNodeOut
+    #: the existing region / district node the facility would go under (null = it would be created)
+    region_node: QuickStartNodeOut | None = None
+    district_node: QuickStartNodeOut | None = None
+    #: what the new facility would see from the units above it without copying anything
+    inherits: QuickStartCounts
+    inherits_from: list[str] = Field(default_factory=list)
+    samples: list[QuickStartSampleOut] = Field(default_factory=list)
+    roles: list[QuickStartRoleOut] = Field(default_factory=list)
+    default_password: str
+
+
+class QuickStartFacilityIn(CamelModel):
+    name: str = Field(min_length=1, max_length=200)
+    kind: FacilityKind
+    code: str = Field(min_length=1, max_length=12)
+    short_name: str | None = Field(default=None, max_length=80)
+    legal_name: str | None = Field(default=None, max_length=300)
+    phone: str | None = Field(default=None, max_length=40)
+    email: str | None = Field(default=None, max_length=200)
+    address: str | None = None
+    timezone: str | None = Field(default=None, max_length=64)
+
+
+class QuickStartStaffIn(CamelModel):
+    role: QuickStartRole
+    full_name: str = Field(min_length=1, max_length=200)
+    login: str = Field(min_length=3, max_length=80)
+
+
+class QuickStartSampleIn(CamelModel):
+    """Copy the working set of `facilityId` onto the new facility; catalogue rows it does not inherit already are
+    re-owned by the `owner` level of the new facility (templates always get bound to the new facility)."""
+
+    facility_id: str
+    owner: QuickStartOwner = "region"
+
+
+class QuickStartIn(CamelModel):
+    #: geo ids when the path unit is a country (region + district) or a region (district); nodes are reused or created
+    region_id: str | None = None
+    district_id: str | None = None
+    region_name: str | None = Field(default=None, max_length=200)
+    district_name: str | None = Field(default=None, max_length=200)
+    facility: QuickStartFacilityIn
+    staff: list[QuickStartStaffIn] = Field(default_factory=list, max_length=12)
+    password: str = Field(default="123456", min_length=4, max_length=200)
+    sample: QuickStartSampleIn | None = None
+    #: make sure an active cheque template is usable at the facility (the sample's, else the standard one)
+    activate_receipt: bool = True
+
+
+class QuickStartEmployeeOut(CamelModel):
+    id: str
+    full_name: str
+    login: str
+    role_key: str
+    role_name: str
+    #: the clear-text password that was just set — shown once, on the result sheet
+    password: str
+
+
+class QuickStartCatalogOut(CamelModel):
+    sample_name: str | None = None
+    owner_name: str | None = None
+    inherited: QuickStartCounts
+    copied: QuickStartCounts
+
+
+class QuickStartReceiptOut(CamelModel):
+    id: str
+    name: str
+    status: str
+
+
+class QuickStartOut(CamelModel):
+    facility: OrgUnitOut
+    region: OrgUnitOut | None = None
+    district: OrgUnitOut | None = None
+    employees: list[QuickStartEmployeeOut]
+    catalog: QuickStartCatalogOut
+    receipt: QuickStartReceiptOut | None = None

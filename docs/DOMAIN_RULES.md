@@ -49,7 +49,7 @@ verbatim in the UI.
 | 403 | otp_required | Hujjatni ochish uchun SMS kod kerak |
 | 403 | login_session_only | Parolni login bilan kirganda o‘zgartirish mumkin |
 | 403 | payment_locked | To‘lovga 1 kundan ko‘p vaqt o‘tgan — uni faqat administrator yoki rahbar o‘zgartira oladi |
-| 404 | not_found | Birlik topilmadi · Muassasa topilmadi · Xodim topilmadi · Rol topilmadi · Bemor topilmadi · Bu raqam bilan bemor topilmadi. Klinikaga murojaat qiling. · Kategoriya topilmadi · Xizmat topilmadi · Sxema topilmadi · Shablon topilmadi · Rasm topilmadi · Chek topilmadi · Tahlil topilmadi · To‘lov topilmadi · Hujjat topilmadi · Fayl topilmadi |
+| 404 | not_found | Birlik topilmadi · Muassasa topilmadi · Xodim topilmadi · Rol topilmadi · Bemor topilmadi · Bu raqam bilan bemor topilmadi. Klinikaga murojaat qiling. · Namuna muassasa topilmadi · Kategoriya topilmadi · Xizmat topilmadi · Sxema topilmadi · Shablon topilmadi · Rasm topilmadi · Chek topilmadi · Tahlil topilmadi · To‘lov topilmadi · Hujjat topilmadi · Fayl topilmadi |
 | 409 | conflict | Bu login band · Bu kod band  (a unit code or a service code already used) |
 | 409 | login_taken | Bu login band  (patient portal login) |
 | 409 | in_use | Bu rol xodimlarga biriktirilgan · Tizim rolini o‘chirib bo‘lmaydi · Kategoriyada xizmatlar bor · Bu xizmat bo‘yicha buyurtmalar bor — o‘chirish o‘rniga nofaol qiling |
@@ -67,6 +67,7 @@ verbatim in the UI.
 | 410 | revoked | public result link of a revoked document |
 | 422 | facility_required | Bu amal faqat muassasa darajasida bajariladi |
 | 422 | leaf / kind_required / code_required | Muassasa ostida birlik yaratib bo‘lmaydi · Muassasa turi tanlanmagan · Muassasa kodi kiritilmagan |
+| 422 | region_required / district_required | Viloyat tanlanmagan · Tuman / shahar tanlanmagan  (quick start from a country / region node) |
 | 422 | validation_error | Davlat topilmadi · Viloyat topilmadi · Tuman topilmadi · Viloyat tanlangan davlatga tegishli emas · Tuman tanlangan viloyatga tegishli emas  (unit geo nesting) |
 | 422 | unit_required | Xodim uchun birlik tanlanmagan |
 | 422 | sms_not_configured / sms_api_key_required / telegram_invalid_token | SMS provayder sozlanmagan · Xabarchi API kaliti kiritilmagan · Telegram bot tokeni noto‘g‘ri  (unit settings pages) |
@@ -265,6 +266,38 @@ verbatim in the UI.
   The unit row, its profile and settings, the reference data and the audit log stay. Operational rows are
   hard-deleted in one transaction (cheque numbers are unique per facility, so restarting the numbering needs the
   old cheques really gone).
+
+* **Quick start — «Tezkor ishga tushirish»** (`GET/POST /units/{id}/quick-start`, the path unit = a country, region or
+  district node the caller manages: `admin.unit.manage` + `admin.employee.write`, 403 otherwise; under a facility →
+  422 `leaf`). ONE request, one transaction, a facility ready to work:
+  1. the **chain** — from a country node `regionId` + `districtId` (geo ids), from a region node `districtId`; the
+     region / district nodes are reused when they exist, created otherwise (`regionName` / `districtName` override
+     the geo names); missing geo → 422 `region_required` / `district_required`;
+  2. the **facility** (`facility {name, kind, code, shortName?, legalName?, phone?, email?, address?, timezone?}` — the
+     usual create rules: 409 "Bu kod band", 422 `kind_required`);
+  3. the **sample** (`sample {facilityId, owner: region|district|facility}`, optional; needs `admin.catalog.write` +
+     `admin.schema.write` + `admin.template.write`, the sample visible to the caller else 403, 404 "Namuna muassasa
+     topilmadi"): catalogue rows the sample uses (owned on its path) that the new facility already inherits (owner on
+     ITS path) are kept as they are; the others — categories (tree kept), services (code, price, turnaround, schema,
+     default template remapped), published / draft schemas — are **copied and owned by the `owner` level** of the new
+     facility (its region node by default); every non-archived template usable at the sample (any scope) is copied,
+     its service / category ids remapped, and **bound to the new facility** (`template_units`), owned by `owner`;
+  4. the **cheque** (`activateReceipt`, default true): an active receipt template usable at the facility stays; else
+     the newest usable draft is activated; else the standard cheque is created active (owner `owner`, bound to the
+     facility);
+  5. the **staff** (`staff [{role, fullName, login}]`, roles registrator | vrach | laborant | rahbar | admin — system
+     roles, protected ones never; `password` for all, default 123456): logins are lower-cased and validated
+     (`^[a-z0-9][a-z0-9._-]{2,39}$`, 422 `invalid_login`); a login already used (by anyone, or earlier in the same
+     request) gets a number — `kassa`, `kassa2`, `kassa3` …; each account is a plain `create_employee` homed at the
+     facility.
+  Audited once as `quick_start` on the facility (plus the per-row audits). Response: `{facility, region?, district?
+  (the nodes CREATED), employees [{id, fullName, login, roleKey, roleName, password}], catalog {sampleName, ownerName,
+  inherited, copied}, receipt {id, name, status}?}` — the clear-text password is returned once, for the credentials
+  sheet. The preview (`GET …?regionId=&districtId=`) returns `{parent, regionNode?, districtNode? (existing nodes;
+  null = would be created), inherits {categories, serviceTypes, schemas, templates, receipts} + inheritsFrom
+  (owners above the facility-to-be; bound templates do not count), samples [{id, name, code, kind, path, counts,
+  sameCatalogue}] (visible active facilities with something to copy, biggest first), roles [{key, id, name,
+  suffix}], defaultPassword}`.
 
 ## 4. Patients
 * `normPhone(p)`: digits; 9 → prefix 998. Stored `998XXXXXXXXX`.

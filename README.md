@@ -134,6 +134,10 @@ o‘rniga javobda (`devCode`) va logda qaytadi — real Xabarchi kaliti shart em
 * Tenant endpointlar `/units/{unit_id}/…`: `unit_id` — xodim ishlayotgan birlik (muassasa yoki yuqoriroq tugun);
   ro‘yxatlar shu birlik va ostidagilarni qaytaradi, `unitId` so‘rov parametri ichki birlikka toraytiradi. Chek
   yozish, bemor ro‘yxatga olish, SMS yuborish — faqat muassasa darajasida (`422 facility_required`).
+* **Tezkor ishga tushirish** — `GET/POST /units/{unit_id}/quick-start`: bitta so‘rov bilan ishga tayyor muassasa
+  (kerak bo‘lsa viloyat / tuman tugunlari, muassasa, standart xodimlar — kassir, vrach, laborant, rahbar — bitta
+  parol bilan, namuna muassasaning katalogi va andozalari yangi muassasaga bog‘lab ko‘chiriladi, faol chek).
+  Qoidalar: `docs/DOMAIN_RULES.md` §3.
 * Endpoint xaritasi moduli bo‘yicha: [`ARCHITECTURE.md`](ARCHITECTURE.md#endpoint-map-prefix-apiv1).
 
 ## Deploy (Dokploy + Railpack)

@@ -1,4 +1,5 @@
-"""Organisation-tree endpoints: units (tree, card, create, update), their SMS account / texts, Telegram bot, superadmin reset."""
+"""Organisation-tree endpoints: units (tree, card, create, update), their SMS account / texts, Telegram bot, superadmin reset,
+quick start (a facility ready to work in one request)."""
 
 from __future__ import annotations
 
@@ -9,9 +10,13 @@ from fastapi import APIRouter, Query
 
 from app.api.deps import DbSession, Meta, Staff
 from app.core.exceptions import ValidationError
-from app.modules.units import reset, service
+from app.modules.units import quickstart, reset, service
 from app.modules.units.schemas import (
     OrgUnitOut,
+    QuickStartIn,
+    QuickStartOut,
+    QuickStartPreviewOut,
+    QuickStartQuery,
     ResetIn,
     ResetOut,
     ResetPartOut,
@@ -121,3 +126,18 @@ async def reset_unit(unit_id: uuid.UUID, body: ResetIn, staff: Staff, session: D
     parts, requires = reset.parts_for(unit)
     chosen = reset.close_parts(body.parts, parts, requires)
     return ResetOut(parts=chosen, counts=await reset.reset_unit(session, unit, chosen, staff, meta))
+
+
+# ------------------------------------------------------------------ quick start ("tezkor ishga tushirish")
+
+
+@router.get("/units/{unit_id}/quick-start", response_model=QuickStartPreviewOut, summary="Quick start preview: what a new facility under the unit would inherit, sample facilities, default roles")
+async def quick_start_preview(unit_id: uuid.UUID, q: Annotated[QuickStartQuery, Query()], staff: Staff, session: DbSession) -> QuickStartPreviewOut:
+    parent = await service.get_unit_or_404(session, unit_id)
+    return await quickstart.preview(session, parent, q.region_id, q.district_id, staff)
+
+
+@router.post("/units/{unit_id}/quick-start", response_model=QuickStartOut, status_code=201, summary="Quick start: create a facility ready to work — missing region / district nodes, the facility, default staff, the sample's catalogue and templates, an active cheque")
+async def quick_start(unit_id: uuid.UUID, body: QuickStartIn, staff: Staff, session: DbSession, meta: Meta) -> QuickStartOut:
+    parent = await service.get_unit_or_404(session, unit_id)
+    return await quickstart.quick_start(session, parent, body, staff, meta)
