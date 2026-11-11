@@ -44,7 +44,8 @@ class AssistantAccountIn(CamelModel):
     #: write-only plaintext; omitted = keep the saved key
     api_key: str | None = Field(default=None, max_length=500)
     effort: Literal["low", "medium", "high"] | None = None
-    max_tokens: int | None = Field(default=None, ge=256, le=32000)
+    #: 0 = the model's own maximum output (Claude: looked up through the Models API — 128K on the 5.x line)
+    max_tokens: int | None = Field(default=None, ge=0, le=200_000)
 
 
 class AssistantTestOut(CamelModel):

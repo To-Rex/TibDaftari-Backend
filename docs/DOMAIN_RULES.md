@@ -310,7 +310,9 @@ verbatim in the UI.
     messaging accounts — `mode` inherited | own | off; `provider` anthropic (official Anthropic SDK) | openai | deepseek |
     deploy | custom (OpenAI-compatible `baseUrl`, required for custom → 422 `ai_base_url_required`); `model` empty =
     the provider preset; the key is Fernet-encrypted and only its masked tail comes back; a first `own` save without a
-    key → 422 `ai_api_key_required`. `settings {effort, maxTokens}`.
+    key → 422 `ai_api_key_required`. `settings {effort, maxTokens}` — `maxTokens` 0 (the default) = the model's own
+    output maximum (Claude: the Models API cap, 128K on the 5.x line, replies streamed; OpenAI-compatible: the
+    parameter is omitted).
   * **Tools** (`tools.py`): thin wrappers over the ordinary service functions, each with `perms` (ANY grants; empty =
     everyone with assistant.use) and a `kind` — read tools run at once, write tools become a pending action. The model
     is offered ONLY the tools the employee holds (`tools_for`); a call to anything else is answered with an error
@@ -320,8 +322,8 @@ verbatim in the UI.
     otherwise). `POST /assistant/threads/{id}/messages {content, unitId?}` (`unitId` = the working unit, inside the
     territory; else the thread's / home unit; a superadmin must name one → 422 `unit_required`): rate-limited per
     employee (30 / 10 min → 429 `assistant_rate_limited`), 409 `assistant_not_configured` when no account with a key
-    is in effect. The loop (max 6 tool rounds, history window 40 turns / 28k chars starting at a user turn, tool
-    results cut at 10k chars) stores every turn (`assistant_messages`: user | assistant [+ tool_calls] | tool). The
+    is in effect. The loop (max 6 tool rounds, history window 400 turns / 800k chars — sized for a 1M context — starting at a
+    user turn, tool results cut at 60k chars, Claude requests prompt-cached) stores every turn (`assistant_messages`: user | assistant [+ tool_calls] | tool). The
     FIRST write tool of a turn becomes an `assistant_actions` row (`pending`, 30 min); further writes in the same turn
     get a "one at a time" error result; reads still run.
   * **Confirmation** (`POST /assistant/actions/{id}/confirm | cancel`, the owner only, 409 `action_resolved` /

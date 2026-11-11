@@ -104,7 +104,8 @@ def test_history_window_starts_at_a_user_turn() -> None:
     assert [t.role for t in turns] == ["user", "assistant", "tool", "assistant"]
     assert turns[1].tool_calls[0].name == "whoami" and turns[2].tool_call_id == "c1"
     # the char budget keeps the newest turns, still starting at a user turn
-    big = [mk("user", "x" * 20_000), mk("assistant", "a"), mk("user", "y" * 20_000), mk("assistant", "b")]
+    half = int(service.HISTORY_CHARS * 0.7)
+    big = [mk("user", "x" * half), mk("assistant", "a"), mk("user", "y" * half), mk("assistant", "b")]
     kept = service._turns(big)
     assert kept[0].role == "user" and kept[0].content.startswith("y")
 

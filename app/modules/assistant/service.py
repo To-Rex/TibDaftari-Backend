@@ -58,13 +58,15 @@ from app.modules.units import repository as units_repo
 from app.modules.units import service as units_svc
 
 MAX_TOOL_ROUNDS = 6
-HISTORY_TURNS = 40
-HISTORY_CHARS = 28_000
-RESULT_CHARS = 10_000
+#: the conversation window sent to the model — sized for a 1M-token context (≈ 4 chars per token)
+HISTORY_TURNS = 400
+HISTORY_CHARS = 800_000
+RESULT_CHARS = 60_000
 RATE_LIMIT = 30
 RATE_WINDOW_SECONDS = 600
 ACTION_TTL = timedelta(minutes=30)
-DEFAULT_MAX_TOKENS = 2048
+#: 0 = the model's own maximum output
+DEFAULT_MAX_TOKENS = 0
 MSG_NOT_CONFIGURED = "Yordamchi bu birlik uchun sozlanmagan — administrator AI provayderni ulashi kerak"
 
 
@@ -103,7 +105,7 @@ def _config(acc: AssistantAccount) -> AccountConfig:
         api_key=key,
         base_url=(acc.base_url or preset.get("base_url") or None),
         effort=st.get("effort"),
-        max_tokens=int(st.get("maxTokens") or DEFAULT_MAX_TOKENS),
+        max_tokens=max(0, int(st.get("maxTokens") or DEFAULT_MAX_TOKENS)),
     )
 
 

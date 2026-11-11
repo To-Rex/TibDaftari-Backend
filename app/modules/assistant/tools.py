@@ -44,7 +44,7 @@ Handler = Callable[["ToolContext", dict[str, Any]], Awaitable[Any]]
 
 #: keys that never reach the model, whatever DTO they sit in
 SECRET_KEYS = frozenset({"password", "passwordHash", "password_hash", "apiKey", "apiKeyEnc", "api_key", "api_key_enc", "apiKeyMasked", "botToken", "token", "accessToken", "secret", "sms", "telegram"})
-LIST_LIMIT = 60
+LIST_LIMIT = 200
 
 
 @dataclass

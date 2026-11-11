@@ -24,7 +24,11 @@ PRESETS: dict[str, dict[str, str | None]] = {
     "deploy": {"model": "deepseek-ai/deepseek-v4.1-flash-1017", "base_url": "https://api.deploy.com/api/v1"},
     "custom": {"model": None, "base_url": None},
 }
-REQUEST_TIMEOUT = 90.0
+#: a reply may be very long (up to the model's output cap) — streamed, so the wall clock is the only limit
+REQUEST_TIMEOUT = 600.0
+#: when the Models API cannot tell the output cap of a Claude model
+ANTHROPIC_FALLBACK_MAX_TOKENS = 128_000
+_MODEL_CAPS: dict[str, int] = {}
 
 
 @dataclass
@@ -59,7 +63,8 @@ class AccountConfig:
     api_key: str
     base_url: str | None = None
     effort: str | None = None
-    max_tokens: int = 2048
+    #: 0 = the model's own maximum (Claude: looked up once through the Models API; OpenAI-compatible: the parameter is omitted)
+    max_tokens: int = 0
 
 
 class ChatProvider(Protocol):
@@ -104,19 +109,37 @@ class AnthropicProvider:
                     out.append({"role": "user", "content": [block]})
         return out
 
+    async def _max_tokens(self) -> int:
+        """The reply ceiling: the configured one, else the model's output cap from the Models API (cached per model)."""
+        if self.cfg.max_tokens > 0:
+            return self.cfg.max_tokens
+        cap = _MODEL_CAPS.get(self.cfg.model)
+        if cap is None:
+            try:
+                info = await self.client.models.retrieve(self.cfg.model)
+                cap = int(getattr(info, "max_tokens", None) or ANTHROPIC_FALLBACK_MAX_TOKENS)
+            except anthropic.APIError:
+                cap = ANTHROPIC_FALLBACK_MAX_TOKENS
+            _MODEL_CAPS[self.cfg.model] = cap
+        return cap
+
     async def complete(self, *, system: str, turns: list[Turn], tools: list[dict[str, Any]]) -> Reply:
         kwargs: dict[str, Any] = {
             "model": self.cfg.model,
-            "max_tokens": self.cfg.max_tokens,
+            "max_tokens": await self._max_tokens(),
             "system": system,
             "messages": self._messages(turns),
+            # the stable prefix (system prompt, tools, earlier turns) is served from the prompt cache on the next turn
+            "cache_control": {"type": "ephemeral"},
         }
         if tools:
             kwargs["tools"] = [{"name": t["name"], "description": t["description"], "input_schema": t["parameters"]} for t in tools]
         if self.cfg.effort:
             kwargs["output_config"] = {"effort": self.cfg.effort}
         try:
-            r = await self.client.messages.create(**kwargs)
+            # streamed: a large max_tokens must not run into the HTTP timeout; the final message is what we keep
+            async with self.client.messages.stream(**kwargs) as stream:
+                r = await stream.get_final_message()
         except anthropic.AuthenticationError as e:
             raise _error("AI provayder kaliti qabul qilinmadi", "ai_auth") from e
         except anthropic.RateLimitError as e:
@@ -166,11 +189,13 @@ class OpenAICompatProvider:
 
     async def complete(self, *, system: str, turns: list[Turn], tools: list[dict[str, Any]]) -> Reply:
         kwargs: dict[str, Any] = {"model": self.cfg.model, "messages": self._messages(system, turns)}
-        # OpenAI's newest models take `max_completion_tokens`; the compatible gateways still speak `max_tokens`
-        if self.cfg.provider == "openai":
-            kwargs["max_completion_tokens"] = self.cfg.max_tokens
-        else:
-            kwargs["max_tokens"] = self.cfg.max_tokens
+        # 0 = no ceiling of ours — the model's own maximum applies; OpenAI's newest models take
+        # `max_completion_tokens`, the compatible gateways still speak `max_tokens`
+        if self.cfg.max_tokens > 0:
+            if self.cfg.provider == "openai":
+                kwargs["max_completion_tokens"] = self.cfg.max_tokens
+            else:
+                kwargs["max_tokens"] = self.cfg.max_tokens
         if tools:
             kwargs["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["parameters"]}} for t in tools]
             kwargs["tool_choice"] = "auto"
