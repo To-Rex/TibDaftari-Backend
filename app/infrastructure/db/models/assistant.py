@@ -30,7 +30,7 @@ class AssistantAccount(PKMixin, AuditMixin, SoftDeleteMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
-class AssistantThread(PKMixin, AuditMixin, SoftDeleteMixin, Base):
+class AssistantThread(PKMixin, TimestampMixin, SoftDeleteMixin, Base):
     __tablename__ = "assistant_threads"
 
     employee_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("employees.id"), nullable=False, index=True)

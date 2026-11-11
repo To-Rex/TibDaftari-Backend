@@ -257,7 +257,7 @@ async def list_threads(session: AsyncSession, staff: StaffPrincipal) -> list[Thr
 async def create_thread(session: AsyncSession, staff: StaffPrincipal, title: str | None, unit_id: str | None) -> ThreadOut:
     staff.require(ASSISTANT_PERMISSION)
     uid = _work_unit(staff, unit_id, None) if (unit_id or staff.home_unit_id) else None
-    t = AssistantThread(employee_id=staff.id, unit_id=uid, title=(title or "").strip()[:200], created_by=staff.id)
+    t = AssistantThread(employee_id=staff.id, unit_id=uid, title=(title or "").strip()[:200])
     session.add(t)
     await session.flush()
     await session.refresh(t)

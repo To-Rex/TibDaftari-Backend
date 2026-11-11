@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from app.core.crypto import encrypt
 from app.infrastructure.db.models import AssistantAccount, AssistantAction, AssistantMessage, OrgUnit
+from app.infrastructure.redis.client import get_redis
 from app.modules.assistant import service
 from app.modules.assistant.providers import Reply, ToolCall
 from fastapi.testclient import TestClient
@@ -104,6 +105,18 @@ def send(ctx: dict, who: str, thread_id: str, text: str, unit_id: str | None = N
     r = ctx["client"].post(f"{API}/assistant/threads/{thread_id}/messages", json=body, headers=h(ctx, who))
     assert r.status_code == 200, r.text
     return r.json()
+
+
+def reset_rate_limit(c: TestClient) -> None:
+    """Forget the assistant's per-employee request counters (fake redis lives for the whole process)."""
+
+    async def _run() -> None:
+        r = get_redis()
+        keys = await r.keys("assistant:rl:*")
+        if keys:
+            await r.delete(*keys)
+
+    c.portal.call(_run)
 
 
 # ----------------------------------------------------------------------------- status & tools
@@ -327,7 +340,8 @@ def test_the_territory_and_the_role_are_enforced_on_every_tool(ctx: dict, fake: 
 def test_rate_limit_and_tool_round_cap(ctx: dict, fake: FakeProvider, monkeypatch: pytest.MonkeyPatch) -> None:
     c: TestClient = ctx["client"]
     monkeypatch.setattr(service, "RATE_LIMIT", 2)
-    monkeypatch.setattr(service, "RATE_WINDOW_SECONDS", 2)
+    monkeypatch.setattr(service, "RATE_WINDOW_SECONDS", 600)  # long: the tool rounds below are slow over a tunnel
+    reset_rate_limit(c)
     tid = new_thread(ctx, "super", ctx["a"]["region"])
     for _ in range(8):
         fake.call("whoami", {})
@@ -343,6 +357,7 @@ def test_rate_limit_and_tool_round_cap(ctx: dict, fake: FakeProvider, monkeypatc
         headers=h(ctx, "super"),
     )
     assert r.status_code == 429
+    reset_rate_limit(c)
 
     async def count(s):
         return len(
