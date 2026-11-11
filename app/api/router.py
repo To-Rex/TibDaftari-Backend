@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from app.modules.assistant.router import router as assistant_router
 from app.modules.auth.router import router as auth_router
 from app.modules.catalog.router import router as catalog_router
 from app.modules.files.router import router as files_router
@@ -34,3 +35,4 @@ api_router.include_router(platform_router, tags=["platform"])
 api_router.include_router(portal_router, prefix="/portal", tags=["portal"])
 api_router.include_router(files_router, tags=["files"])
 api_router.include_router(telegram_router, tags=["telegram"])
+api_router.include_router(assistant_router, tags=["assistant"])

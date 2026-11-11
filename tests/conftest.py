@@ -30,6 +30,9 @@ REAL_DISTRICT_ID = "01a00cdd-5828-7d57-8b4f-56625ae76290"
 _FIXTURE_UNITS = "SELECT id FROM org_units WHERE created_at >= :started AND (name LIKE 'T-%' OR code LIKE 'T%')"
 
 _CLEANUP_SQL = [
+    # the assistant's rows of the fixture tree (threads cascade to messages / actions)
+    f"DELETE FROM assistant_threads WHERE unit_id IN ({_FIXTURE_UNITS}) OR employee_id IN (SELECT id FROM employees WHERE unit_id IN ({_FIXTURE_UNITS}) OR ((login LIKE 't-%' OR login LIKE 'T-%') AND created_at >= :started))",
+    f"DELETE FROM assistant_accounts WHERE unit_id IN ({_FIXTURE_UNITS})",
     # people and roles of the fixture tree (+ anything named like a fixture row during this run)
     f"UPDATE employees SET deleted_at = now() WHERE deleted_at IS NULL AND (unit_id IN ({_FIXTURE_UNITS}) OR ((login LIKE 't-%' OR login LIKE 'T-%' OR full_name LIKE 'T-%') AND created_at >= :started))",
     f"UPDATE roles SET deleted_at = now() WHERE deleted_at IS NULL AND (scope_unit_id IN ({_FIXTURE_UNITS}) OR (name LIKE 'T-%' AND created_at >= :started))",

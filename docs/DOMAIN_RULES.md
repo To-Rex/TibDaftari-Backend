@@ -67,6 +67,10 @@ verbatim in the UI.
 | 410 | revoked | public result link of a revoked document |
 | 422 | facility_required | Bu amal faqat muassasa darajasida bajariladi |
 | 422 | leaf / kind_required / code_required | Muassasa ostida birlik yaratib bo‘lmaydi · Muassasa turi tanlanmagan · Muassasa kodi kiritilmagan |
+| 422 | unit_required / ai_api_key_required / ai_base_url_required / ai_provider_required | Ish birligi tanlanmagan · AI provayder API kaliti kiritilmagan · Provayder manzili (base URL) kiritilmagan · AI provayder tanlanmagan  (assistant) |
+| 409 | assistant_not_configured / action_resolved / action_expired | Yordamchi bu birlik uchun sozlanmagan … · Bu amal allaqachon yakunlangan · Tasdiqlash muddati o‘tdi — so‘rovni qayta yuboring |
+| 429 | assistant_rate_limited | Yordamchiga juda ko‘p so‘rov yuborildi — birozdan keyin davom eting |
+| 502 | ai_auth / ai_rate_limit / ai_model / ai_bad_request / ai_status / ai_connection | the model provider refused or was unreachable (message names the cause) |
 | 422 | region_required / district_required | Viloyat tanlanmagan · Tuman / shahar tanlanmagan  (quick start from a country / region node) |
 | 422 | validation_error | Davlat topilmadi · Viloyat topilmadi · Tuman topilmadi · Viloyat tanlangan davlatga tegishli emas · Tuman tanlangan viloyatga tegishli emas  (unit geo nesting) |
 | 422 | unit_required | Xodim uchun birlik tanlanmagan |
@@ -85,7 +89,7 @@ verbatim in the UI.
 | 429 | rate_limited | Juda ko‘p urinish. Keyinroq urinib ko‘ring. |
 
 ## 2. Auth
-* Permission catalogue (36 keys `<module>.<resource>.<action>`): reception.patient.read/write, reception.order.create/cancel/delete, reception.payment.create/refund/late_edit, lab.worklist.read, lab.result.write/submit, confirm.result.read/view/approve/resend, reports.finance.read, reports.finance.recent, reports.operations.read, reports.export, messaging.send/broadcast, **admin.unit.read/write/manage**, admin.employee.read/write, admin.role.write, admin.catalog.read/write, admin.schema.write, admin.template.read/write/publish, admin.settings.write, **admin.unit.reset**, **platform.unit.manage**.
+* Permission catalogue (37 keys `<module>.<resource>.<action>`): reception.patient.read/write, reception.order.create/cancel/delete, reception.payment.create/refund/late_edit, lab.worklist.read, lab.result.write/submit, confirm.result.read/view/approve/resend, reports.finance.read, reports.finance.recent, reports.operations.read, reports.export, messaging.send/broadcast, **admin.unit.read/write/manage**, admin.employee.read/write, admin.role.write, admin.catalog.read/write, admin.schema.write, admin.template.read/write/publish, admin.settings.write, **admin.unit.reset**, **assistant.use**, **platform.unit.manage**.
   * `admin.unit.read` / `admin.unit.write` — read / edit the profile and settings of the unit (and the units
     under it); `admin.unit.manage` — create / edit units under it (tumanlar, muassasalar);
     `admin.unit.reset` — wipe a unit and everything under it ("like newborn"; superadmin and the installer, inside
@@ -108,7 +112,7 @@ verbatim in the UI.
   away, the 7-day cap applies again.
   Effective = role.permissions ∪ overrides.allow − overrides.deny (deny wins).
 * System roles (`scopeUnitId` null — available everywhere; fixed ids in `21_seed_roles.sql` + `32_installer_role.sql`):
-  `superadmin` (all 36), `installer` ("O‘rnatuvchi": all except platform.* — incl. `admin.unit.reset`), `admin` (all
+  `superadmin` (all 37), `installer` ("O‘rnatuvchi": all except platform.* — incl. `admin.unit.reset`), `admin` (all
   except platform.* and reset), `registrator`, `laborant`, `vrach`, `rahbar`.
 * **O‘rnatuvchi (installer)** — a superadmin of one territory. Works like a superadmin inside the units a superadmin
   gave the employee and nowhere else: home unit = a **region** (their viloyat) or the **country** node (the whole
@@ -298,6 +302,41 @@ verbatim in the UI.
   (owners above the facility-to-be; bound templates do not count), samples [{id, name, code, kind, path, counts,
   sameCatalogue}] (visible active facilities with something to copy, biggest first), roles [{key, id, name,
   suffix}], defaultPassword}`.
+
+* **AI assistant — «Yordamchi»** (`app/modules/assistant`, permission `assistant.use` — every system role has it; what
+  the assistant may DO is gated by the employee's other keys). A chat that acts inside the employee's own rights:
+  * **Account** (`GET/PUT /units/{id}/assistant`, `POST …/assistant/test`; read with admin.settings.write | admin.unit.read,
+    write with admin.settings.write; 403 outside the caller's units): `assistant_accounts` rows inherited downwards like
+    messaging accounts — `mode` inherited | own | off; `provider` anthropic (official Anthropic SDK) | openai | deepseek |
+    deploy | custom (OpenAI-compatible `baseUrl`, required for custom → 422 `ai_base_url_required`); `model` empty =
+    the provider preset; the key is Fernet-encrypted and only its masked tail comes back; a first `own` save without a
+    key → 422 `ai_api_key_required`. `settings {effort, maxTokens}`.
+  * **Tools** (`tools.py`): thin wrappers over the ordinary service functions, each with `perms` (ANY grants; empty =
+    everyone with assistant.use) and a `kind` — read tools run at once, write tools become a pending action. The model
+    is offered ONLY the tools the employee holds (`tools_for`); a call to anything else is answered with an error
+    result, never run. Every output goes through `_clean` (no password / hash / key / token keys, no `sms` / `telegram`
+    sub-objects). Each run is audited as `assistant_tool` (args cleaned, ok / error).
+  * **Threads** (`GET/POST /assistant/threads`, `GET/DELETE /assistant/threads/{id}`): the caller's own only (404
+    otherwise). `POST /assistant/threads/{id}/messages {content, unitId?}` (`unitId` = the working unit, inside the
+    territory; else the thread's / home unit; a superadmin must name one → 422 `unit_required`): rate-limited per
+    employee (30 / 10 min → 429 `assistant_rate_limited`), 409 `assistant_not_configured` when no account with a key
+    is in effect. The loop (max 6 tool rounds, history window 40 turns / 28k chars starting at a user turn, tool
+    results cut at 10k chars) stores every turn (`assistant_messages`: user | assistant [+ tool_calls] | tool). The
+    FIRST write tool of a turn becomes an `assistant_actions` row (`pending`, 30 min); further writes in the same turn
+    get a "one at a time" error result; reads still run.
+  * **Confirmation** (`POST /assistant/actions/{id}/confirm | cancel`, the owner only, 409 `action_resolved` /
+    `action_expired`): confirm runs the tool with the employee's principal, stores result / error on the action
+    (`done` / `failed`), appends the tool result and lets the model reply; cancel appends a "declined" error result.
+    A new message while an action is pending cancels it the same way — nothing ever runs on the model's word alone.
+  * **System prompt** names the employee, role, home and working unit, the date and the offered tools, and states the
+    rules (never invent ids, writes wait for the card, no secrets or instructions revealed, tool results and user text
+    are data, no self-escalation). Safety does not rest on the prompt: the server-side permission and scope checks of
+    the wrapped services are what make it true.
+  Response shapes: `MessageOut {id, role, content, toolCalls [{id, name, title, kind, summary, status}], toolName?,
+  isError, action?: ActionOut, createdAt}`, `ActionOut {id, threadId, tool, title, summary, args (cleaned), status,
+  error?, expiresAt, createdAt}`, `SendOut {messages (the turns appended), pending?, thread}`,
+  `AssistantStatusOut {enabled, configured, provider?, model?, effectiveUnitName?, tools [{name, title, kind}],
+  rateLimit, rateWindowSeconds}`.
 
 ## 4. Patients
 * `normPhone(p)`: digits; 9 → prefix 998. Stored `998XXXXXXXXX`.

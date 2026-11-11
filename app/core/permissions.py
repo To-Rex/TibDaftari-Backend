@@ -28,12 +28,15 @@ PERMISSIONS: tuple[str, ...] = (
     "admin.settings.write",
     # wipe a unit (and everything under it) back to "newborn" — superadmin and the installer, inside their scope
     "admin.unit.reset",
+    # the AI assistant («Yordamchi»): chat with the model and run its tools — each tool is gated by the keys above
+    "assistant.use",
     # the whole tree, every country (superadmin)
     "platform.unit.manage",
 )
 PERMISSION_SET = frozenset(PERMISSIONS)
 PLATFORM_PERMISSIONS = frozenset(p for p in PERMISSIONS if p.startswith("platform."))
 RESET_PERMISSION = "admin.unit.reset"
+ASSISTANT_PERMISSION = "assistant.use"
 #: what a unit administrator may hold: everything but the platform keys and the reset
 UNIT_ADMIN_PERMISSIONS = tuple(p for p in PERMISSIONS if not p.startswith("platform.") and p != RESET_PERMISSION)
 #: the installer: a unit administrator who may also reset units — a "superadmin of their own territory"
@@ -99,16 +102,17 @@ SYSTEM_ROLES: tuple[dict, ...] = (
             "reports.finance.read", "reports.export", "reports.finance.recent",
             # approved results: view, print and re-send the SMS (no approving, nothing unapproved)
             "confirm.result.view", "confirm.result.resend",
+            ASSISTANT_PERMISSION,
         ],
     },
-    {"key": "laborant", "name": "Laborant", "is_system": True, "permissions": ["lab.worklist.read", "lab.result.write", "lab.result.submit"]},
+    {"key": "laborant", "name": "Laborant", "is_system": True, "permissions": ["lab.worklist.read", "lab.result.write", "lab.result.submit", ASSISTANT_PERMISSION]},
     {
         "key": "vrach",
         "name": "Vrach",
         "is_system": True,
         "permissions": [
             "lab.worklist.read", "lab.result.write", "confirm.result.read", "confirm.result.approve", "confirm.result.resend",
-            "reception.patient.read",
+            "reception.patient.read", ASSISTANT_PERMISSION,
         ],
     },
     {
@@ -118,7 +122,7 @@ SYSTEM_ROLES: tuple[dict, ...] = (
         "permissions": [
             "reports.finance.read", "reports.operations.read", "reports.export", "reception.patient.read", "admin.employee.read",
             # corrects old payments on a cheque (remove a service with money back, delete the cheque)
-            "reception.payment.late_edit",
+            "reception.payment.late_edit", ASSISTANT_PERMISSION,
         ],
     },
 )

@@ -33,7 +33,7 @@ tests/                    pytest (unit + API tests against a throwaway database 
 docs/                     DOMAIN_RULES.md (behaviour), RENDERER_SPEC.md (PDF), V2_PORT.md (company/branch → org tree contract)
 ```
 
-Modules: `auth`, `units` (organisation tree, inherited SMS / texts / Telegram settings, superadmin reset, quick start), `staff`,
+Modules: `auth`, `assistant` (the AI assistant: tools over the services, confirmed writes, per-unit model accounts), `units` (organisation tree, inherited SMS / texts / Telegram settings, superadmin reset, quick start), `staff`,
 `patients` (+ geo reference), `catalog`, `templates` (+ renderer), `orders`, `messaging`, `reports`, `platform`
 (territory activity view), `portal`, `telegram`, `files`, `health`.
 
@@ -130,6 +130,9 @@ units:     GET /units/tree  POST /units  GET/PUT /units/{id}  GET/PUT /units/{id
            GET/PUT /units/{id}/sms-templates  PUT /units/{id}/telegram  GET /units/{id}/telegram/status
            GET/POST /units/{id}/reset  (superadmin)
            GET/POST /units/{id}/quick-start  (a facility ready to work in one request: nodes, staff, the sample's catalogue + templates, cheque — quickstart.py)
+           GET/PUT /units/{id}/assistant · POST /units/{id}/assistant/test  (the unit's AI account, inherited downwards)
+assistant  GET /assistant/status · GET/POST /assistant/threads · GET/DELETE /assistant/threads/{id} · POST /assistant/threads/{id}/messages
+           POST /assistant/actions/{id}/confirm | cancel  (writes the model proposed run only after the employee's yes)
 staff:     GET/POST /units/{uid}/employees  GET/PUT /employees/{id}  PUT /employees/{id}/overrides
            GET/POST /units/{uid}/roles  PUT/DELETE /roles/{id}
 patients:  GET/POST /units/{uid}/patients  GET /units/{uid}/patients/search  POST /units/{uid}/patients/duplicates
