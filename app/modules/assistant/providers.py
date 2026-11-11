@@ -189,10 +189,10 @@ class OpenAICompatProvider:
 
     async def complete(self, *, system: str, turns: list[Turn], tools: list[dict[str, Any]]) -> Reply:
         kwargs: dict[str, Any] = {"model": self.cfg.model, "messages": self._messages(system, turns)}
-        # 0 = no ceiling of ours — the model's own maximum applies; OpenAI's newest models take
-        # `max_completion_tokens`, the compatible gateways still speak `max_tokens`
+        # 0 = no ceiling of ours — the model's own maximum applies. OpenAI and Deploy document only
+        # `max_completion_tokens`; DeepSeek and the other compatible gateways speak `max_tokens`
         if self.cfg.max_tokens > 0:
-            if self.cfg.provider == "openai":
+            if self.cfg.provider in ("openai", "deploy"):
                 kwargs["max_completion_tokens"] = self.cfg.max_tokens
             else:
                 kwargs["max_tokens"] = self.cfg.max_tokens
