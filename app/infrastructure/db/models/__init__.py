@@ -1,6 +1,12 @@
 """All ORM models — import this module so Alembic and the app see every table."""
 
-from app.infrastructure.db.models.assistant import AssistantAccount, AssistantAction, AssistantMessage, AssistantThread
+from app.infrastructure.db.models.assistant import (
+    AssistantAccount,
+    AssistantAction,
+    AssistantFile,
+    AssistantMessage,
+    AssistantThread,
+)
 from app.infrastructure.db.models.catalog import (
     AttributeSchema,
     Category,
@@ -45,6 +51,7 @@ __all__ = [
     "UNIT_LEVELS",
     "AssistantAccount",
     "AssistantAction",
+    "AssistantFile",
     "AssistantMessage",
     "AssistantThread",
     "AttributeSchema",

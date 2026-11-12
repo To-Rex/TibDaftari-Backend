@@ -10,17 +10,21 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import RequestMeta, StaffPrincipal
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import NotFoundError, StateError, ValidationError
+from app.core.ids import uuid7
 from app.core.permissions import ASSISTANT_PERMISSION
 from app.core.scope import UnitScope
+from app.core.timeutil import utcnow
 from app.infrastructure.db.base import alive
-from app.infrastructure.db.models import Role
+from app.infrastructure.db.models import AssistantFile, Role
+from app.modules.assistant import export as xp
 from app.modules.catalog import service as catalog_svc
 from app.modules.catalog.schemas import CategoryUpdateIn, ServiceTypeCreateIn, ServiceTypeQuery, ServiceTypeUpdateIn
 from app.modules.messaging import service as messaging_svc
@@ -30,7 +34,7 @@ from app.modules.orders import service as orders_svc
 from app.modules.orders.schemas import OrderListQuery
 from app.modules.patients import service as patients_svc
 from app.modules.reports import service as reports_svc
-from app.modules.reports.schemas import BreakdownQuery, RangeQuery
+from app.modules.reports.schemas import BreakdownQuery, RangeQuery, ResultListQuery
 from app.modules.staff import service as staff_svc
 from app.modules.staff.schemas import EmployeeCreateIn, EmployeeQuery, EmployeeUpdateIn
 from app.modules.templates import service as tpl_svc
@@ -55,6 +59,9 @@ class ToolContext:
     #: the unit the employee works in (the header scope); tools without a `unitId` act here
     unit_id: uuid.UUID
     scope: UnitScope
+    #: the thread the tools run in and the call being executed — files the tools build are attached to them
+    thread_id: uuid.UUID | None = None
+    call_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -392,6 +399,200 @@ async def send_sms(ctx: ToolContext, args: dict[str, Any]) -> Any:
     body = SmsSendIn(to=[str(x) for x in args["to"]], text=str(args["text"]), kind="broadcast", unit_id=None if scope.is_facility else _str(args.get("unitId")))
     sent, rejected = await messaging_svc.send(ctx.session, scope, ctx.staff, body, ctx.meta)
     return {"queued": len(sent), "rejected": rejected}
+
+
+
+# ============================================================================= files on request (export)
+
+#: how long a built file stays downloadable
+FILE_TTL = timedelta(days=7)
+PAGE = 200
+REPORT_PERMS = ("reports.finance.read", "reports.finance.recent", "reports.operations.read")
+ORDER_PERMS = ("reception.order.create", "reports.operations.read", "reports.finance.read", "confirm.result.read")
+CATALOG_PERMS = ("admin.catalog.read", "reception.order.create", "lab.worklist.read", "reports.operations.read")
+PATIENT_KEYS = ("id", "fullName", "phone", "birthDate", "gender", "address", "registeredUnitName", "discountPercent", "tags", "stats", "createdAt")
+
+
+def _range(args: dict[str, Any]) -> tuple[str, str]:
+    if not args.get("dateFrom") or not args.get("dateTo"):
+        raise ValidationError("Bu to‘plam uchun dateFrom va dateTo (YYYY-MM-DD) kerak", code="export_range", details={"field": "params"})
+    return str(args["dateFrom"]), str(args["dateTo"])
+
+
+async def _paged(fetch: Callable[[int], Awaitable[Any]], limit: int) -> list[Any]:
+    out: list[Any] = []
+    page = 1
+    while len(out) < limit:
+        p = await fetch(page)
+        out.extend(p.items)
+        if page >= p.total_pages or not p.items:
+            break
+        page += 1
+    return out[:limit]
+
+
+async def _ds_units(ctx: ToolContext, a: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    rows = await units_svc.list_tree(ctx.session, ctx.staff, UnitTreeQuery(root_id=_str(a.get("parentId")), include_inactive=bool(a.get("includeInactive", False))))
+    q, level = str(a.get("search") or "").strip().lower(), a.get("level")
+    rows = [u for u in rows if (not level or u.level == level) and (not q or q in f"{u.name} {u.code or ''} {u.path}".lower())]
+    return [_dump(u, (*UNIT_KEYS, "shortName", "email", "createdAt")) for u in rows[:limit]]
+
+
+async def _ds_employees(ctx: ToolContext, a: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    scope = await _scope(ctx, a.get("unitId"))
+    rows = await _paged(lambda page: staff_svc.list_employees(ctx.session, scope, EmployeeQuery(search=a.get("search"), role_id=_str(a.get("roleId")), status=a.get("status"), page=page, page_size=PAGE), ctx.staff), limit)
+    return [_dump(e, (*EMP_KEYS, "createdAt")) for e in rows]
+
+
+async def _ds_orders(ctx: ToolContext, a: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    scope = await _scope(ctx, a.get("unitId"))
+    rows = await _paged(lambda page: orders_svc.list_orders(ctx.session, scope, OrderListQuery(search=a.get("search"), status=a.get("status"), payment=a.get("payment"), date_from=a.get("dateFrom"), date_to=a.get("dateTo"), patient_id=_str(a.get("patientId")), page=page, page_size=PAGE)), limit)
+    return [_dump(o) for o in rows]
+
+
+async def _ds_patients(ctx: ToolContext, a: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    scope = await _scope(ctx, a.get("unitId"))
+    rows = await patients_svc.search_patients(ctx.session, scope, ctx.staff, str(a.get("query") or a.get("search") or ""), limit)
+    return [_dump(p, PATIENT_KEYS) for p in rows]
+
+
+async def _ds_service_types(ctx: ToolContext, a: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    scope = await _scope(ctx, a.get("unitId"))
+    rows = await catalog_svc.list_service_types(ctx.session, scope, ServiceTypeQuery(search=a.get("search"), category_id=_str(a.get("categoryId")), active_only=bool(a.get("activeOnly", False)), unit_id=str(scope.id)))
+    return [_dump(r) for r in rows[:limit]]
+
+
+async def _ds_categories(ctx: ToolContext, a: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    rows = await catalog_svc.list_categories(ctx.session, await _scope(ctx, a.get("unitId")))
+    return [_dump(c, ("id", "name", "code", "parentId", "isActive", "workflow", "ownerUnitId")) for c in rows[:limit]]
+
+
+async def _ds_templates(ctx: ToolContext, a: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    scope = await _scope(ctx, a.get("unitId"))
+    rows = await tpl_svc.list_templates(ctx.session, scope, TemplateQuery(status=a.get("status"), search=a.get("search"), unit_id=str(scope.id)))
+    return [_dump(t, ("id", "name", "status", "scope", "language", "serviceTypeIds", "categoryIds", "unitIds", "ownerUnitId", "usage", "updatedAt")) for t in rows[:limit]]
+
+
+async def _ds_roles(ctx: ToolContext, a: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    rows = await staff_svc.list_roles(ctx.session, await _scope(ctx, a.get("unitId")))
+    return [_dump(r, ("id", "key", "name", "scopeUnitId", "isSystem", "permissions")) for r in rows[:limit]]
+
+
+async def _ds_breakdown(ctx: ToolContext, a: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    d_from, d_to = _range(a)
+    by = a.get("by") or "service"
+    rows = await reports_svc.breakdown(ctx.session, await _scope(ctx, a.get("unitId")), BreakdownQuery(date_from=d_from, date_to=d_to, by=by), ctx.staff)
+    return [_dump(r) for r in rows[:limit]]
+
+
+async def _ds_daily(ctx: ToolContext, a: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    d_from, d_to = _range(a)
+    d = _dump(await reports_svc.dashboard(ctx.session, await _scope(ctx, a.get("unitId")), RangeQuery(date_from=d_from, date_to=d_to), ctx.staff))
+    return list(d.get("trend") or [])[:limit] if isinstance(d, dict) else []
+
+
+async def _ds_results(ctx: ToolContext, a: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    d_from, d_to = _range(a)
+    scope = await _scope(ctx, a.get("unitId"))
+    rows = await _paged(lambda page: reports_svc.results_list(ctx.session, scope, ResultListQuery(date_from=d_from, date_to=d_to, status=a.get("status") or "not_received", page=page, page_size=PAGE), ctx.staff), limit)
+    return [_dump(r) for r in rows]
+
+
+@dataclass(frozen=True)
+class Dataset:
+    title: str
+    perms: tuple[str, ...]
+    params: str
+    load: Callable[[ToolContext, dict[str, Any], int], Awaitable[list[dict[str, Any]]]]
+
+
+DATASETS: dict[str, Dataset] = {
+    "units": Dataset("Birliklar", (), "parentId, search, level (country|region|district|facility), includeInactive", _ds_units),
+    "employees": Dataset("Xodimlar", ("admin.employee.read",), "unitId, search, roleId, status (active|inactive)", _ds_employees),
+    "orders": Dataset("Cheklar", ORDER_PERMS, "unitId, search, status, payment, dateFrom, dateTo (YYYY-MM-DD), patientId", _ds_orders),
+    "patients": Dataset("Bemorlar", ("reception.patient.read",), "unitId, query (name / phone / passport; empty = recent visitors)", _ds_patients),
+    "service_types": Dataset("Xizmatlar", CATALOG_PERMS, "unitId, search, categoryId, activeOnly", _ds_service_types),
+    "categories": Dataset("Kategoriyalar", CATALOG_PERMS, "unitId", _ds_categories),
+    "templates": Dataset("Andozalar", ("admin.template.read",), "unitId, status (draft|active|archived), search", _ds_templates),
+    "roles": Dataset("Rollar", ("admin.employee.read", "admin.role.write"), "unitId", _ds_roles),
+    "breakdown": Dataset("Taqsimot", REPORT_PERMS, "unitId, dateFrom*, dateTo*, by (category|service|unit|employee)", _ds_breakdown),
+    "daily": Dataset("Kunlik ko‘rsatkichlar", REPORT_PERMS, "unitId, dateFrom*, dateTo*", _ds_daily),
+    "results": Dataset("Natijalar", REPORT_PERMS, "unitId, dateFrom*, dateTo*, status (not_received|received|waiting)", _ds_results),
+}
+
+FILTER_SCHEMA = {"type": "array", "description": "AND-ed row filters applied after loading: {column, op, value}; value is a list for in / notIn / between", "items": {"type": "object", "properties": {"column": {"type": "string"}, "op": {"type": "string", "enum": list(xp.OPS)}, "value": {"description": "string | number | boolean | list"}}, "required": ["column", "op"]}}
+SORT_SCHEMA = {"type": "array", "description": "sort order, first entry wins: {column, dir}", "items": {"type": "object", "properties": {"column": {"type": "string"}, "dir": {"type": "string", "enum": ["asc", "desc"]}}, "required": ["column"]}}
+COLUMNS_SCHEMA = {"type": "array", "description": "columns of the file in order: {key, title} (title in the user's language) or just the key; omitted = every column except ids", "items": {"type": "object", "properties": {"key": {"type": "string"}, "title": {"type": "string"}}, "required": ["key"]}}
+FORMAT_SCHEMA = {"type": "string", "enum": ["xlsx", "csv", "json"], "description": "default xlsx (Excel)"}
+
+
+async def _store_file(ctx: ToolContext, *, name: str, content_type: str, data: bytes, rows: int, meta: dict[str, Any]) -> dict[str, Any]:
+    if ctx.thread_id is None:
+        raise StateError("Fayl faqat suhbat ichida yaratiladi", code="export_no_thread")
+    f = AssistantFile(id=uuid7(), thread_id=ctx.thread_id, employee_id=ctx.staff.id, tool_call_id=ctx.call_id, name=name, content_type=content_type, size=len(data), rows=rows, data=data, meta=meta, expires_at=utcnow() + FILE_TTL)
+    ctx.session.add(f)
+    await ctx.session.flush()
+    return {"id": str(f.id), "name": f.name, "contentType": f.content_type, "size": f.size, "rows": rows, "expiresAt": f.expires_at.isoformat()}
+
+
+def _export_result(file: dict[str, Any], columns: list[xp.Column], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "file": file,
+        "rowCount": len(rows),
+        "columns": [{"key": c.key, "title": c.title} for c in columns],
+        "preview": [{c.key: r.get(c.key) for c in columns} for r in rows[:5]],
+        "note": "Fayl chatda yuklab olish tugmasi bilan ko‘rsatiladi — foydalanuvchiga qisqa ayt, jadvalni qayta yozma.",
+    }
+
+
+@tool("export_data", "Faylga eksport (ma’lumotlar to‘plami)",
+      "Build a downloadable Excel / CSV / JSON file from one of the system's datasets, with any row filters, sort order, column choice and limit the user asked for (sorting and filtering happen on the server over the FULL dataset, not only what you have seen). Datasets and their source params: "
+      + "; ".join(f"{k} ({d.title}): {d.params}" for k, d in DATASETS.items())
+      + ". Column keys are the same camelCase keys the list_* tools return (nested as a.b). Unknown column → the error lists the available ones. The file appears in the chat with a download button.",
+      params={"dataset": {"type": "string", "enum": list(DATASETS), "req": True}, "params": {"type": "object", "description": "the dataset's source params (see the list above)", "additionalProperties": True},
+              "format": FORMAT_SCHEMA, "title": {"type": "string", "description": "sheet / file caption in the user's language"}, "fileName": {"type": "string"},
+              "columns": COLUMNS_SCHEMA, "filters": FILTER_SCHEMA, "sort": SORT_SCHEMA, "limit": {"type": "integer", "minimum": 1, "maximum": xp.MAX_ROWS}},
+      perms=("reports.export",), summary_keys=("dataset", "format"))
+async def export_data(ctx: ToolContext, args: dict[str, Any]) -> Any:
+    name = str(args.get("dataset") or "")
+    ds = DATASETS.get(name)
+    if ds is None:
+        raise ValidationError(f"Noma’lum to‘plam: {name}", code="export_dataset", details={"datasets": list(DATASETS)})
+    if ds.perms and not ctx.staff.has(*ds.perms):
+        raise ValidationError(f"«{ds.title}» to‘plamini eksport qilish huquqi yo‘q", code="forbidden")
+    limit = max(1, min(int(args.get("limit") or xp.MAX_ROWS), xp.MAX_ROWS))
+    source = dict(args.get("params") or {})
+    raw = await ds.load(ctx, source, xp.MAX_ROWS)
+    columns, rows = xp.prepare(raw, filters=args.get("filters"), sort=args.get("sort"), columns=args.get("columns"), limit=limit)
+    fmt = str(args.get("format") or "xlsx")
+    title = str(args.get("title") or ds.title)
+    data, content_type = xp.build_file(fmt, title, columns, rows)
+    file = await _store_file(ctx, name=xp.file_name(args.get("fileName"), title, fmt, utcnow().date().isoformat()), content_type=content_type, data=data, rows=len(rows),
+                             meta={"dataset": name, "params": _clean(source), "filters": args.get("filters"), "sort": args.get("sort"), "columns": [c.key for c in columns], "format": fmt})
+    return _export_result(file, columns, rows)
+
+
+@tool("export_table", "Faylga eksport (tayyor jadval)",
+      "Build a downloadable Excel / CSV / JSON file from rows YOU composed (a table you already computed or summarised, an answer the user wants as a file). Rows are objects keyed by column key, or arrays in column order. Optional filters / sort apply as in export_data. Prefer export_data when the rows come straight from a dataset.",
+      params={"title": {"type": "string", "req": True}, "columns": {**COLUMNS_SCHEMA, "req": True}, "rows": {"type": "array", "items": {}, "req": True}, "format": FORMAT_SCHEMA, "fileName": {"type": "string"}, "filters": FILTER_SCHEMA, "sort": SORT_SCHEMA},
+      perms=("reports.export",), summary_keys=("title", "format"))
+async def export_table(ctx: ToolContext, args: dict[str, Any]) -> Any:
+    cols_in = list(args.get("columns") or [])
+    keys = [c["key"] if isinstance(c, dict) else str(c) for c in cols_in]
+    if not keys:
+        raise ValidationError("Ustunlar kerak", code="export_column")
+    raw: list[dict[str, Any]] = []
+    for r in list(args.get("rows") or [])[: xp.MAX_ROWS]:
+        if isinstance(r, dict):
+            raw.append(_clean(r))
+        elif isinstance(r, list):
+            raw.append({k: (r[i] if i < len(r) else None) for i, k in enumerate(keys)})
+    columns, rows = xp.prepare(raw, filters=args.get("filters"), sort=args.get("sort"), columns=cols_in, limit=xp.MAX_ROWS)
+    fmt = str(args.get("format") or "xlsx")
+    title = str(args.get("title") or "Jadval")
+    data, content_type = xp.build_file(fmt, title, columns, rows)
+    file = await _store_file(ctx, name=xp.file_name(args.get("fileName"), title, fmt, utcnow().date().isoformat()), content_type=content_type, data=data, rows=len(rows), meta={"table": title, "columns": keys, "format": fmt})
+    return _export_result(file, columns, rows)
 
 
 async def run_tool(t: Tool, ctx: ToolContext, args: dict[str, Any]) -> Any:

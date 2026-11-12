@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import uuid
+from urllib.parse import quote
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Response
 
 from app.api.deps import DbSession, Meta, Staff
 from app.core.exceptions import ForbiddenError
@@ -64,6 +65,13 @@ async def confirm_action(action_id: uuid.UUID, staff: Staff, session: DbSession,
 @router.post("/assistant/actions/{action_id}/cancel", response_model=SendOut, summary="Decline a write the model proposed")
 async def cancel_action(action_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta) -> SendOut:
     return await service.cancel_action(session, action_id, staff, meta)
+
+
+@router.get("/assistant/files/{file_id}", summary="Download a file the assistant built for the caller (Excel / CSV / JSON)", response_class=Response)
+async def download_file(file_id: uuid.UUID, staff: Staff, session: DbSession) -> Response:
+    f = await service.get_file(session, file_id, staff)
+    ascii_name = f.name.encode("ascii", "ignore").decode() or "export"
+    return Response(content=f.data, media_type=f.content_type, headers={"Content-Disposition": f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(f.name)}", "Cache-Control": "private, no-store"})
 
 
 # ------------------------------------------------------------------ the platform account (superadmins; everyone without a closer one uses it)

@@ -73,7 +73,7 @@ def ctx() -> Iterator[dict]:
             "b": {k: str(getattr(b, k).id) for k in ("region", "district", "facility")},
             "tag": a.tag,
             "vrach_id": str(vrach.id),
-            "logins": {"super": sup.login, "admin-a": admin_a.login, "admin-b": admin_b.login, "reg": reg.login},
+            "logins": {"super": sup.login, "admin-a": admin_a.login, "admin-b": admin_b.login, "reg": reg.login, "vrach": vrach.login},
         }
 
     data = seed(rows)
@@ -244,6 +244,73 @@ def test_the_platform_account_serves_everyone_without_a_closer_one(ctx: dict) ->
         # back to no platform account
         assert c.put(f"{API}/assistant/platform-account", json={"mode": "inherited"}, headers=h(ctx, "super")).json()["mode"] == "inherited"
     assert not c.get(f"{API}/assistant/status", params={"unitId": b_fac}, headers=h(ctx, "admin-b")).json()["configured"]
+
+
+def test_export_tools_build_a_file_the_owner_downloads(ctx: dict, fake: FakeProvider) -> None:
+    c: TestClient = ctx["client"]
+    tid = new_thread(ctx, "admin-a", ctx["a"]["region"])
+    fake.call(
+        "export_data",
+        {
+            "dataset": "units",
+            "format": "csv",
+            "title": "Muassasalar",
+            "params": {"search": ctx["tag"]},
+            "filters": [{"column": "level", "op": "eq", "value": "facility"}],
+            "sort": [{"column": "name", "dir": "desc"}],
+            "columns": [{"key": "name", "title": "Nomi"}, "level", "code"],
+        },
+    )
+    fake.say("Fayl tayyor.")
+    out = send(ctx, "admin-a", tid, "Muassasalarni CSV qilib ber")
+    msg = out["messages"][1]
+    call = msg["toolCalls"][0]
+    assert call["name"] == "export_data" and call["status"] == "ok" and call["file"]["name"].endswith(".csv")
+    assert msg["files"][0]["id"] == call["file"]["id"] and msg["files"][0]["rows"] >= 1
+    # the model got the file's card and a preview — never the bytes
+    result = fake.calls[1]["turns"][-1].content
+    assert '"file"' in result and "preview" in result and "PK" not in result
+    fid = call["file"]["id"]
+    r = c.get(f"{API}/assistant/files/{fid}", headers=h(ctx, "admin-a"))
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/csv")
+    assert "attachment" in r.headers["content-disposition"]
+    text = r.content.decode("utf-8")
+    assert text.startswith("\ufeff") and text.lstrip("\ufeff").startswith("Nomi;Level;Code") and ctx["tag"].upper() in text.upper()
+    # only its owner; the thread view carries it too
+    assert c.get(f"{API}/assistant/files/{fid}", headers=h(ctx, "admin-b")).status_code == 404
+    detail = c.get(f"{API}/assistant/threads/{tid}", headers=h(ctx, "admin-a")).json()
+    assert any(m["files"] and m["files"][0]["id"] == fid for m in detail["messages"])
+    # a table the model composed → Excel, sorted on the server
+    fake.call(
+        "export_table",
+        {
+            "title": "Xulosa",
+            "columns": [{"key": "nomi", "title": "Nomi"}, {"key": "soni", "title": "Soni"}],
+            "rows": [{"nomi": "A", "soni": 2}, ["B", 5]],
+            "sort": [{"column": "soni", "dir": "desc"}],
+        },
+    )
+    fake.say("Excel tayyor.")
+    out = send(ctx, "admin-a", tid, "Shuni Excel qil")
+    f2 = out["messages"][1]["toolCalls"][0]["file"]
+    assert f2["name"].endswith(".xlsx") and f2["rows"] == 2
+    r = c.get(f"{API}/assistant/files/{f2['id']}", headers=h(ctx, "admin-a"))
+    assert r.status_code == 200 and r.content[:2] == b"PK"
+    assert '"preview": [{"nomi": "B", "soni": 5}' in fake.calls[3]["turns"][-1].content
+    # an unknown column is an error result the model can act on (it lists the columns); no file
+    fake.call("export_data", {"dataset": "units", "columns": ["nope"]})
+    fake.say("Ustun topilmadi.")
+    out = send(ctx, "admin-a", tid, "nope ustunini chiqar")
+    bad = out["messages"][1]["toolCalls"][0]
+    assert bad["status"] == "error" and not bad.get("file")
+    assert "availableColumns" in fake.calls[5]["turns"][-1].content
+    # a dataset the employee may not read is refused; a role without reports.export is not offered the tools at all
+    fake.call("export_data", {"dataset": "employees"})
+    fake.say("Ruxsat yo‘q.")
+    out = send(ctx, "reg", new_thread(ctx, "reg", ctx["a"]["facility"]), "Xodimlarni Excel qil", unit_id=ctx["a"]["facility"])
+    assert out["messages"][1]["toolCalls"][0]["status"] == "error"
+    st = c.get(f"{API}/assistant/status", params={"unitId": ctx["a"]["facility"]}, headers=h(ctx, "vrach")).json()
+    assert "export_data" not in {t["name"] for t in st["tools"]} and "export_table" not in {t["name"] for t in st["tools"]}
 
 
 # ----------------------------------------------------------------------------- reading

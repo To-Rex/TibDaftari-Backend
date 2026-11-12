@@ -143,7 +143,8 @@ o‘rniga javobda (`devCode`) va logda qaytadi — real Xabarchi kaliti shart em
   o‘zgartirishlar xodim tasdiqlagandan keyingina bajariladi, kalit/parol/tokenlar modelga yetib bormaydi, har bir amal
   auditga yoziladi. Provayder superadmin tomonidan bir marta platforma uchun kiritiladi (`PUT /assistant/platform-account`)
   va hamma uchun ishlaydi; birlik xohlasa o‘z hisobini qo‘yadi yoki o‘chiradi, pastga meros bo‘ladi (`PUT /units/{id}/assistant`):
-  Claude (rasmiy Anthropic SDK), OpenAI, DeepSeek, Deploy yoki istalgan OpenAI-compatible manzil. Qoidalar:
+  Claude (rasmiy Anthropic SDK), OpenAI, DeepSeek, Deploy yoki istalgan OpenAI-compatible manzil. «Excel qilib ber»
+  deyilsa model ma’lumotni serverda filtrlab/saralab fayl (xlsx / csv / json) yasaydi, xodim chatdan yuklab oladi. Qoidalar:
   `docs/DOMAIN_RULES.md` §3.
 * Endpoint xaritasi moduli bo‘yicha: [`ARCHITECTURE.md`](ARCHITECTURE.md#endpoint-map-prefix-apiv1).
 

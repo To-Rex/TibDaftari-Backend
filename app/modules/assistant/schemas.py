@@ -95,6 +95,18 @@ class ThreadCreateIn(CamelModel):
     title: str | None = Field(default=None, max_length=200)
 
 
+class FileOut(CamelModel):
+    """A file a tool built (export_data / export_table) — downloaded from `GET /assistant/files/{id}` by its owner."""
+
+    id: str
+    name: str
+    content_type: str
+    size: int
+    rows: int | None = None
+    expires_at: datetime
+    created_at: datetime
+
+
 class ToolCallOut(CamelModel):
     id: str
     name: str
@@ -104,6 +116,8 @@ class ToolCallOut(CamelModel):
     summary: str
     #: read tools: ran (ok / error); write tools: pending / done / failed / cancelled / expired
     status: str
+    #: the file this call produced, if any
+    file: FileOut | None = None
 
 
 class ActionOut(CamelModel):
@@ -127,6 +141,8 @@ class MessageOut(CamelModel):
     tool_name: str | None = None
     is_error: bool = False
     action: ActionOut | None = None
+    #: files the tools of this turn produced (also on the tool calls themselves)
+    files: list[FileOut] = Field(default_factory=list)
     created_at: datetime
 
 

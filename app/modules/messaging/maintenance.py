@@ -6,6 +6,7 @@ import logging
 from datetime import UTC, datetime
 
 from app.infrastructure.db.session import session_scope
+from app.modules.assistant import service as assistant_svc
 from app.modules.messaging import repository as repo
 
 log = logging.getLogger("maintenance")
@@ -21,6 +22,7 @@ async def maintenance_once() -> dict[str, int]:
         promoted = await repo.promote_due_scheduled(session, now)
         sessions = await repo.prune_expired_sessions(session, now)
         otps = await repo.prune_expired_otp_challenges(session, now)
-    if stale or promoted or sessions or otps:
-        log.info("maintenance: requeued %d stale sending, promoted %d scheduled, pruned %d sessions, %d otp", stale, promoted, sessions, otps)
-    return {"stale": stale, "promoted": promoted, "sessions": sessions, "otp": otps}
+        files = await assistant_svc.purge_expired_files(session)
+    if stale or promoted or sessions or otps or files:
+        log.info("maintenance: requeued %d stale sending, promoted %d scheduled, pruned %d sessions, %d otp, %d assistant files", stale, promoted, sessions, otps, files)
+    return {"stale": stale, "promoted": promoted, "sessions": sessions, "otp": otps, "files": files}
