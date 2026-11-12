@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from datetime import date, timedelta
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import StaffPrincipal
@@ -37,6 +38,11 @@ from app.modules.reports.schemas import (
     ResultsReportOut,
     ServicesReportOut,
     ServiceUsageRow,
+    SmsCounts,
+    SmsDayRow,
+    SmsReportOut,
+    SmsSliceRow,
+    SmsUnitRow,
     TopPatientOut,
     TrendPoint,
     TurnaroundRow,
@@ -454,3 +460,86 @@ async def services_report(session: AsyncSession, scope: UnitScope, q: RangeQuery
         )
 
     return await _cached(f"unit:{scope.id}:reports:services:{part}:{d_from}:{d_to}:{int(finance)}", ServicesReportOut, build)
+
+
+# ----------------------------------------------------------------------------- SMS
+
+SMS_STATUS_KEYS = ("queued", "sent", "delivered", "failed", "cancelled")
+
+
+def _sms_status(status: str) -> str:
+    return "queued" if status in ("queued", "sending", "scheduled") else status if status in SMS_STATUS_KEYS else "failed"
+
+
+def _bump(counts: dict[str, Any], status: str, n: int, cost: float) -> None:
+    counts["total"] += n
+    counts[_sms_status(status)] += n
+    counts["cost"] += cost
+
+
+def _counts() -> dict[str, Any]:
+    return {"total": 0, "queued": 0, "sent": 0, "delivered": 0, "failed": 0, "cancelled": 0, "cost": 0.0}
+
+
+async def _build_sms_report(session: AsyncSession, scope: UnitScope, unit_ids: list[uuid.UUID], d_from: date, d_to: date) -> SmsReportOut:
+    from app.infrastructure.db.models import District, Region
+
+    start, end = day_range(d_from, d_to)
+    rows = await repo.sms_groups(session, unit_ids, start, end)
+    totals = _counts()
+    by_day: dict[str, dict[str, Any]] = {}
+    by_unit: dict[uuid.UUID, dict[str, Any]] = {}
+    by_kind: dict[str, dict[str, Any]] = {}
+    by_provider: dict[str, dict[str, Any]] = {}
+    by_operator: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        n, cost = int(r.count), float(r.cost or 0)
+        _bump(totals, r.status, n, cost)
+        _bump(by_day.setdefault(r.day.isoformat(), _counts()), r.status, n, cost)
+        if r.unit_id:
+            _bump(by_unit.setdefault(r.unit_id, _counts()), r.status, n, cost)
+        _bump(by_kind.setdefault(r.kind or "—", _counts()), r.status, n, cost)
+        _bump(by_provider.setdefault(r.provider or "none", _counts()), r.status, n, cost)
+        if r.smsc:
+            _bump(by_operator.setdefault(str(r.smsc), _counts()), r.status, n, cost)
+    # every day of the period, empty ones included (the chart wants a straight axis)
+    days: list[SmsDayRow] = []
+    d = d_from
+    while d <= d_to:
+        days.append(SmsDayRow(date=d.isoformat(), **by_day.get(d.isoformat(), _counts())))
+        d += timedelta(days=1)
+    units = await units_by_ids(session, list(by_unit))
+    region_ids = {u.region_id for u in units.values() if u.region_id}
+    district_ids = {u.district_id for u in units.values() if u.district_id}
+    regions = {r.id: r.name for r in (await session.execute(select(Region).where(Region.id.in_(region_ids)))).scalars()} if region_ids else {}
+    districts = {r.id: r.name for r in (await session.execute(select(District).where(District.id.in_(district_ids)))).scalars()} if district_ids else {}
+    unit_rows = [
+        SmsUnitRow(
+            unit_id=str(uid),
+            name=units[uid].name if uid in units else "—",
+            level=units[uid].level if uid in units else "facility",
+            region_name=regions.get(units[uid].region_id) if uid in units else None,
+            district_name=districts.get(units[uid].district_id) if uid in units else None,
+            **c,
+        )
+        for uid, c in by_unit.items()
+    ]
+    unit_rows.sort(key=lambda x: (-x.total, x.name))
+    slices = lambda src: sorted((SmsSliceRow(key=k, **c) for k, c in src.items()), key=lambda x: (-x.total, x.key))  # noqa: E731
+    return SmsReportOut(totals=SmsCounts(**totals), by_day=days, by_unit=unit_rows, by_kind=slices(by_kind), by_provider=slices(by_provider), by_operator=slices(by_operator))
+
+
+async def sms_report(session: AsyncSession, scope: UnitScope, q: RangeQuery, staff: StaffPrincipal | None = None) -> SmsReportOut:
+    """SMS of the period under the scope (or one sub-unit): how many went out from which facility / region /
+    district, what became of them, what they cost — the territory's SMS picture."""
+    d_from, d_to, unit_id = _parse_range(q)
+    unit_ids, _ = await _units(session, scope, unit_id)
+    key = f"reports:sms:{scope.id}:{unit_id or ''}:{d_from}:{d_to}"
+    return await _cached(key, SmsReportOut, lambda: _build_sms_report(session, scope, unit_ids, d_from, d_to))
+
+
+async def export_sms_workbook(session: AsyncSession, scope: UnitScope, q: ReportExportQuery, staff: StaffPrincipal | None = None) -> bytes:
+    """The SMS report as an Excel workbook: territories, days, kinds, providers."""
+    d_from, d_to, _ = _parse_range(q)
+    report = await sms_report(session, scope, q, staff)
+    return reports_export.build_sms_xlsx(report, lang=q.lang, d_from=d_from, d_to=d_to, generated_at=utcnow())

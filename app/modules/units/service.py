@@ -24,10 +24,22 @@ from app.core.timeutil import utcnow
 from app.infrastructure.db.models import CHILD_LEVEL, MessagingAccount, OrgUnit, SmsTemplate
 from app.infrastructure.redis import cache
 from app.modules.messaging import eskiz, sms
-from app.modules.messaging.providers import SMS_PROVIDERS, SmsProviderError, SmsTransientError, account_to_sms
+from app.modules.messaging.eskiz import EskizAuthError
+from app.modules.messaging.providers import (
+    SMS_PROVIDERS,
+    SmsAccount,
+    SmsProviderError,
+    SmsTransientError,
+    account_to_sms,
+)
 from app.modules.units import repository as repo
 from app.modules.units.schemas import (
+    EskizInfoOut,
+    EskizPriceOut,
+    EskizTemplateIn,
+    EskizTemplateOut,
     OrgUnitOut,
+    SmsCheckOut,
     SmsTemplates,
     SmsTestOut,
     TelegramSettingsIn,
@@ -590,6 +602,151 @@ async def send_test_sms(session: AsyncSession, unit_id: uuid.UUID, to_raw: str |
     balance = await eskiz.account_balance(account.account_id or account.unit_id, account.login or "", decrypt(account.key_enc) or "") if account.provider == "eskiz" else None
     await audit(session, actor_type="staff", actor_id=staff.id, unit_id=unit.id, country_id=unit.country_id, action="sms_test", entity="unit", entity_id=unit.id, after={"to": to, "provider": account.provider, "providerMessageId": result.provider_id, "accountUnitId": str(account.unit_id)}, ip=meta.ip, request_id=meta.request_id)
     return SmsTestOut(ok=True, provider=account.provider, provider_message_id=result.provider_id, to=to, balance=balance)  # type: ignore[arg-type]
+
+
+# ----------------------------------------------------------------------------- Eskiz panel (balance, nicks, prices, templates)
+
+ESKIZ_INFO_TTL = 60
+#: below this balance (so‘m) the card warns
+LOW_BALANCE = 30_000
+
+
+def _eskiz_info_key(account_id: uuid.UUID | None) -> str:
+    return f"eskiz:info:{account_id}"
+
+
+async def _eskiz_account(session: AsyncSession, unit: OrgUnit) -> tuple[SmsAccount, MessagingAccount] | None:
+    """The Eskiz account in effect for the unit (own or inherited), or None when SMS goes another way."""
+    row = await repo.resolve_account(session, unit.id, "sms")
+    acc = account_to_sms(row)
+    return (acc, row) if acc is not None and row is not None and acc.provider == "eskiz" else None
+
+
+async def _soft[T](call: Any, default: T) -> T:
+    """A piece of the panel Eskiz refuses (an endpoint off for the account) is left empty; a dead token still
+    bubbles up so the caller logs in again."""
+    try:
+        return await call
+    except EskizAuthError:
+        raise
+    except SmsProviderError as exc:
+        log.info("eskiz: part of the panel unavailable: %s", exc.message)
+        return default
+
+
+async def _fetch_eskiz(acc: SmsAccount) -> dict[str, Any]:
+    secret = decrypt(acc.key_enc) or ""
+
+    async def gather(tok: str) -> dict[str, Any]:
+        user = await _soft(eskiz.me(tok), {})
+        balance = await _soft(eskiz.balance(tok), None)
+        if balance is None and user.get("balance") not in (None, ""):
+            try:
+                balance = int(float(user["balance"]))
+            except (TypeError, ValueError):
+                balance = None
+        return {
+            "user": user,
+            "balance": balance,
+            "nicks": await _soft(eskiz.nicks(tok), []),
+            "prices": await _soft(eskiz.prices(tok), []),
+            "templates": await _soft(eskiz.templates(tok), []),
+        }
+
+    return await eskiz.call_with_account(acc.account_id or acc.unit_id, acc.login or "", secret, gather)
+
+
+async def eskiz_info(session: AsyncSession, unit_id: uuid.UUID, staff: StaffPrincipal, *, refresh: bool = False) -> EskizInfoOut:
+    """The Eskiz panel of a unit: `configured=false` when SMS goes another way; otherwise what Eskiz says about the
+    account (cached per account for a minute; `refresh` asks again). An unreachable Eskiz gives `error`."""
+    unit = await get_unit_or_404(session, unit_id)
+    staff.require_unit(unit.id)
+    pair = await _eskiz_account(session, unit)
+    if pair is None:
+        return EskizInfoOut(configured=False)
+    acc, row = pair
+    names = await repo.units_by_ids(session, [row.unit_id])
+    base = {"configured": True, "account_unit_id": str(row.unit_id), "account_unit_name": names[row.unit_id].name if row.unit_id in names else None, "login": acc.login, "sender": acc.sender}
+    key = _eskiz_info_key(acc.account_id)
+    if not refresh:
+        cached = await cache.get_json(key)
+        if isinstance(cached, dict):
+            return EskizInfoOut.model_validate({**cached, **base})
+    try:
+        data = await _fetch_eskiz(acc)
+    except (SmsProviderError, SmsTransientError) as exc:
+        return EskizInfoOut(**base, error=exc.message)
+    user = data["user"] if isinstance(data.get("user"), dict) else {}
+    out = EskizInfoOut(
+        **base,
+        balance=data["balance"],
+        low_balance=data["balance"] is not None and data["balance"] < LOW_BALANCE,
+        nicks=list(data["nicks"]),
+        prices=[EskizPriceOut(operator=str(p["operator"]), price=float(p["price"]), country_code=p.get("countryCode")) for p in data["prices"]],
+        templates=[EskizTemplateOut(id=str(t["id"]), text=str(t["text"]), status=str(t["status"])) for t in data["templates"]],
+        user_name=str(user["name"]) if user.get("name") else None,
+        user_status=str(user["status"]) if user.get("status") else None,
+        fetched_at=utcnow(),
+    )
+    await cache.set_json(key, out.model_dump(mode="json"), ESKIZ_INFO_TTL)
+    return out
+
+
+async def eskiz_submit_template(session: AsyncSession, unit_id: uuid.UUID, body: EskizTemplateIn, staff: StaffPrincipal, meta: RequestMeta) -> EskizInfoOut:
+    """Hand a text to Eskiz for moderation with the account in effect; the panel comes back refreshed."""
+    unit = await get_unit_or_404(session, unit_id)
+    staff.require_unit(unit.id)
+    pair = await _eskiz_account(session, unit)
+    if pair is None:
+        raise ValidationError("Bu birlik uchun Eskiz hisobi sozlanmagan", code="sms_not_configured")
+    acc, _ = pair
+    text = body.text.strip()
+    try:
+        answer = await eskiz.call_with_account(acc.account_id or acc.unit_id, acc.login or "", decrypt(acc.key_enc) or "", lambda tok: eskiz.create_template(tok, text))
+    except SmsProviderError as exc:
+        raise ValidationError(exc.message, code="sms_rejected", details={"field": "text"}) from exc
+    except SmsTransientError as exc:
+        raise ExternalServiceError(exc.message, code="sms_provider_unavailable") from exc
+    await cache.delete(_eskiz_info_key(acc.account_id))
+    await audit(session, actor_type="staff", actor_id=staff.id, unit_id=unit.id, country_id=unit.country_id, action="sms_template_submit", entity="unit", entity_id=unit.id, after={"text": text[:300], "answer": {k: v for k, v in answer.items() if k in ("id", "status", "template")}}, ip=meta.ip, request_id=meta.request_id)
+    return await eskiz_info(session, unit.id, staff, refresh=True)
+
+
+def _same_text(a: str, b: str) -> bool:
+    return " ".join(a.split()).casefold() == " ".join(b.split()).casefold()
+
+
+async def check_sms_text(session: AsyncSession, unit_id: uuid.UUID, text: str, staff: StaffPrincipal) -> SmsCheckOut:
+    """Parts the operators bill for `text` (GSM-7 / UCS-2) and, with an Eskiz account in effect, the price range over
+    the operators (Eskiz's own check wins when it answers) and the moderation state of a matching template."""
+    unit = await get_unit_or_404(session, unit_id)
+    staff.require_unit(unit.id)
+    encoding, length, parts = eskiz.segments(text)
+    row = await repo.resolve_account(session, unit.id, "sms")
+    acc = account_to_sms(row)
+    out = SmsCheckOut(provider=acc.provider if acc else "none", encoding=encoding, length=length, parts=parts)  # type: ignore[arg-type]
+    if acc is None or acc.provider != "eskiz":
+        return out
+    info = await cache.get_json(_eskiz_info_key(acc.account_id))
+    if isinstance(info, dict):
+        prices = [float(p["price"]) for p in info.get("prices") or [] if not p.get("country_code") or str(p["country_code"]).upper() == "UZ"]
+        if prices and parts:
+            out.price_from, out.price_to = parts * min(prices), parts * max(prices)
+        for tpl in info.get("templates") or []:
+            if _same_text(str(tpl.get("text") or ""), text):
+                out.template_status = str(tpl.get("status") or "moderation")
+                break
+    if text.strip():
+        try:
+            checked = await eskiz.call_with_account(acc.account_id or acc.unit_id, acc.login or "", decrypt(acc.key_enc) or "", lambda tok: eskiz.check_message(tok, text))
+        except (SmsProviderError, SmsTransientError):
+            checked = None
+        if checked:
+            if checked.get("parts"):
+                out.parts = int(checked["parts"])
+            if checked.get("price") is not None:
+                out.price_from = out.price_to = float(checked["price"])
+    return out
 
 
 # ----------------------------------------------------------------------------- SMS texts

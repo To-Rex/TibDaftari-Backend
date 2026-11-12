@@ -9,6 +9,7 @@ deliver each message and persist the outcome. Nothing here runs inside an HTTP r
 from __future__ import annotations
 
 import logging
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -92,7 +93,7 @@ async def _deliver_sms(session: AsyncSession, msg: OutboxMessage, now: datetime,
         _mark_failed(msg, SMS_NOT_CONFIGURED)
         return
     try:
-        result = await sms.send(account, msg.to, outgoing_text(msg))
+        result = await sms.send(account, msg.to, outgoing_text(msg), country_code=(msg.payload or {}).get("countryCode"))
     except SmsTransientError as exc:
         _mark_retry(msg, now, exc.message)
         return
@@ -100,6 +101,62 @@ async def _deliver_sms(session: AsyncSession, msg: OutboxMessage, now: datetime,
         _mark_failed(msg, exc.message)
         return
     _mark_sent(msg, now, result.provider_id)
+
+
+#: per-message states in a batch answer that mean "accepted" (anything else fails that one message)
+BATCH_OK = frozenset({"waiting", "new", "accepted", "stored", "success", "ok", "sent"})
+
+
+def _group_for_batch(rows: list[OutboxMessage], accounts: dict[uuid.UUID, MessagingAccount]) -> tuple[list[tuple[SmsAccount, list[OutboxMessage]]], list[OutboxMessage]]:
+    """Eskiz accounts take their home-country messages in one request each (two or more); everything else — other
+    providers, numbers abroad, lone messages — goes one by one."""
+    groups: dict[uuid.UUID, tuple[SmsAccount, list[OutboxMessage]]] = {}
+    singles: list[OutboxMessage] = []
+    for msg in rows:
+        account = account_to_sms(accounts.get(msg.account_id)) if msg.channel == "sms" and msg.account_id else None
+        if account is not None and account.provider == "eskiz" and account.account_id and not sms.is_abroad((msg.payload or {}).get("countryCode")):
+            groups.setdefault(account.account_id, (account, []))[1].append(msg)
+        else:
+            singles.append(msg)
+    batches: list[tuple[SmsAccount, list[OutboxMessage]]] = []
+    for account, msgs in groups.values():
+        if len(msgs) >= 2:
+            batches.append((account, msgs))
+        else:
+            singles.extend(msgs)
+    return batches, singles
+
+
+async def _deliver_eskiz_batch(session: AsyncSession, msgs: list[OutboxMessage], account: SmsAccount, now: datetime, accounts: dict[uuid.UUID, MessagingAccount]) -> None:
+    """One Eskiz request for the whole group: every row gets a 12-character key (`payload.eskizKey`, what Eskiz
+    quotes back as `user_sms_id`) and the batch's dispatch id; the batch request id becomes each row's provider id.
+    A refused batch falls back to one-by-one sends so one bad text or number never sinks the others."""
+    dispatch_id = secrets.randbelow(900_000_000) + 100_000_000
+    items: list[dict[str, str]] = []
+    for m in msgs:
+        key = str((m.payload or {}).get("eskizKey") or secrets.token_hex(6))
+        m.payload = {**(m.payload or {}), "eskizKey": key, "dispatchId": dispatch_id}
+        items.append({"user_sms_id": key, "to": m.to, "text": outgoing_text(m)})
+    try:
+        result = await sms.send_batch(account, items, dispatch_id)
+    except SmsTransientError as exc:
+        for m in msgs:
+            _mark_retry(m, now, exc.message)
+        return
+    except SmsProviderError as exc:
+        log.warning("outbox: eskiz batch of %d refused (%s) — sending one by one", len(msgs), exc.message)
+        for m in msgs:
+            m.payload = {k: v for k, v in (m.payload or {}).items() if k not in ("eskizKey", "dispatchId")}
+            await _deliver_sms(session, m, now, accounts)
+        return
+    rid = str(result.get("id")) if result.get("id") else None
+    statuses = result.get("status")
+    for i, m in enumerate(msgs):
+        st = statuses[i] if isinstance(statuses, list) and i < len(statuses) else statuses if isinstance(statuses, str) else None
+        if st is None or str(st).strip().lower() in BATCH_OK:
+            _mark_sent(m, now, rid)
+        else:
+            _mark_failed(m, f"eskiz:{st}")
 
 
 async def _deliver_telegram(session: AsyncSession, msg: OutboxMessage, now: datetime) -> None:
@@ -149,7 +206,29 @@ async def dispatch_outbox_once() -> int:
     async with session_scope() as session:
         rows = await repo.load_messages(session, ids)
         accounts = await repo.load_accounts(session, {r.account_id for r in rows if r.account_id and r.channel == "sms"})
-        for msg in rows:
+        batches, singles = _group_for_batch(rows, accounts)
+        for account, msgs in batches:
+            now = datetime.now(UTC)
+            try:
+                async with session.begin_nested():
+                    await _deliver_eskiz_batch(session, msgs, account, now, accounts)
+                    for m in msgs:
+                        m.updated_at = now
+                        if m.document_id and m.status in ("sent", "failed"):
+                            await mark_document_delivery(session, m.document_id, m.channel, m.status, m.error)
+            except Exception:
+                log.exception("outbox: unexpected error in an eskiz batch of %d", len(msgs))
+                for m in msgs:
+                    await session.refresh(m)
+                    _mark_retry(m, datetime.now(UTC), "internal_error")
+            for m in msgs:
+                counts[m.status] = counts.get(m.status, 0) + 1
+            try:
+                await session.commit()
+            except Exception:
+                log.exception("outbox: batch commit failed")
+                await session.rollback()
+        for msg in singles:
             try:
                 # SAVEPOINT per row: a DB-side failure inside delivery rolls back only this row's
                 # writes and leaves the session usable for the rest of the batch.

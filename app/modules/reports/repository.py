@@ -14,6 +14,7 @@ from typing import Any
 
 from sqlalchemy import (
     ColumnElement,
+    Float,
     Interval,
     Row,
     Select,
@@ -553,4 +554,32 @@ async def service_settings(session: AsyncSession, service_ids: UnitIds) -> list[
     if not service_ids:
         return []
     stmt = select(ServiceUnitSetting.service_type_id, ServiceUnitSetting.unit_id, ServiceUnitSetting.is_enabled).where(ServiceUnitSetting.service_type_id.in_(service_ids))
+    return list((await session.execute(stmt)).all())
+
+
+# ----------------------------------------------------------------------------- SMS
+
+
+async def sms_groups(session: AsyncSession, unit_ids: Sequence[uuid.UUID], start: datetime | None, end: datetime | None) -> list[Any]:
+    """SMS outbox rows of the facilities, grouped by facility × kind × provider × local day × status × operator:
+    `(unit_id, kind, provider, day, status, smsc, count, cost)`; cost = the Eskiz total price the sync wrote."""
+    from app.infrastructure.db.models import MessagingAccount, OutboxMessage
+
+    if not unit_ids:
+        return []
+    provider = func.coalesce(MessagingAccount.provider, "none").label("provider")
+    day = cast(func.timezone(_TZ, OutboxMessage.created_at), Date).label("day")
+    smsc = OutboxMessage.payload["eskiz"]["smsc"].astext.label("smsc")
+    cost = func.coalesce(func.sum(cast(OutboxMessage.payload["eskiz"]["totalPrice"].astext, Float)), 0.0).label("cost")
+    stmt = (
+        select(OutboxMessage.unit_id, OutboxMessage.kind, provider, day, OutboxMessage.status, smsc, func.count().label("count"), cost)
+        .select_from(OutboxMessage)
+        .outerjoin(MessagingAccount, MessagingAccount.id == OutboxMessage.account_id)
+        .where(OutboxMessage.channel == "sms", OutboxMessage.unit_id.in_(list(unit_ids)), alive(OutboxMessage))
+        .group_by(OutboxMessage.unit_id, OutboxMessage.kind, provider, day, OutboxMessage.status, smsc)
+    )
+    if start is not None:
+        stmt = stmt.where(OutboxMessage.created_at >= start)
+    if end is not None:
+        stmt = stmt.where(OutboxMessage.created_at < end)
     return list((await session.execute(stmt)).all())

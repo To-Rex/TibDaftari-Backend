@@ -26,7 +26,7 @@ from app.core.exceptions import ValidationError
 from app.core.pagination import page_of
 from app.core.schemas import Page
 from app.core.scope import UnitScope, ids_of, narrow_to
-from app.core.textutil import fmt_money_ru, is_valid_uz_phone, norm_phone
+from app.core.textutil import digits, fmt_money_ru, is_valid_uz_phone, norm_phone
 from app.core.timeutil import to_iso
 from app.infrastructure.db.base import alive
 from app.infrastructure.db.models import Notification, OutboxMessage, Patient
@@ -325,12 +325,25 @@ async def eskiz_delivery(session: AsyncSession, payload: Mapping[str, Any]) -> s
         new_status, error = "failed", f"eskiz:{state}"
     else:
         return None
-    msg = (await session.execute(select(OutboxMessage).where(OutboxMessage.provider_message_id == request_id, OutboxMessage.channel == "sms", alive(OutboxMessage)))).scalar_one_or_none()
+    # a batch row is matched by the key we gave Eskiz (`user_sms_id`), a single one by its request id
+    key = str(payload.get("user_sms_id") or "").strip()
+    where = OutboxMessage.payload["eskizKey"].astext == key if key else OutboxMessage.provider_message_id == request_id
+    newest = lambda cond: select(OutboxMessage).where(cond, OutboxMessage.channel == "sms", alive(OutboxMessage)).order_by(OutboxMessage.created_at.desc()).limit(1)  # noqa: E731
+    msg = (await session.execute(newest(where))).scalars().first()
+    if msg is None and key:
+        msg = (await session.execute(newest(OutboxMessage.provider_message_id == request_id))).scalars().first()
     if msg is None or msg.status == new_status or msg.status == "delivered":
         return None
     msg.status = new_status
     msg.error = error
     msg.updated_at = datetime.now(UTC)
+    info = {**((msg.payload or {}).get("eskiz") or {}), "status": state, "reportedAt": msg.updated_at.isoformat()}
+    if payload.get("sms_count") not in (None, ""):
+        try:
+            info["parts"] = int(payload["sms_count"])
+        except (TypeError, ValueError):
+            pass
+    msg.payload = {**(msg.payload or {}), "eskiz": info}
     if msg.document_id:
         await mark_document_delivery(session, msg.document_id, "sms", new_status, error)
     return new_status
@@ -361,6 +374,12 @@ async def mark_document_delivery(session: AsyncSession, document_id: uuid.UUID, 
 def outbox_out(msg: OutboxMessage, unit_name: str | None = None) -> OutboxMessageOut:
     dto = OutboxMessageOut.model_validate(msg)
     dto.unit_name = unit_name
+    payload = msg.payload or {}
+    info = payload.get("eskiz") or {}
+    dto.country_code = payload.get("countryCode")
+    dto.parts = int(info["parts"]) if isinstance(info.get("parts"), int | float) else None
+    dto.cost = float(info["totalPrice"]) if isinstance(info.get("totalPrice"), int | float) else None
+    dto.provider_status = str(info["status"]) if info.get("status") else None
     return dto
 
 
@@ -391,9 +410,13 @@ async def send(session: AsyncSession, scope: UnitScope, staff: StaffPrincipal, b
     valid: list[str] = []
     invalid: list[str] = []
     seen: set[str] = set()
+    # a country other than Uzbekistan: full international numbers (10–15 digits, no 998 rule), sent through Eskiz's global route
+    country = (body.country_code or "").strip().upper() or None
+    abroad = country is not None and country != "UZ"
     for raw in body.to:
-        phone = norm_phone(raw)
-        if not is_valid_uz_phone(phone):
+        phone = digits(raw) if abroad else norm_phone(raw)
+        ok = 10 <= len(phone) <= 15 if abroad else is_valid_uz_phone(phone)
+        if not ok:
             if raw.strip():
                 invalid.append(raw.strip())
             continue
@@ -415,6 +438,7 @@ async def send(session: AsyncSession, scope: UnitScope, staff: StaffPrincipal, b
             to=phone,
             text=body.text,
             scheduled_at=body.scheduled_at,
+            payload={"countryCode": country} if abroad else None,
             created_by=staff.id,
         )
         for phone in valid
@@ -430,7 +454,7 @@ async def send(session: AsyncSession, scope: UnitScope, staff: StaffPrincipal, b
         action="send",
         entity="outbox_message",
         entity_id=created[0].id if len(created) == 1 else None,
-        after={"kind": body.kind, "recipients": len(created), "invalid": len(invalid), "scheduledAt": to_iso(body.scheduled_at), "text": body.text[:200]},
+        after={"kind": body.kind, "recipients": len(created), "invalid": len(invalid), "scheduledAt": to_iso(body.scheduled_at), "countryCode": country if abroad else None, "text": body.text[:200]},
         ip=meta.ip,
         request_id=meta.request_id,
     )

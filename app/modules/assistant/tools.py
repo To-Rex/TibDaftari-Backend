@@ -499,6 +499,14 @@ async def _ds_results(ctx: ToolContext, a: dict[str, Any], limit: int) -> list[d
     return [_dump(r) for r in rows]
 
 
+async def _ds_sms(ctx: ToolContext, a: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    d_from, d_to = _range(a)
+    rep = await reports_svc.sms_report(ctx.session, await _scope(ctx, a.get("unitId")), RangeQuery(date_from=d_from, date_to=d_to), ctx.staff)
+    by = a.get("by") or "unit"
+    rows = {"unit": rep.by_unit, "day": rep.by_day, "kind": rep.by_kind, "provider": rep.by_provider, "operator": rep.by_operator}.get(by, rep.by_unit)
+    return [_dump(r) for r in rows[:limit]]
+
+
 @dataclass(frozen=True)
 class Dataset:
     title: str
@@ -519,6 +527,7 @@ DATASETS: dict[str, Dataset] = {
     "breakdown": Dataset("Taqsimot", REPORT_PERMS, "unitId, dateFrom*, dateTo*, by (category|service|unit|employee)", _ds_breakdown),
     "daily": Dataset("Kunlik ko‘rsatkichlar", REPORT_PERMS, "unitId, dateFrom*, dateTo*", _ds_daily),
     "results": Dataset("Natijalar", REPORT_PERMS, "unitId, dateFrom*, dateTo*, status (not_received|received|waiting)", _ds_results),
+    "sms": Dataset("SMS hisoboti", REPORT_PERMS, "unitId, dateFrom*, dateTo*, by (unit|day|kind|provider|operator) — sent / delivered / failed counts and cost", _ds_sms),
 }
 
 FILTER_SCHEMA = {"type": "array", "description": "AND-ed row filters applied after loading: {column, op, value}; value is a list for in / notIn / between", "items": {"type": "object", "properties": {"column": {"type": "string"}, "op": {"type": "string", "enum": list(xp.OPS)}, "value": {"description": "string | number | boolean | list"}}, "required": ["column", "op"]}}

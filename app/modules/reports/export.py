@@ -7,6 +7,7 @@ import io
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import Any
 
 import xlsxwriter
 
@@ -195,5 +196,94 @@ def build_xlsx(
         ws.write_number(t, 2, t_rev, tot_f)
     ws.freeze_panes(head + 1, 0)
 
+    wb.close()
+    return buf.getvalue()
+
+
+# ----------------------------------------------------------------------------- SMS workbook
+
+SMS_LABELS: dict[str, dict[str, str]] = {
+    "uz": {
+        "units_sheet": "Hududlar", "days_sheet": "Kunlik", "kinds_sheet": "Turlar", "providers_sheet": "Provayderlar", "operators_sheet": "Operatorlar",
+        "title": "SMS hisoboti", "unit": "Muassasa", "level": "Daraja", "region": "Viloyat", "district": "Tuman / shahar", "date": "Sana",
+        "kind": "Turi", "provider": "Provayder", "operator": "Operator", "total": "Jami", "queued": "Navbatda", "sent": "Yuborildi",
+        "delivered": "Yetkazildi", "failed": "Xato", "cancelled": "Bekor", "cost": "Xarajat (so‘m)", "totals": "Jami",
+        "generated": "Yaratildi: {at} · davr: {from_} – {to}",
+    },
+    "ru": {
+        "units_sheet": "Территории", "days_sheet": "По дням", "kinds_sheet": "Типы", "providers_sheet": "Провайдеры", "operators_sheet": "Операторы",
+        "title": "Отчёт по SMS", "unit": "Учреждение", "level": "Уровень", "region": "Область", "district": "Район / город", "date": "Дата",
+        "kind": "Тип", "provider": "Провайдер", "operator": "Оператор", "total": "Всего", "queued": "В очереди", "sent": "Отправлено",
+        "delivered": "Доставлено", "failed": "Ошибка", "cancelled": "Отменено", "cost": "Расход (сум)", "totals": "Итого",
+        "generated": "Создано: {at} · период: {from_} – {to}",
+    },
+    "en": {
+        "units_sheet": "Territories", "days_sheet": "Daily", "kinds_sheet": "Kinds", "providers_sheet": "Providers", "operators_sheet": "Operators",
+        "title": "SMS report", "unit": "Facility", "level": "Level", "region": "Region", "district": "District / city", "date": "Date",
+        "kind": "Kind", "provider": "Provider", "operator": "Operator", "total": "Total", "queued": "Queued", "sent": "Sent",
+        "delivered": "Delivered", "failed": "Failed", "cancelled": "Cancelled", "cost": "Cost (UZS)", "totals": "Total",
+        "generated": "Generated: {at} · period: {from_} – {to}",
+    },
+}
+SMS_KIND_LABELS: dict[str, dict[str, str]] = {
+    "uz": {"payment_receipt": "To‘lov cheki", "result_ready": "Natija tayyor", "reminder": "Eslatma", "broadcast": "Ommaviy", "otp": "Kirish kodi", "portal_access": "Portal kirish"},
+    "ru": {"payment_receipt": "Чек оплаты", "result_ready": "Результат готов", "reminder": "Напоминание", "broadcast": "Рассылка", "otp": "Код входа", "portal_access": "Доступ в портал"},
+    "en": {"payment_receipt": "Payment receipt", "result_ready": "Result ready", "reminder": "Reminder", "broadcast": "Broadcast", "otp": "Login code", "portal_access": "Portal access"},
+}
+COUNT_KEYS = ("total", "queued", "sent", "delivered", "failed", "cancelled", "cost")
+
+
+def build_sms_xlsx(report: Any, *, lang: str, d_from: date, d_to: date, generated_at: datetime) -> bytes:
+    """One sheet per cut of the SMS report; counts stay numbers, the cost is a number too."""
+    labels = SMS_LABELS.get(lang, SMS_LABELS["uz"])
+    kinds = SMS_KIND_LABELS.get(lang, SMS_KIND_LABELS["uz"])
+    note = labels["generated"].format(at=local_naive(generated_at).strftime("%d.%m.%Y %H:%M") if local_naive(generated_at) else "", from_=d_from.strftime("%d.%m.%Y"), to=d_to.strftime("%d.%m.%Y"))
+    buf = io.BytesIO()
+    wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+    title_f = wb.add_format({"bold": True, "font_size": 14})
+    note_f = wb.add_format({"italic": True, "font_color": "#666666"})
+    head_f = wb.add_format({"bold": True, "bg_color": "#E8F0EC", "border": 1, "text_wrap": True, "valign": "vcenter"})
+    cell_f = wb.add_format({"border": 1})
+    num_f = wb.add_format({"border": 1, "num_format": "#,##0"})
+    money_f = wb.add_format({"border": 1, "num_format": "#,##0.00"})
+    total_f = wb.add_format({"bold": True, "border": 1, "bg_color": "#F4F6F5"})
+    total_num_f = wb.add_format({"bold": True, "border": 1, "bg_color": "#F4F6F5", "num_format": "#,##0"})
+    total_money_f = wb.add_format({"bold": True, "border": 1, "bg_color": "#F4F6F5", "num_format": "#,##0.00"})
+
+    def sheet(name: str, first: list[tuple[str, int]], rows: list[tuple[list[Any], Any]]) -> None:
+        ws = wb.add_worksheet(name[:31])
+        ws.write(0, 0, labels["title"], title_f)
+        ws.write(1, 0, note, note_f)
+        r = 3
+        ws.set_row(r, 26)
+        cols = [*first, *[(k, 12) for k in COUNT_KEYS]]
+        for i, (key, width) in enumerate(cols):
+            ws.write(r, i, labels[key], head_f)
+            ws.set_column(i, i, width)
+        ws.freeze_panes(r + 1, 0)
+        sums = dict.fromkeys(COUNT_KEYS, 0.0)
+        for lead, counts in rows:
+            r += 1
+            for i, value in enumerate(lead):
+                ws.write(r, i, value if value is not None else "", cell_f)
+            for j, key in enumerate(COUNT_KEYS):
+                value = getattr(counts, key)
+                sums[key] += float(value)
+                ws.write_number(r, len(lead) + j, value, money_f if key == "cost" else num_f)
+        r += 1
+        ws.write(r, 0, labels["totals"], total_f)
+        for i in range(1, len(first)):
+            ws.write(r, i, "", total_f)
+        for j, key in enumerate(COUNT_KEYS):
+            ws.write_number(r, len(first) + j, sums[key], total_money_f if key == "cost" else total_num_f)
+        if rows:
+            ws.autofilter(3, 0, r - 1, len(cols) - 1)
+
+    sheet(labels["units_sheet"], [("unit", 34), ("level", 12), ("region", 22), ("district", 22)], [([u.name, u.level, u.region_name, u.district_name], u) for u in report.by_unit])
+    sheet(labels["days_sheet"], [("date", 14)], [([d.date], d) for d in report.by_day])
+    sheet(labels["kinds_sheet"], [("kind", 24)], [([kinds.get(k.key, k.key)], k) for k in report.by_kind])
+    sheet(labels["providers_sheet"], [("provider", 18)], [([p.key], p) for p in report.by_provider])
+    if report.by_operator:
+        sheet(labels["operators_sheet"], [("operator", 18)], [([o.key], o) for o in report.by_operator])
     wb.close()
     return buf.getvalue()

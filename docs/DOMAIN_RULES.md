@@ -240,6 +240,36 @@ verbatim in the UI.
   DELETED …), updates the result document's delivery entry, never undoes a delivery, ignores in-between states
   and unknown ids. The callback URL is `ESKIZ_CALLBACK_URL`, else derived from `PUBLIC_API_URL` (none on
   localhost). Settings: `ESKIZ_BASE_URL`, `ESKIZ_TIMEOUT_SECONDS`, `ESKIZ_CALLBACK_URL`.
+* **Eskiz — the wider surface** (2026-11-12):
+  * *Status sync* (`messaging/eskiz_sync.py`, every maintenance pass): outbox rows `sent` through an Eskiz account
+    in the last 3 days are asked about (`status_by_id` for single sends, `get-user-messages-by-dispatch` for a
+    batch) at most every 10 minutes; the answer lands in `payload.eskiz` `{status, parts, price, totalPrice, smsc,
+    syncedAt}` and a final state flips the row to `delivered` (DELIVERED / PARTDELIVERED / every part DELIVRD) or
+    `failed` `eskiz:<STATE>` (REJECTED, or a part UNDELIV / EXPIRED / REJECTD / DELETED). A delivered row never
+    goes back; a provider error only postpones. The outbox DTO exposes `parts`, `cost`, `providerStatus`, `countryCode`.
+  * *Batches*: the dispatcher sends two or more home-country messages of one Eskiz account in ONE request
+    (`send-batch`, `dispatch_id` random 9 digits, `user_sms_id` = a 12-hex key kept in `payload.eskizKey`,
+    `payload.dispatchId`); the batch request id becomes every row's `providerMessageId`; a per-message state other
+    than waiting / accepted fails that row; a refused batch falls back to one-by-one sends. The callback matches a
+    batch row by `user_sms_id`, a single one by `request_id`.
+  * *Abroad*: `POST /units/{id}/messages/send {countryCode}` (ISO-2; not UZ) takes full international numbers
+    (10–15 digits, no 998 rule) and stores `payload.countryCode`; such a row goes out through Eskiz `send-global`
+    (unicode for non-GSM text); a Xabarchi account fails it with "Xabarchi xalqaro SMS yubormaydi".
+  * *Panel* `GET /units/{id}/sms/eskiz` (admin.settings.write | admin.unit.write | admin.unit.read; `?refresh`):
+    the Eskiz account in effect — `configured`, balance (`lowBalance` < 30 000), `nicks` (`/nick/me`), `prices`
+    per operator (`/user/prices`), `templates` with moderation state (`/user/templates`), the cabinet user; cached
+    per account for 60 s (`eskiz:info:{accountId}`); an unreachable Eskiz → `error`. `POST …/sms/eskiz/templates
+    {text}` hands a text to moderation (422 `sms_rejected` when Eskiz refuses, 502 when unreachable) and returns
+    the panel refreshed. `POST …/sms/check {text}` (also messaging.send) → `{provider, encoding gsm|ucs2, length,
+    parts, priceFrom, priceTo, templateStatus}` — parts the operators bill (`eskiz.segments`), the price range over
+    the operators (Eskiz's own `/message/sms/check` wins when it answers), the state of a template with that text.
+  * *SMS report* `GET /units/{id}/reports/sms?dateFrom&dateTo&unitId` (reports.operations.read | finance.read):
+    outbox SMS of the facilities under the scope — `totals`, `byDay` (every day of the range), `byUnit` (facility
+    with its `regionName` / `districtName` for grouping), `byKind`, `byProvider` (xabarchi | eskiz | none), `byOperator`
+    (Eskiz `smsc`); each row `{total, queued (queued + sending + scheduled), sent, delivered, failed, cancelled,
+    cost}` — cost = the Eskiz total price the sync wrote. Cached like the other reports.
+    `GET …/reports/sms/export.xlsx?lang` (reports.export) — one sheet per cut. Assistant dataset `sms`
+    (by = unit | day | kind | provider | operator).
 * **SMS texts per unit** (`GET/PUT /units/{id}/sms-templates`, same permissions): `sms_templates (unit_id, key,
   lang, body)` with keys `payment_receipt`, `result_ready`, `reminder`. Resolution per key: the unit's own →
   the nearest ancestor's → the platform default (an empty value = default). Answer `{unitId, templates

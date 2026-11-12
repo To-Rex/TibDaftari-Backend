@@ -12,6 +12,8 @@ from app.api.deps import DbSession, Meta, Staff
 from app.core.exceptions import ValidationError
 from app.modules.units import quickstart, reset, service
 from app.modules.units.schemas import (
+    EskizInfoOut,
+    EskizTemplateIn,
     OrgUnitOut,
     QuickStartIn,
     QuickStartOut,
@@ -21,6 +23,8 @@ from app.modules.units.schemas import (
     ResetOut,
     ResetPartOut,
     ResetPreviewOut,
+    SmsCheckIn,
+    SmsCheckOut,
     SmsTestIn,
     SmsTestOut,
     TelegramSettingsIn,
@@ -79,6 +83,24 @@ async def set_sms(unit_id: uuid.UUID, body: UnitSmsIn, staff: Staff, session: Db
 async def sms_test(unit_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta, body: SmsTestIn | None = None) -> SmsTestOut:
     staff.require(*SETTINGS_WRITE)
     return await service.send_test_sms(session, unit_id, body.to if body else None, staff, meta)
+
+
+@router.get("/units/{unit_id}/sms/eskiz", response_model=EskizInfoOut, summary="The Eskiz account in effect: balance, sender names, prices, templates and their moderation state (cached a minute)")
+async def eskiz_info(unit_id: uuid.UUID, staff: Staff, session: DbSession, refresh: Annotated[bool, Query()] = False) -> EskizInfoOut:
+    staff.require(*SETTINGS_WRITE, "admin.unit.read")
+    return await service.eskiz_info(session, unit_id, staff, refresh=refresh)
+
+
+@router.post("/units/{unit_id}/sms/eskiz/templates", response_model=EskizInfoOut, status_code=201, summary="Hand a text to Eskiz for template moderation")
+async def eskiz_submit_template(unit_id: uuid.UUID, body: EskizTemplateIn, staff: Staff, session: DbSession, meta: Meta) -> EskizInfoOut:
+    staff.require(*SETTINGS_WRITE)
+    return await service.eskiz_submit_template(session, unit_id, body, staff, meta)
+
+
+@router.post("/units/{unit_id}/sms/check", response_model=SmsCheckOut, summary="What a text costs with the SMS account in effect: parts, encoding, Eskiz price and template state")
+async def check_sms_text(unit_id: uuid.UUID, body: SmsCheckIn, staff: Staff, session: DbSession) -> SmsCheckOut:
+    staff.require(*SETTINGS_WRITE, "admin.unit.read", "messaging.send")
+    return await service.check_sms_text(session, unit_id, body.text, staff)
 
 
 @router.get("/units/{unit_id}/sms-templates", response_model=UnitSmsTemplatesOut, summary="The unit's SMS texts (its own, or inherited)")

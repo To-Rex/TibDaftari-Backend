@@ -3,7 +3,10 @@ the mapping of answers and errors, and the sending door that picks the provider.
 
 from __future__ import annotations
 
+import json
 import uuid
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from urllib.parse import parse_qsl
 
 import httpx
@@ -12,7 +15,7 @@ from app.core.config import settings
 from app.core.crypto import encrypt
 from app.infrastructure.db.models import MessagingAccount
 from app.infrastructure.redis import cache
-from app.modules.messaging import eskiz, sms, xabarchi
+from app.modules.messaging import dispatcher, eskiz, eskiz_sync, sms, xabarchi
 from app.modules.messaging.providers import (
     ProviderResult,
     SmsAccount,
@@ -55,6 +58,32 @@ def api(monkeypatch: pytest.MonkeyPatch):
             return httpx.Response(200, json={"id": "0f6b1d2e-req", "status": "waiting", "message": "Waiting for SMS provider"})
         if path.endswith("/user/get-limit"):
             return httpx.Response(200, json={"status": "success", "data": {"balance": 12345}})
+        if path.endswith("/auth/user"):
+            return httpx.Response(200, json={"status": "success", "data": {"id": 77, "name": "Xorazm SES", "email": "ses@example.uz", "status": "active", "balance": 12345}, "id": None})
+        if path.endswith("/nick/me"):
+            return httpx.Response(200, json=["4546", "XORAZMSES"])
+        if path.endswith("/user/prices"):
+            return httpx.Response(200, json={"status": "success", "data": [{"country_code": "UZ", "prices": [{"name": "Beeline", "price": 95}, {"name": "Ucell", "price": 100}, {"name": "UMS", "price": "110"}]}]})
+        if path.endswith("/user/templates") and request.method == "GET":
+            return httpx.Response(200, json={"success": True, "result": [{"id": 1, "template": "Natija tayyor: %w", "original_text": "Natija tayyor: {link}", "status": "service"}, {"id": 2, "template": "Chek", "original_text": "", "status": "moderation"}]})
+        if path.endswith("/user/template"):
+            return httpx.Response(200, json={"template": form.get("template"), "status": "moderation", "id": 3})
+        if path.endswith("/message/sms/check"):
+            body = json.loads(request.content or b"{}")
+            return httpx.Response(200, json={"status": "success", "data": {"length": len(body.get("message", "")), "parts": 2, "total_price": 190}})
+        if "/message/sms/status_by_id/" in path:
+            rid = path.rsplit("/", 1)[-1]
+            if rid == "unknown":
+                return httpx.Response(404, json={"message": "not found"})
+            return httpx.Response(200, json={"status": "success", "data": {"id": 5, "request_id": rid, "status": "DELIVERED", "parts_count": 2, "price": 95, "total_price": 190, "smsc_id": 3, "parts": [{"dlr_state": "DELIVRD"}, {"dlr_state": "DELIVRD"}]}, "id": None})
+        if path.endswith("/message/sms/send-batch"):
+            body = json.loads(request.content or b"{}")
+            calls.append(("BATCH", path, body))
+            return httpx.Response(200, json={"id": "batch-req-1", "message": "Waiting for SMS provider", "status": ["waiting" for _ in body.get("messages", [])]})
+        if path.endswith("/message/sms/send-global"):
+            return httpx.Response(200, json={"id": "global-req-1", "status": "waiting"})
+        if path.endswith("/get-user-messages-by-dispatch"):
+            return httpx.Response(200, json={"status": "success", "data": {"result": [{"user_sms_id": "k1", "status": "DELIVERED"}, {"user_sms_id": "k2", "status": "REJECTED"}]}})
         return httpx.Response(404, json={"message": "not found"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=BASE)
@@ -63,7 +92,7 @@ def api(monkeypatch: pytest.MonkeyPatch):
 
 
 async def test_login_caches_the_token_per_account(api) -> None:
-    calls, state = api
+    _calls, state = api
     acc = uuid.uuid4()
     assert await eskiz.token_for(acc, "ses@example.uz", "secret") == "tok-1"
     assert await eskiz.token_for(acc, "ses@example.uz", "secret") == "tok-1" and state["logins"] == 1
@@ -88,7 +117,7 @@ async def test_a_rejected_token_means_one_fresh_login_and_a_second_try(api) -> N
 
 
 async def test_errors_are_sorted_into_give_up_and_retry(api) -> None:
-    calls, state = api
+    _calls, state = api
     acc = uuid.uuid4()
     with pytest.raises(SmsProviderError) as rejected:
         await eskiz.send_with_account(acc, "ses@example.uz", "secret", "998901234567", "REJECT", "TEMO")
@@ -106,7 +135,7 @@ async def test_errors_are_sorted_into_give_up_and_retry(api) -> None:
 
 
 async def test_the_door_picks_the_provider(api, monkeypatch: pytest.MonkeyPatch) -> None:
-    calls, state = api
+    calls, _state = api
     acc = uuid.uuid4()
     esk = SmsAccount(key_enc=encrypt("secret"), priority="transactional", unit_id=uuid.uuid4(), account_id=acc, provider="eskiz", login="ses@example.uz", sender="TEMO")
     monkeypatch.setattr(settings, "eskiz_callback_url", "")
@@ -134,6 +163,72 @@ async def test_the_door_picks_the_provider(api, monkeypatch: pytest.MonkeyPatch)
     assert sms.test_text(xab, "default") == "default"
     with pytest.raises(SmsProviderError):
         await sms.send(SmsAccount(key_enc=encrypt("x"), priority="bulk", unit_id=uuid.uuid4(), provider="none"), "998901234567", "x")
+
+
+async def test_the_account_surface_is_read_tolerantly(api) -> None:
+    _calls, _state = api
+    tok = await eskiz.login("ses@example.uz", "secret")
+    assert (await eskiz.me(tok))["name"] == "Xorazm SES"
+    assert await eskiz.nicks(tok) == ["4546", "XORAZMSES"]
+    assert await eskiz.prices(tok) == [{"operator": "Beeline", "price": 95.0, "countryCode": "UZ"}, {"operator": "Ucell", "price": 100.0, "countryCode": "UZ"}, {"operator": "UMS", "price": 110.0, "countryCode": "UZ"}]
+    assert await eskiz.templates(tok) == [{"id": "1", "text": "Natija tayyor: {link}", "status": "service"}, {"id": "2", "text": "Chek", "status": "moderation"}]
+    assert (await eskiz.create_template(tok, "Eslatma: {service}"))["status"] == "moderation"
+    checked = await eskiz.check_message(tok, "Salom dunyo")
+    assert checked and (checked["length"], checked["parts"], checked["price"]) == (11, 2, 190.0)
+    st = await eskiz.status_by_id(tok, "req-1")
+    assert st and st["status"] == "DELIVERED" and st["total_price"] == 190
+    assert await eskiz.status_by_id(tok, "unknown") is None
+    assert await eskiz.messages_by_dispatch(tok, 123456789) == [{"user_sms_id": "k1", "status": "DELIVERED"}, {"user_sms_id": "k2", "status": "REJECTED"}]
+
+
+async def test_batch_and_global_sends(api) -> None:
+    calls, _state = api
+    acc = uuid.uuid4()
+    esk = SmsAccount(key_enc=encrypt("secret"), priority="transactional", unit_id=uuid.uuid4(), account_id=acc, provider="eskiz", login="ses@example.uz", sender="TEMO")
+    r = await sms.send_batch(esk, [{"user_sms_id": "k1", "to": "998901234567", "text": "A"}, {"user_sms_id": "k2", "to": "998901234568", "text": "B"}], 123456789)
+    assert r["id"] == "batch-req-1" and r["status"] == ["waiting", "waiting"]
+    body = next(c[2] for c in calls if c[0] == "BATCH")
+    assert body["from"] == "TEMO" and body["dispatch_id"] == 123456789 and [m["user_sms_id"] for m in body["messages"]] == ["k1", "k2"]
+    g = await sms.send(esk, "77011234567", "Привет", country_code="KZ")
+    assert g.provider_id == "global-req-1"
+    sent = calls[-1][2]
+    assert sent == {"mobile_phone": "77011234567", "message": "Привет", "country_code": "KZ", "unicode": "1"}
+    xab = SmsAccount(key_enc=encrypt("xab"), priority="urgent", unit_id=uuid.uuid4(), account_id=uuid.uuid4())
+    with pytest.raises(SmsProviderError):
+        await sms.send(xab, "77011234567", "hi", country_code="KZ")
+    assert sms.is_abroad("kz") and not sms.is_abroad("UZ") and not sms.is_abroad(None)
+
+
+def test_sync_applies_eskiz_states_to_rows() -> None:
+    now = datetime(2026, 11, 12, 10, 0, tzinfo=UTC)
+    msg = SimpleNamespace(status="sent", error=None, payload={"x": 1}, updated_at=None)
+    assert eskiz_sync.apply_status(msg, {"status": "ACCEPTED", "parts": [{"dlr_state": "ACCEPTED"}], "parts_count": 1, "price": 95}, now) is None
+    assert msg.status == "sent" and msg.payload["eskiz"]["status"] == "ACCEPTED" and msg.payload["eskiz"]["parts"] == 1 and msg.payload["x"] == 1
+    assert eskiz_sync.apply_status(msg, {"status": "DELIVERED", "parts_count": 2, "total_price": 190, "smsc_id": 3}, now) == "delivered"
+    assert msg.status == "delivered" and msg.payload["eskiz"]["totalPrice"] == 190.0 and msg.payload["eskiz"]["smsc"] == "3"
+    # delivered never goes back; a failed part fails the message
+    assert eskiz_sync.apply_status(msg, {"status": "ACCEPTED", "parts": [{"dlr_state": "EXPIRED"}]}, now) is None and msg.status == "delivered"
+    other = SimpleNamespace(status="sent", error=None, payload={}, updated_at=None)
+    assert eskiz_sync.apply_status(other, {"status": "ACCEPTED", "parts": [{"dlr_state": "UNDELIV"}]}, now) == "failed"
+    assert other.status == "failed" and other.error == "eskiz:UNDELIV"
+    unknown = SimpleNamespace(status="sent", error=None, payload={}, updated_at=None)
+    assert eskiz_sync.apply_status(unknown, None, now) is None and unknown.payload["eskiz"]["syncedAt"] == now.isoformat()
+
+
+def test_the_dispatcher_groups_eskiz_messages_into_batches() -> None:
+    esk_id, xab_id = uuid.uuid4(), uuid.uuid4()
+    accounts = {
+        esk_id: MessagingAccount(id=esk_id, unit_id=uuid.uuid4(), channel="sms", provider="eskiz", api_key_enc=encrypt("s"), login="a@b", sender="4546", is_active=True),
+        xab_id: MessagingAccount(id=xab_id, unit_id=uuid.uuid4(), channel="sms", provider="xabarchi", api_key_enc=encrypt("k"), is_active=True),
+    }
+    mk = lambda acc, payload=None, channel="sms": SimpleNamespace(channel=channel, account_id=acc, payload=payload or {})  # noqa: E731
+    rows = [mk(esk_id), mk(esk_id), mk(esk_id, {"countryCode": "KZ"}), mk(xab_id), mk(xab_id), mk(None), mk(esk_id, channel="telegram")]
+    batches, singles = dispatcher._group_for_batch(rows, accounts)
+    assert len(batches) == 1 and batches[0][0].provider == "eskiz" and batches[0][1] == rows[:2]
+    assert singles == [rows[2], rows[3], rows[4], rows[5], rows[6]]
+    # a lone Eskiz message stays single
+    batches, singles = dispatcher._group_for_batch([rows[0]], accounts)
+    assert batches == [] and singles == [rows[0]]
 
 
 def test_an_eskiz_row_needs_its_login() -> None:

@@ -24,6 +24,7 @@ from app.modules.reports.schemas import (
     ResultRowOut,
     ResultsReportOut,
     ServicesReportOut,
+    SmsReportOut,
 )
 
 router = APIRouter()
@@ -72,6 +73,25 @@ async def results_report(scope: Scope, q: Annotated[RangeQuery, Query()], staff:
 async def results_list(scope: Scope, q: Annotated[ResultListQuery, Query()], staff: Staff, session: DbSession) -> Page[ResultRowOut]:
     staff.require(*REPORT_READ)
     return await service.results_list(session, scope, q, staff)
+
+
+@router.get("/units/{unit_id}/reports/sms", response_model=SmsReportOut, summary="SMS of the period: by territory (facility / district / region), day, kind, provider — counts, deliveries, failures, cost")
+async def sms_report(scope: Scope, q: Annotated[RangeQuery, Query()], staff: Staff, session: DbSession) -> SmsReportOut:
+    staff.require(*REPORT_READ)
+    return await service.sms_report(session, scope, q, staff)
+
+
+@router.get("/units/{unit_id}/reports/sms/export.xlsx", summary="The SMS report as an Excel workbook (territories, days, kinds, providers)", response_class=Response,
+            responses={200: {"content": {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {}}}})
+async def export_sms_report(scope: Scope, q: Annotated[ReportExportQuery, Query()], staff: Staff, session: DbSession) -> Response:
+    staff.require("reports.export")
+    data = await service.export_sms_workbook(session, scope, q, staff)
+    stamp = q.date_from + (f"_{q.date_to}" if q.date_to != q.date_from else "")
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="sms-hisobot-{stamp}.xlsx"', "Cache-Control": "no-store"},
+    )
 
 
 @router.get("/units/{unit_id}/reports/services", response_model=ServicesReportOut, summary="Service usage vs the previous period; active services nobody ordered")

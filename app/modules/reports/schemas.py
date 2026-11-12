@@ -205,3 +205,46 @@ class ServicesReportOut(CamelModel):
     prev_total: int
     rows: list[ServiceUsageRow]
     unused: list[UnusedServiceRow]
+
+
+# ----------------------------------------------------------------------------- SMS
+
+
+class SmsCounts(CamelModel):
+    """Messages of a slice by what became of them, plus what they cost (Eskiz only, once Eskiz said so)."""
+
+    total: int = 0
+    queued: int = 0
+    sent: int = 0
+    delivered: int = 0
+    failed: int = 0
+    cancelled: int = 0
+    cost: float = 0
+
+
+class SmsDayRow(SmsCounts):
+    date: str
+
+
+class SmsUnitRow(SmsCounts):
+    unit_id: str
+    name: str
+    level: str
+    region_name: str | None = None
+    district_name: str | None = None
+
+
+class SmsSliceRow(SmsCounts):
+    key: str
+
+
+class SmsReportOut(CamelModel):
+    """SMS of the period under the scope: totals, per day, per facility (with its region / district for grouping),
+    per kind, per provider and per operator (Eskiz's `smsc`)."""
+
+    totals: SmsCounts
+    by_day: list[SmsDayRow]
+    by_unit: list[SmsUnitRow]
+    by_kind: list[SmsSliceRow]
+    by_provider: list[SmsSliceRow]
+    by_operator: list[SmsSliceRow]

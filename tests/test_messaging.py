@@ -77,6 +77,7 @@ def h(ctx: dict, who: str) -> dict[str, str]:
 OUTBOX_KEYS = {
     "id", "unitId", "unitName", "patientId", "orderId", "channel", "kind", "to", "text", "status",
     "scheduledAt", "sentAt", "attempts", "providerMessageId", "error", "createdAt", "updatedAt",
+    "countryCode", "parts", "cost", "providerStatus",
 }  # fmt: skip
 
 

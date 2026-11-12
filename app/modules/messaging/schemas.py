@@ -58,6 +58,13 @@ class OutboxMessageOut(CamelModel):
     error: str | None = None
     created_at: datetime
     updated_at: datetime
+    #: a number abroad: the ISO-2 country it was sent to
+    country_code: str | None = None
+    #: Eskiz: how many parts the message took and what it cost (so‘m), once Eskiz said so
+    parts: int | None = None
+    cost: float | None = None
+    #: Eskiz: the provider's own state word (DELIVERED, EXPIRED …)
+    provider_status: str | None = None
 
     @field_validator("status", mode="before")
     @classmethod
@@ -73,6 +80,8 @@ class SendIn(CamelModel):
     scheduled_at: datetime | None = None
     #: the facility the message goes out from — required when the path unit is not a facility itself
     unit_id: str | None = Field(default=None, max_length=64)
+    #: ISO-2 country of the recipients (default UZ); another country = full international numbers, sent through Eskiz
+    country_code: str | None = Field(default=None, min_length=2, max_length=2, pattern=r"^[A-Za-z]{2}$")
 
     @field_validator("scheduled_at")
     @classmethod

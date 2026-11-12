@@ -217,6 +217,62 @@ class SmsTestOut(CamelModel):
     balance: int | None = None
 
 
+class EskizPriceOut(CamelModel):
+    operator: str
+    #: so‘m per message part
+    price: float
+    country_code: str | None = None
+
+
+class EskizTemplateOut(CamelModel):
+    id: str
+    text: str
+    #: moderation | inproccess | service | reklama | rejected
+    status: str
+
+
+class EskizInfoOut(CamelModel):
+    """The Eskiz account in effect for a unit, as Eskiz sees it (cached for a minute): balance, approved sender
+    names, prices per operator, templates and their moderation state."""
+
+    configured: bool = False
+    account_unit_id: str | None = None
+    account_unit_name: str | None = None
+    login: str | None = None
+    sender: str | None = None
+    balance: int | None = None
+    low_balance: bool = False
+    nicks: list[str] = Field(default_factory=list)
+    prices: list[EskizPriceOut] = Field(default_factory=list)
+    templates: list[EskizTemplateOut] = Field(default_factory=list)
+    user_name: str | None = None
+    user_status: str | None = None
+    fetched_at: datetime | None = None
+    #: Eskiz could not be asked (wrong credentials, unreachable) — the rest is empty
+    error: str | None = None
+
+
+class EskizTemplateIn(CamelModel):
+    text: str = Field(min_length=3, max_length=1000)
+
+
+class SmsCheckIn(CamelModel):
+    text: str = Field(max_length=2000)
+
+
+class SmsCheckOut(CamelModel):
+    """What one text costs with the account in effect: parts the operators bill and, for Eskiz, the price."""
+
+    provider: SmsProvider = "none"
+    encoding: str
+    length: int
+    parts: int
+    price_from: float | None = None
+    price_to: float | None = None
+    #: Eskiz: the moderation state of a template with exactly this text, when one exists
+    template_status: str | None = None
+
+
 class TelegramSettingsIn(CamelModel):
     """`botToken` null/empty disconnects the unit's own bot; a value is validated against Telegram `getMe`."""
 

@@ -260,6 +260,12 @@ birlik va ostidagilar uchun SMS’ni o‘chiradi.
    outbox'da Eskiz xabari bilan «failed» bo‘ladi.
 5. Yetkazilganlik hisoboti: `ESKIZ_CALLBACK_URL` (yoki `PUBLIC_API_URL` asosida) → `POST /api/v1/messaging/eskiz/callback` —
    outbox qatori `delivered` / `failed` bo‘ladi.
+6. Callback kelmasa ham holat yangilanadi: har 5 daqiqada (maintenance) oxirgi 3 kunda yuborilgan xabarlar Eskiz’dan
+   so‘raladi (`status_by_id` / paket ro‘yxati) — qismlar soni va narxi ham yoziladi (Xabarlar sahifasida ko‘rinadi).
+7. Ikki va undan ko‘p xabar bitta Eskiz hisobidan **bitta paket** (`send-batch`) bo‘lib ketadi; xorijiy raqamlar
+   (`countryCode` ≠ UZ) `send-global` orqali. SMS sozlamalarida Eskiz paneli: balans, narxlar, yuboruvchi nomlari,
+   shablonlar va moderatsiyaga yuborish; matn tahririda narx va qismlar soni. Hisobotlar → **SMS**: hudud / kun / tur /
+   provayder / operator kesimida soni, yetkazilgani, xatosi, xarajati, Excel.
 
 ## Testlar va sifat
 
