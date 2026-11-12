@@ -24,7 +24,9 @@ from app.core.permissions import (
     INSTALLER_ROLE_KEY,
     PLATFORM_PERMISSIONS,
     PROTECTED_ROLE_KEYS,
+    RESERVED_ROLE_KEYS,
     invalid_permission_keys,
+    leader_level,
     normalize_key,
 )
 from app.core.schemas import Page
@@ -229,6 +231,37 @@ def _check_installer_scope(role: Role, unit_id: uuid.UUID | None, extra: Sequenc
             raise ValidationError(INSTALLER_SCOPE_ERROR, code="installer_scope", details={"field": "unitIds"})
 
 
+LEVEL_UZ = {"country": "davlat", "region": "viloyat", "district": "tuman", "facility": "muassasa"}
+
+
+def _leader_level(role: Role) -> str | None:
+    """The level a system leader role («… rahbari») is pinned to; None for every other role."""
+    return leader_level(role.key) if role.scope_unit_id is None else None
+
+
+def _check_leader_scope(role: Role, unit_id: uuid.UUID | None, extra: Sequence[uuid.UUID], units: dict[uuid.UUID, OrgUnit]) -> None:
+    """A leader is homed on a node of the role's own level — «Viloyat rahbari» on a region, «Muassasa rahbari» on a
+    facility … — and may get more nodes of the SAME level in the same country as extra units (422 `leader_scope`)."""
+    level = _leader_level(role)
+    if level is None:
+        return
+    name = LEVEL_UZ[level]
+    msg = f"«{role.name}» {name} tuguniga biriktiriladi; qo‘shimcha birliklar — shu davlatning boshqa {name} tugunlari"
+    home = units.get(unit_id) if unit_id else None
+    if home is None or home.level != level:
+        raise ValidationError(msg, code="leader_scope", details={"field": "unitId", "level": level})
+    for u in extra:
+        row = units.get(u)
+        if row is None or row.level != level or row.country_id != home.country_id:
+            raise ValidationError(msg, code="leader_scope", details={"field": "unitIds", "level": level})
+
+
+def _check_role_scope(role: Role, unit_id: uuid.UUID | None, extra: Sequence[uuid.UUID], units: dict[uuid.UUID, OrgUnit]) -> None:
+    """The shape rules of the system roles that have one: installer (country / region), leaders (their level)."""
+    _check_installer_scope(role, unit_id, extra, units)
+    _check_leader_scope(role, unit_id, extra, units)
+
+
 def _guard_super_admin_flag(value: bool | None, staff: StaffPrincipal) -> bool | None:
     if value is not None and not staff.is_super_admin:
         raise ForbiddenError("Ruxsat yo‘q")
@@ -333,7 +366,7 @@ async def create_employee(session: AsyncSession, scope: UnitScope, body: Employe
             raise NotFoundError(UNIT_NOT_FOUND)
         units = await _alive_units(session, [unit_id, *extra])
     role = await _resolve_role(session, body.role_id, unit_id, staff)
-    _check_installer_scope(role, unit_id, extra, units)
+    _check_role_scope(role, unit_id, extra, units)
     emp = Employee(
         unit_id=unit_id,
         full_name=body.full_name,
@@ -428,9 +461,9 @@ async def update_employee(session: AsyncSession, employee_id: uuid.UUID, body: E
         emp.role_id = role.id
     if not emp.is_super_admin and (role is not None or extra is not None):
         role = role or (await session.get(Role, emp.role_id) if emp.role_id else None)
-        if role is not None and _is_installer_role(role):
+        if role is not None and (_is_installer_role(role) or _leader_level(role)):
             scope_ids = [emp.unit_id, *(extra if extra is not None else extra_before)]
-            _check_installer_scope(role, emp.unit_id, scope_ids[1:], await _alive_units(session, [u for u in scope_ids if u]))
+            _check_role_scope(role, emp.unit_id, scope_ids[1:], await _alive_units(session, [u for u in scope_ids if u]))
 
     if body.category_ids is not None:
         emp.category_ids = _parse_ids(body.category_ids, "categoryId")
@@ -546,7 +579,8 @@ def _role_snapshot(r: Role) -> dict[str, Any]:
 
 def _validate_role_key(key: str) -> str:
     key = slugify(key)
-    if key in PROTECTED_ROLE_KEYS:
+    # the system keys, in either spelling (`slugify` writes `leader-region` for `leader_region`)
+    if key in RESERVED_ROLE_KEYS or key.replace("-", "_") in RESERVED_ROLE_KEYS:
         raise ValidationError("Bu rol kaliti band (tizim uchun ajratilgan)", code="reserved")
     return key
 

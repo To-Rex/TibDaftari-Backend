@@ -20,6 +20,15 @@ def principal(perms: list[str], *, super_admin: bool = False):
     )
 
 
+def test_a_leader_gets_the_read_tools_only() -> None:
+    from app.core.permissions import LEADER_PERMISSIONS
+
+    mine = tools.tools_for(principal(list(LEADER_PERMISSIONS)))
+    assert {t.name for t in mine} >= {"whoami", "list_units", "dashboard", "breakdown", "list_orders", "search_patients", "list_employees", "export_data", "export_chart"}
+    assert all(t.kind == "read" for t in mine)
+    assert not ({"update_unit", "create_employee", "create_patient", "send_sms", "set_template_status"} & {t.name for t in mine})
+
+
 def test_tools_follow_the_keys_of_the_role() -> None:
     names = {
         t.name

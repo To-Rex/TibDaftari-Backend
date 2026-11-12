@@ -50,6 +50,45 @@ RENAMED: dict[str, str] = {
     "platform.company.manage": "platform.unit.manage",
 }
 
+#: what a territory's rahbar may do: look at everything inside their units — reports, statistics, lists, cards,
+#: documents, the assistant's read tools — and change nothing (no write / approve / send / manage key at all)
+LEADER_PERMISSIONS: tuple[str, ...] = (
+    "reception.patient.read",
+    "lab.worklist.read",
+    "confirm.result.read", "confirm.result.view",
+    "reports.finance.read", "reports.operations.read", "reports.export",
+    "admin.unit.read", "admin.employee.read", "admin.catalog.read", "admin.template.read",
+    ASSISTANT_PERMISSION,
+)
+#: the four read-only leader roles, one per level of the tree: role key → the level the employee is homed at
+#: («Davlat rahbari» sits on a country node, «Viloyat rahbari» on a region, …); extra units = more nodes of the
+#: same level in the same country
+LEADER_ROLES: dict[str, str] = {
+    "leader_country": "country",
+    "leader_region": "region",
+    "leader_district": "district",
+    "leader_facility": "facility",
+}
+LEADER_ROLE_NAMES: dict[str, str] = {
+    "leader_country": "Davlat rahbari",
+    "leader_region": "Viloyat rahbari",
+    "leader_district": "Tuman rahbari",
+    "leader_facility": "Muassasa rahbari",
+}
+LEADER_ROLE_KEYS = frozenset(LEADER_ROLES)
+#: permission actions that only look (the leader set is made of these alone)
+READ_ACTIONS = frozenset({"read", "view", "recent", "export", "use"})
+
+
+def is_read_permission(key: str) -> bool:
+    return key.rsplit(".", 1)[-1] in READ_ACTIONS
+
+
+def leader_level(key: str | None) -> str | None:
+    """The tree level a leader role is pinned to (None for every other role key)."""
+    return LEADER_ROLES.get(key or "")
+
+
 SUPERADMIN_ROLE_KEY = "superadmin"
 #: O‘rnatuvchi — like a superadmin, but only inside the units a superadmin gave them (their viloyat, several
 #: viloyats, or a whole country); they never cross into another country
@@ -57,6 +96,8 @@ INSTALLER_ROLE_KEY = "installer"
 ADMIN_ROLE_KEY = "admin"
 #: roles only a superadmin may grant, and whose holders only a superadmin may edit or remove
 PROTECTED_ROLE_KEYS = frozenset({SUPERADMIN_ROLE_KEY, INSTALLER_ROLE_KEY})
+#: keys a unit role may not take (system roles live under them)
+RESERVED_ROLE_KEYS = PROTECTED_ROLE_KEYS | LEADER_ROLE_KEYS
 #: where an installer may be homed (extra units: regions of the same country)
 INSTALLER_HOME_LEVELS = frozenset({"country", "region"})
 INSTALLER_EXTRA_LEVELS = frozenset({"region"})
@@ -83,8 +124,9 @@ def invalid_permission_keys(keys: Iterable[str]) -> list[str]:
     return [k for k in keys if normalize_key(k) not in PERMISSION_SET]
 
 
-# System roles (scope_unit_id NULL) — seeded by db/v2/21_seed_roles.sql with fixed ids; keys are stable machine names
-# used by the frontend. WHERE a role applies comes from the employee's unit.
+# System roles (scope_unit_id NULL) — seeded by db/v2/21_seed_roles.sql (+ 32_, 36_) with fixed ids; keys are stable
+# machine names used by the frontend. WHERE a role applies comes from the employee's unit — except the four leader
+# roles, which are pinned to one level of the tree each (`LEADER_ROLES`).
 SYSTEM_ROLES: tuple[dict, ...] = (
     {"key": SUPERADMIN_ROLE_KEY, "name": "Superadmin", "is_system": True, "permissions": list(PERMISSIONS)},
     {"key": INSTALLER_ROLE_KEY, "name": "O‘rnatuvchi", "is_system": True, "permissions": list(INSTALLER_PERMISSIONS)},
@@ -125,6 +167,8 @@ SYSTEM_ROLES: tuple[dict, ...] = (
             "reception.payment.late_edit", ASSISTANT_PERMISSION,
         ],
     },
+    # the read-only leaders of a territory (db/v2/36_leader_roles.sql)
+    *({"key": key, "name": name, "is_system": True, "permissions": list(LEADER_PERMISSIONS)} for key, name in LEADER_ROLE_NAMES.items()),
 )
 #: kept for callers written against v1 naming
 DEFAULT_COMPANY_ROLES = SYSTEM_ROLES

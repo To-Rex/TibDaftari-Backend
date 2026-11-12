@@ -116,6 +116,7 @@ raqamlari davom etadi). `29_`/`30_` Alembic baseline’ga kirmaydi — ular faqa
 | `create-country-root --country UZ --name "…" [--short-name …] [--code UZ]` | Daraxtning davlat tuguni (bo‘lmasa yaratadi) va davlatni yoqadi |
 | `create-superadmin --login L --password P --name "F.I.O."` | Platforma superadmini: tizim `superadmin` roli, birliksiz (`is_super_admin`), hamma narsani ko‘radi |
 | *(UI: Xodimlar → rol «O‘rnatuvchi»)* | Hudud o‘rnatuvchisi: superadmin kabi, lekin faqat o‘z viloyati (yoki butun davlati) va superadmin bergan qo‘shimcha viloyatlar ichida; boshqa davlatga chiqolmaydi. Faqat superadmin beradi |
+| *(UI: Xodimlar → rol «Davlat / Viloyat / Tuman / Muassasa rahbari»)* | Faqat ko‘ruvchi rahbar: o‘z darajasidagi tugunga (davlat, viloyat, tuman yoki muassasa) biriktiriladi, hududidagi hamma hisobot, statistika, ro‘yxat va hujjatlarni ko‘radi, hech narsani o‘zgartirmaydi |
 | `set-password --login L --password P` | Xodim parolini almashtiradi, blokirovkani tozalaydi |
 | `ensure-partitions [--months 3]` | `SELECT ensure_audit_partitions(n)` |
 

@@ -113,9 +113,22 @@ verbatim in the UI.
   units (scope subtree). `reports.finance.recent` stays on the role: if an admin takes `reports.finance.read`
   away, the 7-day cap applies again.
   Effective = role.permissions ∪ overrides.allow − overrides.deny (deny wins).
-* System roles (`scopeUnitId` null — available everywhere; fixed ids in `21_seed_roles.sql` + `32_installer_role.sql`):
-  `superadmin` (all 37), `installer` ("O‘rnatuvchi": all except platform.* — incl. `admin.unit.reset`), `admin` (all
-  except platform.* and reset), `registrator`, `laborant`, `vrach`, `rahbar`.
+* System roles (`scopeUnitId` null — available everywhere; fixed ids in `21_seed_roles.sql` + `32_installer_role.sql`
+  + `36_leader_roles.sql`): `superadmin` (all 37), `installer` ("O‘rnatuvchi": all except platform.* — incl.
+  `admin.unit.reset`), `admin` (all except platform.* and reset), `registrator`, `laborant`, `vrach`, `rahbar`, and
+  the four read-only leaders `leader_country` / `leader_region` / `leader_district` / `leader_facility`.
+* **Leaders — «Davlat / Viloyat / Tuman / Muassasa rahbari»** (2026-11-12): read-only accounts for the heads of a
+  territory. `LEADER_PERMISSIONS` = reception.patient.read, lab.worklist.read, confirm.result.read + view,
+  reports.finance.read + operations.read + export, admin.unit.read + employee.read + catalog.read + template.read,
+  assistant.use — only read / view / export / use actions (`is_read_permission`), so they see every report,
+  statistic, list, card and document inside their units (and the assistant's read + export tools) and can change
+  nothing: every write / approve / send / manage endpoint answers 403 as for any role without the key. Each role is
+  pinned to ONE level of the tree (`LEADER_ROLES`): the home unit must be a node of that level — a country node for
+  the davlat rahbari, a region for the viloyat rahbari, a district for the tuman rahbari, a facility for the
+  muassasa rahbari — and extra units may only be more nodes of the same level in the same country; anything else
+  → 422 `leader_scope` (create, move, re-role). Unit administrators grant them inside their own scope like any
+  role (a facility administrator a muassasa rahbari, a region administrator a viloyat rahbari); the keys are
+  reserved (422 `reserved`). The session carries `roleName` («Viloyat rahbari») next to `roleKey`.
 * **O‘rnatuvchi (installer)** — a superadmin of one territory. Works like a superadmin inside the units a superadmin
   gave the employee and nowhere else: home unit = a **region** (their viloyat) or the **country** node (the whole
   country); extra units = other **regions of the same country**. Any other shape → 422 `installer_scope`. The role
@@ -131,7 +144,7 @@ verbatim in the UI.
   carries `roleId` so the UI can lock the matching controls. A role says WHAT; the employee's
   unit says WHERE — the same `rahbar` attached to a region node is a viloyat rahbari, on a facility a muassasa
   rahbari. Unit-scoped roles (`scopeUnitId` = a unit; usable in its subtree) are created under a unit (§3).
-* **StaffSession** `{actor:'staff', employeeId, unitId, unitIds, unit {id, level, name, code, countryId, path}, facilityId, isSuperAdmin, roleKey, fullName, permissions[], accessToken, expiresAt}`; `unitId` = the home unit (any level; null for a superadmin, who picks any unit of the tree); `unitIds` = every scope root (home + extra units — the UI switches among these subtrees); `facilityId` = the home unit when it is a facility (where this employee's cheques are written); `isSuperAdmin = employee.is_super_admin` (**FIX**: not derived from a client-editable role key); `roleKey = role.key`; staff token TTL 12h (fixed - the JWT `exp` is immutable and the SPA keeps the login token; `staffMe` only records `lastSeenAt`).
+* **StaffSession** `{actor:'staff', employeeId, unitId, unitIds, unit {id, level, name, code, countryId, path}, facilityId, isSuperAdmin, roleKey, roleName, roleId, fullName, permissions[], accessToken, expiresAt}`; `unitId` = the home unit (any level; null for a superadmin, who picks any unit of the tree); `unitIds` = every scope root (home + extra units — the UI switches among these subtrees); `facilityId` = the home unit when it is a facility (where this employee's cheques are written); `isSuperAdmin = employee.is_super_admin` (**FIX**: not derived from a client-editable role key); `roleKey = role.key`; staff token TTL 12h (fixed - the JWT `exp` is immutable and the SPA keeps the login token; `staffMe` only records `lastSeenAt`).
 * `staffLogin`: login trimmed + case-insensitive; password argon2 verify; wrong either → 401 auth_error "Login yoki parol noto‘g‘ri"; inactive → 403 inactive; on success set lastLoginAt; **FIX** rate limit + lockout (settings) → 429.
 * `staffMe(token)`: rebuild session from DB each call (role changes apply immediately); revoked/expired → 401 "Sessiya tugagan". The principal (permissions + allowed unit set) is cached as `principal:{employeeId}` and dropped on every employee, role or org-tree write.
 * Patient OTP: `requestPatientOtp(phone)`: digits; 9 digits → prefix 998; must match `^998\d{9}$` else 422 invalid_phone; find the patient by phone in the national registry (oldest by created_at) else 404 "Bu raqam bilan bemor topilmadi. Klinikaga murojaat qiling."; challenge TTL 5 min; code random N digits (settings.otp_length; **dev mode: returned as devCode**), delivered as SMS (kind otp) through the patient's home unit — `patient_home_unit`: the registering facility, else the facility of the latest cheque — when an SMS account is in effect there (§8); resend cooldown 60s per phone (429).

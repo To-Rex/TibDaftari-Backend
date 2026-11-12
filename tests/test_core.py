@@ -8,7 +8,15 @@ from app.core import textutil, timeutil
 from app.core.crypto import decrypt, encrypt
 from app.core.ids import uuid7
 from app.core.pagination import total_pages
-from app.core.permissions import PERMISSIONS, invalid_permission_keys, resolve_permissions
+from app.core.permissions import (
+    LEADER_PERMISSIONS,
+    LEADER_ROLES,
+    PERMISSIONS,
+    SYSTEM_ROLES,
+    invalid_permission_keys,
+    is_read_permission,
+    resolve_permissions,
+)
 from app.core.security import decode_token, hash_password, issue_token, mask_secret, verify_password
 
 
@@ -41,6 +49,11 @@ def test_permissions_resolution() -> None:
     assert perms == ["lab.worklist.read", "reports.export"]
     assert invalid_permission_keys(["lab.worklist.read", "nope"]) == ["nope"]
     assert len(PERMISSIONS) == 37
+    # the leaders' set: catalogue keys only, every one of them a look (read / view / export / use)
+    assert set(LEADER_PERMISSIONS) <= set(PERMISSIONS)
+    assert all(is_read_permission(p) for p in LEADER_PERMISSIONS)
+    assert not any(is_read_permission(p) for p in ("admin.unit.write", "confirm.result.approve", "messaging.send", "reception.payment.late_edit"))
+    assert {r["key"] for r in SYSTEM_ROLES} >= set(LEADER_ROLES) and all(r["permissions"] == list(LEADER_PERMISSIONS) for r in SYSTEM_ROLES if r["key"] in LEADER_ROLES)
 
 
 def test_password_and_tokens() -> None:
