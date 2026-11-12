@@ -33,7 +33,7 @@ tests/                    pytest (unit + API tests against a throwaway database 
 docs/                     DOMAIN_RULES.md (behaviour), RENDERER_SPEC.md (PDF), V2_PORT.md (company/branch → org tree contract)
 ```
 
-Modules: `auth`, `assistant` (the AI assistant: tools over the services, confirmed writes, files on request — `export.py`, per-unit / platform model accounts), `units` (organisation tree, inherited SMS / texts / Telegram settings, superadmin reset, quick start), `staff`,
+Modules: `auth`, `assistant` (the AI assistant: tools over the services, confirmed writes, files on request — `export.py` tables, `render.py` documents and charts, per-unit / platform model accounts), `units` (organisation tree, inherited SMS / texts / Telegram settings, superadmin reset, quick start), `staff`,
 `patients` (+ geo reference), `catalog`, `templates` (+ renderer), `orders`, `messaging`, `reports`, `platform`
 (territory activity view), `portal`, `telegram`, `files`, `health`.
 

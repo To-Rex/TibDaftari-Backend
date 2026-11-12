@@ -313,6 +313,51 @@ def test_export_tools_build_a_file_the_owner_downloads(ctx: dict, fake: FakeProv
     assert "export_data" not in {t["name"] for t in st["tools"]} and "export_table" not in {t["name"] for t in st["tools"]}
 
 
+def test_documents_and_charts_are_files_too(ctx: dict, fake: FakeProvider) -> None:
+    c: TestClient = ctx["client"]
+    tid = new_thread(ctx, "admin-a", ctx["a"]["region"])
+    # a report the model wrote → Word
+    fake.call("export_document", {"title": "Oylik hisobot", "content": "# Oylik hisobot\n\nKirish **qisqa**.\n\n## Ko‘rsatkichlar\n- cheklar: 120\n- tushum: 1 200 000\n\n| Nomi | Soni |\n|---|---|\n| A | 1 |\n", "format": "word"})
+    fake.say("Hisobot tayyor.")
+    out = send(ctx, "admin-a", tid, "Oylik hisobotni Word qilib ber")
+    f = out["messages"][1]["toolCalls"][0]["file"]
+    assert f["name"] == "oylik-hisobot-" + f["createdAt"][:10] + ".docx" or f["name"].endswith(".docx")
+    r = c.get(f"{API}/assistant/files/{f['id']}", headers=h(ctx, "admin-a"))
+    assert r.status_code == 200 and r.content[:2] == b"PK" and "wordprocessingml" in r.headers["content-type"]
+    assert '"sections": ["Ko‘rsatkichlar"]' in fake.calls[1]["turns"][-1].content
+    # the same as PDF
+    fake.call("export_document", {"title": "Oylik hisobot", "content": "Matn.", "format": "pdf"})
+    fake.say("PDF tayyor.")
+    out = send(ctx, "admin-a", tid, "PDF ham")
+    f = out["messages"][1]["toolCalls"][0]["file"]
+    r = c.get(f"{API}/assistant/files/{f['id']}", headers=h(ctx, "admin-a"))
+    assert r.status_code == 200 and r.content[:5] == b"%PDF-"
+    # a chart from data the model gives → PNG, previewable in the chat
+    fake.call("export_chart", {"title": "Tushum", "type": "bar", "labels": ["A", "B"], "series": [{"name": "so‘m", "values": [1200000, 540000]}]})
+    fake.say("Diagramma tayyor.")
+    out = send(ctx, "admin-a", tid, "Diagramma qil")
+    f = out["messages"][1]["toolCalls"][0]["file"]
+    assert f["name"].endswith(".png") and f["rows"] == 2
+    r = c.get(f"{API}/assistant/files/{f['id']}", headers=h(ctx, "admin-a"))
+    assert r.status_code == 200 and r.content[:4] == b"\x89PNG" and r.headers["content-type"] == "image/png"
+    # a chart straight from a dataset (units of the fixture tree, counted by level) → SVG
+    fake.call("export_chart", {"title": "Birliklar", "type": "bar", "format": "svg", "dataset": "units", "params": {"search": ctx["tag"]}, "x": "name", "y": ["counts.facilities"], "limit": 5})
+    fake.say("SVG tayyor.")
+    out = send(ctx, "admin-a", tid, "Birliklar diagrammasi")
+    call = out["messages"][1]["toolCalls"][0]
+    if call["status"] == "ok":
+        r = c.get(f"{API}/assistant/files/{call['file']['id']}", headers=h(ctx, "admin-a"))
+        assert r.status_code == 200 and r.content.startswith(b"<svg") and r.headers["content-type"].startswith("image/svg")
+    else:
+        # the fixture's unit DTO has no such column: the model gets the available ones back
+        assert "availableColumns" in fake.calls[7]["turns"][-1].content
+    # bad data is an error the model can fix, not a 500
+    fake.call("export_chart", {"title": "x", "type": "pie", "labels": [], "series": []})
+    fake.say("Ma’lumot yo‘q.")
+    out = send(ctx, "admin-a", tid, "bo‘sh diagramma")
+    assert out["messages"][1]["toolCalls"][0]["status"] == "error"
+
+
 # ----------------------------------------------------------------------------- reading
 
 

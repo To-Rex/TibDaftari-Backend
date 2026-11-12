@@ -65,6 +65,6 @@ def test_the_three_formats() -> None:
     data, ct = xp.build_file("json", "Cheklar", cols, rows)
     assert json.loads(data) == [{"number": "A-1", "total": 5000}, {"number": "A-2", "total": None}]
     with pytest.raises(ValidationError):
-        xp.build_file("pdf", "x", cols, rows)
+        xp.build_file("pptx", "x", cols, rows)
     assert xp.file_name(None, "Cheklar ro‘yxati", "xlsx", "2026-11-12").endswith("-2026-11-12.xlsx")
     assert xp.file_name("hisobot", None, "csv", "x") == "hisobot.csv" and xp.file_name("a/b.xlsx", None, "xlsx", "x") == "a-b.xlsx"

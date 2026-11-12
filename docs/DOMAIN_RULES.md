@@ -69,7 +69,7 @@ verbatim in the UI.
 | 422 | leaf / kind_required / code_required | Muassasa ostida birlik yaratib bo‘lmaydi · Muassasa turi tanlanmagan · Muassasa kodi kiritilmagan |
 | 422 | unit_required / ai_api_key_required / ai_base_url_required / ai_provider_required | Ish birligi tanlanmagan · AI provayder API kaliti kiritilmagan · Provayder manzili (base URL) kiritilmagan · AI provayder tanlanmagan  (assistant) |
 | 403 | platform_only | Platforma hisobini faqat superadmin boshqaradi (assistant) |
-| 422 | export_dataset / export_column / export_filter / export_format / export_range | Noma’lum to‘plam · Noma’lum ustun (availableColumns) · Filtr xatosi · Noma’lum fayl formati · dateFrom / dateTo kerak (assistant export tools — returned to the model as tool errors) |
+| 422 | export_dataset / export_column / export_filter / export_format / export_range / export_document / chart_type / chart_data | Noma’lum to‘plam · Noma’lum ustun (availableColumns) · Filtr xatosi · Noma’lum fayl formati · dateFrom / dateTo kerak (assistant export tools — returned to the model as tool errors) |
 | 409 | assistant_not_configured / action_resolved / action_expired | Yordamchi bu birlik uchun sozlanmagan … · Bu amal allaqachon yakunlangan · Tasdiqlash muddati o‘tdi — so‘rovni qayta yuboring |
 | 429 | assistant_rate_limited | Yordamchiga juda ko‘p so‘rov yuborildi — birozdan keyin davom eting |
 | 502 | ai_auth / ai_rate_limit / ai_model / ai_bad_request / ai_status / ai_connection | the model provider refused or was unreachable (message names the cause) |
@@ -330,9 +330,13 @@ verbatim in the UI.
     service with the caller's rights and the dataset's own read keys), server-side `filters` (eq / ne / contains /
     startsWith / endsWith / gt / gte / lt / lte / in / notIn / between / empty / notEmpty, AND-ed), `sort`, `columns`
     (titles in the user's language; ids dropped unless asked) and `limit` (≤ 10 000 rows); `export_table` does the
-    same for rows the model composed. The result is an `assistant_files` row (xlsx / csv ; -separated with BOM /
-    json, 7 days) shown on the tool call (`file`) and the message (`files`), downloaded by its owner only from
-    `GET /assistant/files/{id}` (404 otherwise or after expiry; purged by the maintenance worker).
+    same for rows the model composed; table formats xlsx / csv (;-separated, BOM) / json / pdf / docx / md / txt.
+    `export_document` turns Markdown the model wrote (report, letter, notice) into Word / PDF / md / txt
+    (`render.py`: Markdown-lite → fpdf2 with the renderer's DejaVu fonts, python-docx); `export_chart` draws a
+    bar / line / pie picture as PNG (Pillow, 1600×900) or SVG from data the model gives or from a dataset
+    (`x` = label column, `y` = value columns, same filters / sort / limit). Every result is an `assistant_files`
+    row (7 days) shown on the tool call (`file`) and the message (`files`; pictures preview inline), downloaded by
+    its owner only from `GET /assistant/files/{id}` (404 otherwise or after expiry; purged by the maintenance worker).
   * **Threads** (`GET/POST /assistant/threads`, `GET/DELETE /assistant/threads/{id}`): the caller's own only (404
     otherwise). `POST /assistant/threads/{id}/messages {content, unitId?}` (`unitId` = the working unit, inside the
     territory; else the thread's / home unit; a superadmin must name one → 422 `unit_required`): rate-limited per

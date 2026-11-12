@@ -25,6 +25,7 @@ from app.core.timeutil import utcnow
 from app.infrastructure.db.base import alive
 from app.infrastructure.db.models import AssistantFile, Role
 from app.modules.assistant import export as xp
+from app.modules.assistant import render as rd
 from app.modules.catalog import service as catalog_svc
 from app.modules.catalog.schemas import CategoryUpdateIn, ServiceTypeCreateIn, ServiceTypeQuery, ServiceTypeUpdateIn
 from app.modules.messaging import service as messaging_svc
@@ -523,7 +524,7 @@ DATASETS: dict[str, Dataset] = {
 FILTER_SCHEMA = {"type": "array", "description": "AND-ed row filters applied after loading: {column, op, value}; value is a list for in / notIn / between", "items": {"type": "object", "properties": {"column": {"type": "string"}, "op": {"type": "string", "enum": list(xp.OPS)}, "value": {"description": "string | number | boolean | list"}}, "required": ["column", "op"]}}
 SORT_SCHEMA = {"type": "array", "description": "sort order, first entry wins: {column, dir}", "items": {"type": "object", "properties": {"column": {"type": "string"}, "dir": {"type": "string", "enum": ["asc", "desc"]}}, "required": ["column"]}}
 COLUMNS_SCHEMA = {"type": "array", "description": "columns of the file in order: {key, title} (title in the user's language) or just the key; omitted = every column except ids", "items": {"type": "object", "properties": {"key": {"type": "string"}, "title": {"type": "string"}}, "required": ["key"]}}
-FORMAT_SCHEMA = {"type": "string", "enum": ["xlsx", "csv", "json"], "description": "default xlsx (Excel)"}
+FORMAT_SCHEMA = {"type": "string", "enum": list(xp.FORMATS), "description": "default xlsx (Excel); pdf / docx = a printable table, md / txt = text"}
 
 
 async def _store_file(ctx: ToolContext, *, name: str, content_type: str, data: bytes, rows: int, meta: dict[str, Any]) -> dict[str, Any]:
@@ -550,7 +551,7 @@ def _export_result(file: dict[str, Any], columns: list[xp.Column], rows: list[di
       + "; ".join(f"{k} ({d.title}): {d.params}" for k, d in DATASETS.items())
       + ". Column keys are the same camelCase keys the list_* tools return (nested as a.b). Unknown column → the error lists the available ones. The file appears in the chat with a download button.",
       params={"dataset": {"type": "string", "enum": list(DATASETS), "req": True}, "params": {"type": "object", "description": "the dataset's source params (see the list above)", "additionalProperties": True},
-              "format": FORMAT_SCHEMA, "title": {"type": "string", "description": "sheet / file caption in the user's language"}, "fileName": {"type": "string"},
+              "format": FORMAT_SCHEMA, "title": {"type": "string", "description": "sheet / file caption in the user's language"}, "fileName": {"type": "string"}, "note": {"type": "string", "description": "one line under the title (pdf / docx): period, filters as the user said them"},
               "columns": COLUMNS_SCHEMA, "filters": FILTER_SCHEMA, "sort": SORT_SCHEMA, "limit": {"type": "integer", "minimum": 1, "maximum": xp.MAX_ROWS}},
       perms=("reports.export",), summary_keys=("dataset", "format"))
 async def export_data(ctx: ToolContext, args: dict[str, Any]) -> Any:
@@ -564,9 +565,9 @@ async def export_data(ctx: ToolContext, args: dict[str, Any]) -> Any:
     source = dict(args.get("params") or {})
     raw = await ds.load(ctx, source, xp.MAX_ROWS)
     columns, rows = xp.prepare(raw, filters=args.get("filters"), sort=args.get("sort"), columns=args.get("columns"), limit=limit)
-    fmt = str(args.get("format") or "xlsx")
+    fmt = xp.norm_format(args.get("format"))
     title = str(args.get("title") or ds.title)
-    data, content_type = xp.build_file(fmt, title, columns, rows)
+    data, content_type = xp.build_file(fmt, title, columns, rows, note=args.get("note"))
     file = await _store_file(ctx, name=xp.file_name(args.get("fileName"), title, fmt, utcnow().date().isoformat()), content_type=content_type, data=data, rows=len(rows),
                              meta={"dataset": name, "params": _clean(source), "filters": args.get("filters"), "sort": args.get("sort"), "columns": [c.key for c in columns], "format": fmt})
     return _export_result(file, columns, rows)
@@ -574,7 +575,7 @@ async def export_data(ctx: ToolContext, args: dict[str, Any]) -> Any:
 
 @tool("export_table", "Faylga eksport (tayyor jadval)",
       "Build a downloadable Excel / CSV / JSON file from rows YOU composed (a table you already computed or summarised, an answer the user wants as a file). Rows are objects keyed by column key, or arrays in column order. Optional filters / sort apply as in export_data. Prefer export_data when the rows come straight from a dataset.",
-      params={"title": {"type": "string", "req": True}, "columns": {**COLUMNS_SCHEMA, "req": True}, "rows": {"type": "array", "items": {}, "req": True}, "format": FORMAT_SCHEMA, "fileName": {"type": "string"}, "filters": FILTER_SCHEMA, "sort": SORT_SCHEMA},
+      params={"title": {"type": "string", "req": True}, "columns": {**COLUMNS_SCHEMA, "req": True}, "rows": {"type": "array", "items": {}, "req": True}, "format": FORMAT_SCHEMA, "fileName": {"type": "string"}, "note": {"type": "string"}, "filters": FILTER_SCHEMA, "sort": SORT_SCHEMA},
       perms=("reports.export",), summary_keys=("title", "format"))
 async def export_table(ctx: ToolContext, args: dict[str, Any]) -> Any:
     cols_in = list(args.get("columns") or [])
@@ -588,11 +589,70 @@ async def export_table(ctx: ToolContext, args: dict[str, Any]) -> Any:
         elif isinstance(r, list):
             raw.append({k: (r[i] if i < len(r) else None) for i, k in enumerate(keys)})
     columns, rows = xp.prepare(raw, filters=args.get("filters"), sort=args.get("sort"), columns=cols_in, limit=xp.MAX_ROWS)
-    fmt = str(args.get("format") or "xlsx")
+    fmt = xp.norm_format(args.get("format"))
     title = str(args.get("title") or "Jadval")
-    data, content_type = xp.build_file(fmt, title, columns, rows)
+    data, content_type = xp.build_file(fmt, title, columns, rows, note=args.get("note"))
     file = await _store_file(ctx, name=xp.file_name(args.get("fileName"), title, fmt, utcnow().date().isoformat()), content_type=content_type, data=data, rows=len(rows), meta={"table": title, "columns": keys, "format": fmt})
     return _export_result(file, columns, rows)
+
+
+
+@tool("export_document", "Hujjat tayyorlash (Word / PDF / matn)",
+      "Build a downloadable DOCUMENT from text YOU wrote in Markdown — a report, a letter, a notice, a summary, meeting notes, instructions. Use # headings, paragraphs, - bullets, 1. numbered lists, | tables | and **bold**; the server lays it out as Word (docx), PDF, Markdown or plain text. Write the content in the user's language, complete and ready to print. For tables of system data prefer export_data.",
+      params={"title": {"type": "string", "req": True}, "content": {"type": "string", "description": "the document body in Markdown", "req": True}, "format": {"type": "string", "enum": list(xp.DOC_FORMATS), "description": "default docx (Word)"}, "fileName": {"type": "string"}},
+      perms=("reports.export",), summary_keys=("title", "format"))
+async def export_document(ctx: ToolContext, args: dict[str, Any]) -> Any:
+    title = str(args.get("title") or "Hujjat").strip()
+    content = str(args.get("content") or "")
+    if not content.strip():
+        raise ValidationError("Hujjat matni bo‘sh", code="export_document")
+    fmt = xp.norm_format(args.get("format"), "docx")
+    data, content_type = xp.build_document(fmt, title, content)
+    blocks = rd.body_blocks(title, content)
+    file = await _store_file(ctx, name=xp.file_name(args.get("fileName"), title, fmt, utcnow().date().isoformat()), content_type=content_type, data=data, rows=None, meta={"document": title, "format": fmt, "chars": len(content)})
+    return {"file": file, "sections": [b.text for b in blocks if b.type == "h"][:30], "words": len(content.split()), "note": "Hujjat chatda yuklab olish tugmasi bilan ko‘rsatiladi — mazmunini qayta yozma, qisqa ayt."}
+
+
+CHART_SERIES_SCHEMA = {"type": "array", "description": "the data lines / bar groups: {name, values[]} aligned with labels (pie: the first series only)", "items": {"type": "object", "properties": {"name": {"type": "string"}, "values": {"type": "array", "items": {}}}, "required": ["values"]}}
+
+
+@tool("export_chart", "Diagramma (rasm)",
+      "Build a chart picture — bar, line or pie — as PNG (default) or SVG. EITHER give the data yourself (labels + series) OR point at a dataset (dataset + params + x = the label column + y = the value column(s), with optional filters / sort / limit as in export_data); the server loads, filters, sorts and draws. Keep the series on one scale (revenue and counts in one chart hide each other). The picture appears in the chat with a preview and a download button.",
+      params={"title": {"type": "string", "req": True}, "type": {"type": "string", "enum": ["bar", "line", "pie"], "req": True}, "format": {"type": "string", "enum": list(xp.CHART_FORMATS), "description": "default png"},
+              "labels": {"type": "array", "items": {"type": "string"}}, "series": CHART_SERIES_SCHEMA,
+              "dataset": {"type": "string", "enum": list(DATASETS)}, "params": {"type": "object", "additionalProperties": True}, "x": {"type": "string", "description": "dataset mode: the column used for labels"}, "y": {"type": "array", "items": {"type": "string"}, "description": "dataset mode: the numeric column(s) drawn"},
+              "filters": FILTER_SCHEMA, "sort": SORT_SCHEMA, "limit": {"type": "integer", "minimum": 1, "maximum": 60, "description": "dataset mode: at most this many labels (default 20)"},
+              "xTitle": {"type": "string"}, "yTitle": {"type": "string"}, "fileName": {"type": "string"}},
+      perms=("reports.export",), summary_keys=("title", "type"))
+async def export_chart(ctx: ToolContext, args: dict[str, Any]) -> Any:
+    title = str(args.get("title") or "Diagramma").strip()
+    kind = str(args.get("type") or "bar")
+    labels: list[str]
+    series: list[dict[str, Any]]
+    meta: dict[str, Any] = {"chart": title, "type": kind}
+    if args.get("dataset"):
+        name = str(args["dataset"])
+        ds = DATASETS.get(name)
+        if ds is None:
+            raise ValidationError(f"Noma’lum to‘plam: {name}", code="export_dataset", details={"datasets": list(DATASETS)})
+        if ds.perms and not ctx.staff.has(*ds.perms):
+            raise ValidationError(f"«{ds.title}» to‘plamini o‘qish huquqi yo‘q", code="forbidden")
+        x, ys = str(args.get("x") or ""), [str(c) for c in (args.get("y") or [])]
+        if not x or not ys:
+            raise ValidationError("Dataset rejimida x (yorliq ustuni) va y (qiymat ustunlari) kerak", code="chart_data")
+        raw = await ds.load(ctx, dict(args.get("params") or {}), xp.MAX_ROWS)
+        columns, rows = xp.prepare(raw, filters=args.get("filters"), sort=args.get("sort"), columns=[x, *ys], limit=min(int(args.get("limit") or 20), 60))
+        labels = [str(r.get(x) if r.get(x) is not None else "") for r in rows]
+        series = [{"name": c.title, "values": [r.get(c.key) for r in rows]} for c in columns[1:]]
+        meta.update({"dataset": name, "x": x, "y": ys, "rows": len(rows)})
+    else:
+        labels = [str(v) for v in (args.get("labels") or [])]
+        series = [dict(s) for s in (args.get("series") or []) if isinstance(s, dict)]
+    spec = rd.chart_spec({"type": kind, "title": title, "labels": labels, "series": series, "xTitle": args.get("xTitle"), "yTitle": args.get("yTitle")})
+    fmt = xp.norm_format(args.get("format"), "png")
+    data, content_type = xp.build_chart(fmt, spec)
+    file = await _store_file(ctx, name=xp.file_name(args.get("fileName"), title, fmt, utcnow().date().isoformat()), content_type=content_type, data=data, rows=len(spec.labels), meta=meta)
+    return {"file": file, "labels": spec.labels, "series": [{"name": s.name, "values": s.values} for s in spec.series], "note": "Rasm chatda ko‘rinadi — raqamlarni qisqa sharhla, hammasini qayta yozma."}
 
 
 async def run_tool(t: Tool, ctx: ToolContext, args: dict[str, Any]) -> Any:

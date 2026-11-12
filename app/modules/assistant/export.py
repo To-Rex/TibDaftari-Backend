@@ -16,13 +16,23 @@ from typing import Any
 import xlsxwriter
 
 from app.core.exceptions import ValidationError
+from app.modules.assistant import render as rd
 
 MAX_ROWS = 10_000
+#: table formats (export_data / export_table)
 FORMATS: dict[str, tuple[str, str]] = {
     "xlsx": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"),
     "csv": ("text/csv; charset=utf-8", ".csv"),
     "json": ("application/json; charset=utf-8", ".json"),
+    "pdf": ("application/pdf", ".pdf"),
+    "docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"),
+    "md": ("text/markdown; charset=utf-8", ".md"),
+    "txt": ("text/plain; charset=utf-8", ".txt"),
 }
+#: document formats (export_document) and picture formats (export_chart)
+DOC_FORMATS: dict[str, tuple[str, str]] = {k: FORMATS[k] for k in ("docx", "pdf", "md", "txt")}
+CHART_FORMATS: dict[str, tuple[str, str]] = {"png": ("image/png", ".png"), "svg": ("image/svg+xml", ".svg")}
+ALL_FORMATS: dict[str, tuple[str, str]] = {**FORMATS, **CHART_FORMATS}
 OPS = ("eq", "ne", "contains", "startsWith", "endsWith", "gt", "gte", "lt", "lte", "in", "notIn", "between", "empty", "notEmpty")
 
 
@@ -251,21 +261,84 @@ def to_json(columns: list[Column], rows: list[dict[str, Any]]) -> bytes:
     return json.dumps([{c.key: r.get(c.key) for c in columns} for r in rows], ensure_ascii=False, default=str, indent=1).encode("utf-8")
 
 
-def build_file(fmt: str, title: str, columns: list[Column], rows: list[dict[str, Any]]) -> tuple[bytes, str]:
-    """(bytes, content type) in the asked format; `fmt` defaults to xlsx."""
-    fmt = (fmt or "xlsx").lower().lstrip(".")
-    if fmt in ("excel", "xls"):
-        fmt = "xlsx"
+def norm_format(fmt: str | None, default: str = "xlsx") -> str:
+    f = (fmt or default).lower().strip().lstrip(".")
+    return {"excel": "xlsx", "xls": "xlsx", "word": "docx", "doc": "docx", "markdown": "md", "text": "txt", "image": "png", "picture": "png", "rasm": "png"}.get(f, f)
+
+
+def _table_rows(columns: list[Column], rows: list[dict[str, Any]]) -> list[list[Any]]:
+    return [[r.get(c.key) for c in columns] for r in rows]
+
+
+def _numeric_columns(columns: list[Column], rows: list[dict[str, Any]]) -> list[bool]:
+    return [bool(rows) and all(_num(r.get(c.key)) is not None for r in rows if r.get(c.key) not in (None, "")) for c in columns]
+
+
+def to_md_table(title: str, columns: list[Column], rows: list[dict[str, Any]]) -> bytes:
+    esc = lambda v: ("" if v is None else str(v)).replace("|", "\\|").replace("\n", " ")  # noqa: E731
+    lines = [f"# {title}", ""] if title else []
+    lines.append("| " + " | ".join(c.title for c in columns) + " |")
+    lines.append("|" + "|".join("---" for _ in columns) + "|")
+    lines += ["| " + " | ".join(esc(r.get(c.key)) for c in columns) + " |" for r in rows]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def to_txt_table(title: str, columns: list[Column], rows: list[dict[str, Any]]) -> bytes:
+    lines = [title, ""] if title else []
+    lines.append("\t".join(c.title for c in columns))
+    lines += ["\t".join("" if r.get(c.key) is None else str(r.get(c.key)) for c in columns) for r in rows]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def build_file(fmt: str, title: str, columns: list[Column], rows: list[dict[str, Any]], *, note: str | None = None) -> tuple[bytes, str]:
+    """(bytes, content type) of a TABLE in the asked format; `fmt` defaults to xlsx."""
+    fmt = norm_format(fmt)
     if fmt not in FORMATS:
-        raise ValidationError(f"Noma’lum fayl formati: {fmt}", code="export_format", details={"formats": list(FORMATS)})
-    data = to_xlsx(title, columns, rows) if fmt == "xlsx" else to_csv(columns, rows) if fmt == "csv" else to_json(columns, rows)
+        raise ValidationError(f"Noma’lum jadval formati: {fmt}", code="export_format", details={"formats": list(FORMATS)})
+    if fmt == "xlsx":
+        data = to_xlsx(title, columns, rows)
+    elif fmt == "csv":
+        data = to_csv(columns, rows)
+    elif fmt == "json":
+        data = to_json(columns, rows)
+    elif fmt == "pdf":
+        data = rd.table_pdf(title, [c.title for c in columns], _table_rows(columns, rows), numeric=_numeric_columns(columns, rows), note=note)
+    elif fmt == "docx":
+        data = rd.table_docx(title, [c.title for c in columns], _table_rows(columns, rows), note=note)
+    elif fmt == "md":
+        data = to_md_table(title, columns, rows)
+    else:
+        data = to_txt_table(title, columns, rows)
     return data, FORMATS[fmt][0]
 
 
+def build_document(fmt: str, title: str, markdown: str) -> tuple[bytes, str]:
+    """(bytes, content type) of a DOCUMENT the model wrote in Markdown; `fmt` defaults to docx."""
+    fmt = norm_format(fmt, "docx")
+    if fmt not in DOC_FORMATS:
+        raise ValidationError(f"Noma’lum hujjat formati: {fmt}", code="export_format", details={"formats": list(DOC_FORMATS)})
+    if fmt == "docx":
+        data = rd.document_docx(title, markdown)
+    elif fmt == "pdf":
+        data = rd.document_pdf(title, markdown)
+    elif fmt == "md":
+        data = rd.to_markdown(title, markdown).encode("utf-8")
+    else:
+        data = rd.to_text(title, rd.parse_markdown(markdown)).encode("utf-8")
+    return data, DOC_FORMATS[fmt][0]
+
+
+def build_chart(fmt: str, spec: rd.ChartSpec) -> tuple[bytes, str]:
+    """(bytes, content type) of a chart picture; `fmt` defaults to png."""
+    fmt = norm_format(fmt, "png")
+    if fmt not in CHART_FORMATS:
+        raise ValidationError(f"Noma’lum rasm formati: {fmt}", code="export_format", details={"formats": list(CHART_FORMATS)})
+    return (rd.chart_png(spec) if fmt == "png" else rd.chart_svg(spec)), CHART_FORMATS[fmt][0]
+
+
 def file_name(name: str | None, title: str | None, fmt: str, stamp: str) -> str:
-    fmt = (fmt or "xlsx").lower().lstrip(".")
-    fmt = "xlsx" if fmt in ("excel", "xls") else fmt
-    ext = FORMATS.get(fmt, FORMATS["xlsx"])[1]
+    fmt = norm_format(fmt)
+    ext = ALL_FORMATS.get(fmt, FORMATS["xlsx"])[1]
     base = (name or "").strip()
     if base.lower().endswith(ext):
         base = base[: -len(ext)]
