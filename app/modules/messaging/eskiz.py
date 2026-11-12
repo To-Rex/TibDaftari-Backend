@@ -258,7 +258,13 @@ async def prices(token: str) -> list[dict[str, Any]]:
                 walk(item, country)
 
     walk(_json(resp), None)
-    return out
+    # one row per operator and country (the cheapest when Eskiz lists it twice), the home country first, cheapest first
+    best: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in out:
+        key = (str(row["operator"]).strip().casefold(), (row["countryCode"] or "").upper())
+        if key not in best or row["price"] < best[key]["price"]:
+            best[key] = {**row, "countryCode": row["countryCode"].upper() if row["countryCode"] else None}
+    return sorted(best.values(), key=lambda r: ((r["countryCode"] or "UZ") != "UZ", r["countryCode"] or "", r["price"], r["operator"]))
 
 
 async def templates(token: str) -> list[dict[str, Any]]:
