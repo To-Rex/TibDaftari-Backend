@@ -29,9 +29,11 @@ class AssistantAccountOut(CamelModel):
     api_key_masked: str | None = None
     effort: str | None = None
     max_tokens: int | None = None
-    #: the unit whose account is in effect (itself or an ancestor); null = nothing configured anywhere above
+    #: the unit whose account is in effect (itself or an ancestor); null = the platform account or nothing at all
     effective_unit_id: str | None = None
     effective_unit_name: str | None = None
+    #: the account in effect is the platform's (entered once by a superadmin for everyone)
+    effective_platform: bool = False
     #: whether the assistant works at this unit (an account with a key is in effect)
     configured: bool = False
 
@@ -74,6 +76,7 @@ class AssistantStatusOut(CamelModel):
     provider: Provider | None = None
     model: str | None = None
     effective_unit_name: str | None = None
+    effective_platform: bool = False
     tools: list[AssistantToolOut] = Field(default_factory=list)
     #: messages per rate-limit window and the window length
     rate_limit: int

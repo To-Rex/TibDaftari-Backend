@@ -66,6 +66,24 @@ async def cancel_action(action_id: uuid.UUID, staff: Staff, session: DbSession, 
     return await service.cancel_action(session, action_id, staff, meta)
 
 
+# ------------------------------------------------------------------ the platform account (superadmins; everyone without a closer one uses it)
+
+
+@router.get("/assistant/platform-account", response_model=AssistantAccountOut, summary="The platform's AI account — entered once, used by every unit without its own")
+async def get_platform_account(staff: Staff, session: DbSession) -> AssistantAccountOut:
+    return await service.get_platform_account(session, staff)
+
+
+@router.put("/assistant/platform-account", response_model=AssistantAccountOut, summary="Save the platform's AI account (superadmin)")
+async def set_platform_account(body: AssistantAccountIn, staff: Staff, session: DbSession, meta: Meta) -> AssistantAccountOut:
+    return await service.set_platform_account(session, body, staff, meta)
+
+
+@router.post("/assistant/platform-account/test", response_model=AssistantTestOut, summary="One short round-trip with the platform account")
+async def test_platform_account(staff: Staff, session: DbSession) -> AssistantTestOut:
+    return await service.test_platform_account(session, staff)
+
+
 # ------------------------------------------------------------------ the model account of a unit (inherited downwards)
 
 

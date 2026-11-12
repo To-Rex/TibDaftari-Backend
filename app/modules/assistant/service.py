@@ -87,12 +87,21 @@ def _nearest(ancestor_ids: list[uuid.UUID], accounts: dict[uuid.UUID, AssistantA
     return None
 
 
+async def platform_account(session: AsyncSession) -> AssistantAccount | None:
+    """The platform's own account (`unit_id IS NULL`): a superadmin enters it once, everyone without a closer one uses it."""
+    return (await session.execute(select(AssistantAccount).where(AssistantAccount.unit_id.is_(None), alive(AssistantAccount), AssistantAccount.is_active.is_(True)))).scalar_one_or_none()
+
+
 async def resolve_account(session: AsyncSession, unit_id: uuid.UUID) -> tuple[AssistantAccount | None, dict[uuid.UUID, str]]:
-    """The account a unit talks with (its own or the nearest above) and the names of the units on its path."""
+    """The account a unit talks with — its own, else the nearest above, else the platform's — and the names of the
+    units on its path. A unit that switched the assistant off (`provider='none'`) stops the fallback."""
     scope = await units_svc.scope_or_404(session, unit_id)
     accounts = await _accounts_on_path(session, scope.ancestor_ids)
     names = {u.id: u.name for u in (await units_repo.units_by_ids(session, scope.ancestor_ids)).values()}
-    return _nearest(scope.ancestor_ids, accounts), names
+    acc = _nearest(scope.ancestor_ids, accounts)
+    if acc is None:
+        acc = await platform_account(session)
+    return acc, names
 
 
 def _config(acc: AssistantAccount) -> AccountConfig:
@@ -109,7 +118,8 @@ def _config(acc: AssistantAccount) -> AccountConfig:
     )
 
 
-def _account_out(unit: OrgUnit, acc: AssistantAccount | None, own: bool, names: dict[uuid.UUID, str]) -> AssistantAccountOut:
+def _account_out(acc: AssistantAccount | None, own: bool, names: dict[uuid.UUID, str]) -> AssistantAccountOut:
+    """`own` = the row belongs to the unit (or the platform) being read; otherwise it is the inherited one."""
     if acc is None:
         return AssistantAccountOut(mode="inherited", provider="none", configured=False)
     off = acc.provider == "none"
@@ -123,8 +133,9 @@ def _account_out(unit: OrgUnit, acc: AssistantAccount | None, own: bool, names: 
         api_key_masked=acc.api_key_masked,
         effort=st.get("effort"),
         max_tokens=st.get("maxTokens"),
-        effective_unit_id=str(acc.unit_id),
-        effective_unit_name=names.get(acc.unit_id),
+        effective_unit_id=str(acc.unit_id) if acc.unit_id else None,
+        effective_unit_name=names.get(acc.unit_id) if acc.unit_id else None,
+        effective_platform=acc.unit_id is None,
         configured=not off and bool(acc.api_key_enc),
     )
 
@@ -133,7 +144,7 @@ async def get_account(session: AsyncSession, unit_id: uuid.UUID, staff: StaffPri
     unit = await units_svc.get_unit_or_404(session, unit_id)
     staff.require_unit(unit.id)
     acc, names = await resolve_account(session, unit.id)
-    return _account_out(unit, acc, own=acc is not None and acc.unit_id == unit.id, names=names)
+    return _account_out(acc, own=acc is not None and acc.unit_id == unit.id, names=names)
 
 
 def _account_snapshot(acc: AssistantAccount | None) -> dict[str, Any]:
@@ -142,57 +153,82 @@ def _account_snapshot(acc: AssistantAccount | None) -> dict[str, Any]:
     return {"provider": acc.provider, "model": acc.model, "baseUrl": acc.base_url, "apiKeyMasked": acc.api_key_masked, "settings": acc.settings}
 
 
+def _require_platform_admin(staff: StaffPrincipal) -> None:
+    if not staff.is_super_admin:
+        raise ForbiddenError("Platforma hisobini faqat superadmin boshqaradi", code="platform_only")
+
+
+async def _save(session: AsyncSession, own: AssistantAccount | None, body: AssistantAccountIn, staff: StaffPrincipal, unit_id: uuid.UUID | None) -> AssistantAccount | None:
+    """Apply `body` to the row of a unit (or of the platform when `unit_id` is None). Returns the row in effect
+    afterwards — None when the mode went back to `inherited` (the row is soft-deleted)."""
+    if body.mode == "inherited":
+        if own is not None:
+            own.is_active = False
+            own.deleted_at = utcnow()
+            own.deleted_by = staff.id
+        return None
+    if own is None:
+        own = AssistantAccount(unit_id=unit_id, provider="none", settings={}, created_by=staff.id)
+        session.add(own)
+    own.is_active = True
+    if body.mode == "off":
+        own.provider = "none"
+        own.api_key_enc = None
+        own.api_key_masked = None
+        return own
+    provider = body.provider or own.provider
+    if provider not in PRESETS:
+        raise ValidationError("AI provayder tanlanmagan", code="ai_provider_required", details={"field": "provider"})
+    key = (body.api_key or "").strip()
+    if key:
+        own.api_key_enc = encrypt(key)
+        own.api_key_masked = mask_secret(key)
+    elif not own.api_key_enc or own.provider != provider:
+        raise ValidationError("AI provayder API kaliti kiritilmagan", code="ai_api_key_required", details={"field": "apiKey"})
+    own.provider = provider
+    own.base_url = (body.base_url or "").strip() or None
+    own.model = (body.model or "").strip() or None
+    if provider == "custom" and not own.base_url:
+        raise ValidationError("Provayder manzili (base URL) kiritilmagan", code="ai_base_url_required", details={"field": "baseUrl"})
+    st = dict(own.settings or {})
+    if body.effort is not None:
+        st["effort"] = body.effort
+    if body.max_tokens is not None:
+        st["maxTokens"] = body.max_tokens
+    own.settings = st
+    return own
+
+
 async def set_account(session: AsyncSession, unit_id: uuid.UUID, body: AssistantAccountIn, staff: StaffPrincipal, meta: RequestMeta) -> AssistantAccountOut:
     """Save the unit's own model account; units below inherit it. `off` switches the assistant off for the subtree."""
     unit = await units_svc.get_unit_or_404(session, unit_id)
     staff.require_unit(unit.id)
     own = (await session.execute(select(AssistantAccount).where(AssistantAccount.unit_id == unit.id, alive(AssistantAccount)))).scalar_one_or_none()
     before = _account_snapshot(own)
-    if body.mode == "inherited":
-        if own is not None:
-            own.is_active = False
-            own.deleted_at = utcnow()
-            own.deleted_by = staff.id
-    else:
-        if own is None:
-            own = AssistantAccount(unit_id=unit.id, provider="none", settings={}, created_by=staff.id)
-            session.add(own)
-        own.is_active = True
-        if body.mode == "off":
-            own.provider = "none"
-            own.api_key_enc = None
-            own.api_key_masked = None
-        else:
-            provider = body.provider or own.provider
-            if provider not in PRESETS:
-                raise ValidationError("AI provayder tanlanmagan", code="ai_provider_required", details={"field": "provider"})
-            key = (body.api_key or "").strip()
-            if key:
-                own.api_key_enc = encrypt(key)
-                own.api_key_masked = mask_secret(key)
-            elif not own.api_key_enc or own.provider != provider:
-                raise ValidationError("AI provayder API kaliti kiritilmagan", code="ai_api_key_required", details={"field": "apiKey"})
-            own.provider = provider
-            own.base_url = (body.base_url or "").strip() or None
-            own.model = (body.model or "").strip() or None
-            if provider == "custom" and not own.base_url:
-                raise ValidationError("Provayder manzili (base URL) kiritilmagan", code="ai_base_url_required", details={"field": "baseUrl"})
-            st = dict(own.settings or {})
-            if body.effort is not None:
-                st["effort"] = body.effort
-            if body.max_tokens is not None:
-                st["maxTokens"] = body.max_tokens
-            own.settings = st
+    after = await _save(session, own, body, staff, unit.id)
     await session.flush()
-    await audit(session, actor_type="staff", actor_id=staff.id, unit_id=unit.id, country_id=unit.country_id, action="assistant_account", entity="unit", entity_id=unit.id, before=before, after=_account_snapshot(None if body.mode == "inherited" else own), ip=meta.ip, request_id=meta.request_id)
+    await audit(session, actor_type="staff", actor_id=staff.id, unit_id=unit.id, country_id=unit.country_id, action="assistant_account", entity="unit", entity_id=unit.id, before=before, after=_account_snapshot(after), ip=meta.ip, request_id=meta.request_id)
     return await get_account(session, unit.id, staff)
 
 
-async def test_account(session: AsyncSession, unit_id: uuid.UUID, staff: StaffPrincipal) -> AssistantTestOut:
-    """One short round-trip with the account in effect at the unit."""
-    unit = await units_svc.get_unit_or_404(session, unit_id)
-    staff.require_unit(unit.id)
-    acc, _ = await resolve_account(session, unit.id)
+async def get_platform_account(session: AsyncSession, staff: StaffPrincipal) -> AssistantAccountOut:
+    """The platform's own account — what every unit without a closer account uses (superadmins only)."""
+    _require_platform_admin(staff)
+    return _account_out(await platform_account(session), own=True, names={})
+
+
+async def set_platform_account(session: AsyncSession, body: AssistantAccountIn, staff: StaffPrincipal, meta: RequestMeta) -> AssistantAccountOut:
+    """Save the platform account once; every unit without its own account (or an `off`) inherits it."""
+    _require_platform_admin(staff)
+    own = (await session.execute(select(AssistantAccount).where(AssistantAccount.unit_id.is_(None), alive(AssistantAccount)))).scalar_one_or_none()
+    before = _account_snapshot(own)
+    after = await _save(session, own, body, staff, None)
+    await session.flush()
+    await audit(session, actor_type="staff", actor_id=staff.id, action="assistant_account", entity="platform", before=before, after=_account_snapshot(after), ip=meta.ip, request_id=meta.request_id)
+    return await get_platform_account(session, staff)
+
+
+async def _ping(acc: AssistantAccount | None) -> AssistantTestOut:
     if acc is None or acc.provider == "none" or not acc.api_key_enc:
         raise StateError(MSG_NOT_CONFIGURED, code="assistant_not_configured")
     cfg = _config(acc)
@@ -202,6 +238,19 @@ async def test_account(session: AsyncSession, unit_id: uuid.UUID, staff: StaffPr
     except AppError as e:
         return AssistantTestOut(ok=False, provider=acc.provider, model=cfg.model, error=e.message, latency_ms=int((utcnow() - started).total_seconds() * 1000))  # type: ignore[arg-type]
     return AssistantTestOut(ok=True, provider=acc.provider, model=cfg.model, reply=reply.text[:200], latency_ms=int((utcnow() - started).total_seconds() * 1000))  # type: ignore[arg-type]
+
+
+async def test_platform_account(session: AsyncSession, staff: StaffPrincipal) -> AssistantTestOut:
+    _require_platform_admin(staff)
+    return await _ping(await platform_account(session))
+
+
+async def test_account(session: AsyncSession, unit_id: uuid.UUID, staff: StaffPrincipal) -> AssistantTestOut:
+    """One short round-trip with the account in effect at the unit."""
+    unit = await units_svc.get_unit_or_404(session, unit_id)
+    staff.require_unit(unit.id)
+    acc, _ = await resolve_account(session, unit.id)
+    return await _ping(acc)
 
 
 # ============================================================================= status
@@ -237,7 +286,8 @@ async def status(session: AsyncSession, staff: StaffPrincipal, unit_id: str | No
         out.configured = True
         out.provider = acc.provider  # type: ignore[assignment]
         out.model = cfg.model
-        out.effective_unit_name = names.get(acc.unit_id)
+        out.effective_unit_name = names.get(acc.unit_id) if acc.unit_id else None
+        out.effective_platform = acc.unit_id is None
     return out
 
 

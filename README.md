@@ -141,7 +141,8 @@ o‘rniga javobda (`devCode`) va logda qaytadi — real Xabarchi kaliti shart em
 * **Yordamchi (AI)** — `/assistant/*`: xodim o‘z roli doirasida model bilan suhbatlashadi; model faqat xodimga
   ruxsat etilgan vositalarni ko‘radi (hammasi oddiy servis funksiyalari orqali, xodimning o‘z principal’i bilan),
   o‘zgartirishlar xodim tasdiqlagandan keyingina bajariladi, kalit/parol/tokenlar modelga yetib bormaydi, har bir amal
-  auditga yoziladi. Provayder birlik bo‘yicha sozlanadi va pastga meros bo‘ladi (`PUT /units/{id}/assistant`):
+  auditga yoziladi. Provayder superadmin tomonidan bir marta platforma uchun kiritiladi (`PUT /assistant/platform-account`)
+  va hamma uchun ishlaydi; birlik xohlasa o‘z hisobini qo‘yadi yoki o‘chiradi, pastga meros bo‘ladi (`PUT /units/{id}/assistant`):
   Claude (rasmiy Anthropic SDK), OpenAI, DeepSeek, Deploy yoki istalgan OpenAI-compatible manzil. Qoidalar:
   `docs/DOMAIN_RULES.md` §3.
 * Endpoint xaritasi moduli bo‘yicha: [`ARCHITECTURE.md`](ARCHITECTURE.md#endpoint-map-prefix-apiv1).

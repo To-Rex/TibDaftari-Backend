@@ -198,6 +198,54 @@ def test_account_is_inherited_and_the_key_never_comes_back(ctx: dict) -> None:
     )
 
 
+def test_the_platform_account_serves_everyone_without_a_closer_one(ctx: dict) -> None:
+    c: TestClient = ctx["client"]
+    b_fac = ctx["b"]["facility"]
+    # tree B has no account anywhere above: nothing works there
+    st = c.get(f"{API}/assistant/status", params={"unitId": b_fac}, headers=h(ctx, "admin-b")).json()
+    assert st["enabled"] and not st["configured"]
+    # only a superadmin may touch the platform account
+    assert c.get(f"{API}/assistant/platform-account", headers=h(ctx, "admin-a")).status_code == 403
+    r = c.put(f"{API}/assistant/platform-account", json={"mode": "off"}, headers=h(ctx, "admin-a"))
+    assert r.status_code == 403 and r.json()["error"]["code"] == "platform_only"
+    assert c.get(f"{API}/assistant/platform-account", headers=h(ctx, "super")).json()["mode"] == "inherited"
+    r = c.put(
+        f"{API}/assistant/platform-account",
+        json={"mode": "own", "provider": "deploy", "apiKey": "dp-key-123456", "maxTokens": 0},
+        headers=h(ctx, "super"),
+    )
+    assert r.status_code == 200, r.text
+    pl = r.json()
+    assert (
+        pl["mode"] == "own"
+        and pl["provider"] == "deploy"
+        and pl["model"] == "deepseek-ai/deepseek-v4.1-flash-1017"
+        and pl["effectivePlatform"]
+        and pl["effectiveUnitId"] is None
+        and pl["configured"]
+    )
+    assert "dp-key" not in json.dumps(pl).replace(pl["apiKeyMasked"], "")
+    try:
+        # tree B now works through the platform account — nobody there entered anything
+        st = c.get(f"{API}/assistant/status", params={"unitId": b_fac}, headers=h(ctx, "admin-b")).json()
+        assert st["configured"] and st["provider"] == "deploy" and st["effectivePlatform"]
+        acc = c.get(f"{API}/units/{ctx['b']['region']}/assistant", headers=h(ctx, "admin-b")).json()
+        assert acc["mode"] == "inherited" and acc["effectivePlatform"] and acc["configured"] and acc["provider"] == "deploy"
+        # tree A keeps its own account — the closer one wins
+        acc = c.get(f"{API}/units/{ctx['a']['facility']}/assistant", headers=h(ctx, "admin-a")).json()
+        assert acc["provider"] == "openai" and acc["effectiveUnitId"] == ctx["a"]["region"] and not acc["effectivePlatform"]
+        # a unit that switches the assistant off is not rescued by the platform account
+        assert c.put(f"{API}/units/{ctx['b']['region']}/assistant", json={"mode": "off"}, headers=h(ctx, "admin-b")).status_code == 200
+        st = c.get(f"{API}/assistant/status", params={"unitId": b_fac}, headers=h(ctx, "admin-b")).json()
+        assert not st["configured"]
+        assert c.put(f"{API}/units/{ctx['b']['region']}/assistant", json={"mode": "inherited"}, headers=h(ctx, "admin-b")).status_code == 200
+        assert c.get(f"{API}/assistant/status", params={"unitId": b_fac}, headers=h(ctx, "admin-b")).json()["configured"]
+    finally:
+        # back to no platform account
+        assert c.put(f"{API}/assistant/platform-account", json={"mode": "inherited"}, headers=h(ctx, "super")).json()["mode"] == "inherited"
+    assert not c.get(f"{API}/assistant/status", params={"unitId": b_fac}, headers=h(ctx, "admin-b")).json()["configured"]
+
+
 # ----------------------------------------------------------------------------- reading
 
 

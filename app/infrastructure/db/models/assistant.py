@@ -20,7 +20,8 @@ class AssistantAccount(PKMixin, AuditMixin, SoftDeleteMixin, Base):
 
     __tablename__ = "assistant_accounts"
 
-    unit_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("org_units.id"), nullable=False, index=True)
+    #: NULL = the platform's own account — used wherever no unit on the path has one (superadmins manage it)
+    unit_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("org_units.id"), index=True)
     provider: Mapped[str] = mapped_column(String(20), nullable=False)  # anthropic | openai | deepseek | deploy | custom | none
     base_url: Mapped[str | None] = mapped_column(String(300))
     model: Mapped[str | None] = mapped_column(String(120))

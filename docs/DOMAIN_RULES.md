@@ -68,6 +68,7 @@ verbatim in the UI.
 | 422 | facility_required | Bu amal faqat muassasa darajasida bajariladi |
 | 422 | leaf / kind_required / code_required | Muassasa ostida birlik yaratib bo‘lmaydi · Muassasa turi tanlanmagan · Muassasa kodi kiritilmagan |
 | 422 | unit_required / ai_api_key_required / ai_base_url_required / ai_provider_required | Ish birligi tanlanmagan · AI provayder API kaliti kiritilmagan · Provayder manzili (base URL) kiritilmagan · AI provayder tanlanmagan  (assistant) |
+| 403 | platform_only | Platforma hisobini faqat superadmin boshqaradi (assistant) |
 | 409 | assistant_not_configured / action_resolved / action_expired | Yordamchi bu birlik uchun sozlanmagan … · Bu amal allaqachon yakunlangan · Tasdiqlash muddati o‘tdi — so‘rovni qayta yuboring |
 | 429 | assistant_rate_limited | Yordamchiga juda ko‘p so‘rov yuborildi — birozdan keyin davom eting |
 | 502 | ai_auth / ai_rate_limit / ai_model / ai_bad_request / ai_status / ai_connection | the model provider refused or was unreachable (message names the cause) |
@@ -305,9 +306,13 @@ verbatim in the UI.
 
 * **AI assistant — «Yordamchi»** (`app/modules/assistant`, permission `assistant.use` — every system role has it; what
   the assistant may DO is gated by the employee's other keys). A chat that acts inside the employee's own rights:
+  * **Platform account** (`GET/PUT /assistant/platform-account`, `POST …/platform-account/test`; superadmins only, else
+    403 `platform_only`): ONE `assistant_accounts` row with `unit_id NULL` — entered once, used by every unit whose path
+    has neither its own account nor an `off`. Same body / modes as a unit account (`inherited` = no platform account).
   * **Account** (`GET/PUT /units/{id}/assistant`, `POST …/assistant/test`; read with admin.settings.write | admin.unit.read,
     write with admin.settings.write; 403 outside the caller's units): `assistant_accounts` rows inherited downwards like
-    messaging accounts — `mode` inherited | own | off; `provider` anthropic (official Anthropic SDK) | openai | deepseek |
+    messaging accounts, falling back to the platform account (`effectivePlatform: true`, `effectiveUnitId` null) —
+    `mode` inherited | own | off; `provider` anthropic (official Anthropic SDK) | openai | deepseek |
     deploy | custom (OpenAI-compatible `baseUrl`, required for custom → 422 `ai_base_url_required`); `model` empty =
     the provider preset; the key is Fernet-encrypted and only its masked tail comes back; a first `own` save without a
     key → 422 `ai_api_key_required`. `settings {effort, maxTokens}` — `maxTokens` 0 (the default) = the model's own

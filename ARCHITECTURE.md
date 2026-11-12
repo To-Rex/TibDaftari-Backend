@@ -130,8 +130,9 @@ units:     GET /units/tree  POST /units  GET/PUT /units/{id}  GET/PUT /units/{id
            GET/PUT /units/{id}/sms-templates  PUT /units/{id}/telegram  GET /units/{id}/telegram/status
            GET/POST /units/{id}/reset  (superadmin)
            GET/POST /units/{id}/quick-start  (a facility ready to work in one request: nodes, staff, the sample's catalogue + templates, cheque — quickstart.py)
-           GET/PUT /units/{id}/assistant · POST /units/{id}/assistant/test  (the unit's AI account, inherited downwards)
-assistant  GET /assistant/status · GET/POST /assistant/threads · GET/DELETE /assistant/threads/{id} · POST /assistant/threads/{id}/messages
+           GET/PUT /units/{id}/assistant · POST /units/{id}/assistant/test  (the unit's AI account, inherited downwards; falls back to the platform account)
+assistant  GET/PUT /assistant/platform-account · POST /assistant/platform-account/test  (superadmin: the account everyone without a closer one uses)
+           GET /assistant/status · GET/POST /assistant/threads · GET/DELETE /assistant/threads/{id} · POST /assistant/threads/{id}/messages
            POST /assistant/actions/{id}/confirm | cancel  (writes the model proposed run only after the employee's yes)
 staff:     GET/POST /units/{uid}/employees  GET/PUT /employees/{id}  PUT /employees/{id}/overrides
            GET/POST /units/{uid}/roles  PUT/DELETE /roles/{id}
