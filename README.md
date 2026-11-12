@@ -13,7 +13,7 @@ muharriri. `../Clinic-Web` React ilovasiga API beradi — har bir repository met
 | Ma’lumotlar bazasi | PostgreSQL 16+, SQLAlchemy 2 (async, asyncpg); sxema `db/v2/*.sql`, Alembic baseline `v2_0001` |
 | Kesh / navbat / sessiya | Redis (JWT allow-list, rate limit, kesh, lease); testlarda `REDIS_URL=fake://` |
 | PDF | fpdf2 (andoza renderer, `docs/RENDERER_SPEC.md`) |
-| Integratsiyalar | Xabarchi SMS, python-telegram-bot |
+| Integratsiyalar | Xabarchi SMS, Eskiz.uz SMS, python-telegram-bot |
 | Xavfsizlik | argon2id, JWT, Fernet (maxfiy kalitlar shifrlangan) |
 
 Batafsil arxitektura va endpoint xaritasi: [`ARCHITECTURE.md`](ARCHITECTURE.md);
@@ -216,7 +216,7 @@ python -m app.cli create-superadmin --login owner --password '...' --name "<F.I.
 * Tavsiya: kunlik `pg_dump -Fc` + WAL arxiv (PITR), Redis uchun zaxira shart emas (sessiya/kesh qayta tiklanadi).
   Eski `audit_log` bo‘limlarini o‘chirish o‘rniga arxiv bazaga ko‘chiring (`DETACH PARTITION`).
 
-## Telegram bot va Xabarchi (birlik bo‘yicha, meros bilan)
+## Telegram bot va SMS provayderlar — Xabarchi, Eskiz (birlik bo‘yicha, meros bilan)
 
 SMS akkaunt, SMS matnlari va Telegram bot istalgan birlikka (davlat, viloyat, tuman, muassasa) biriktiriladi va
 pastga meros bo‘ladi — eng yaqin sozlangan daraja ustun. Masalan, viloyat tuguniga kiritilgan Xabarchi kaliti
@@ -247,6 +247,19 @@ birlik va ostidagilar uchun SMS’ni o‘chiradi.
    avtomatik push qilinadi.
 4. Uzish: `PUT .../telegram` `{ botToken: null }` — birlik meros botiga (yoki platforma botiga) qaytadi,
    bog‘lanish tarixi saqlanadi.
+
+**Eskiz.uz SMS** (`ESKIZ_BASE_URL`, standart `https://notify.eskiz.uz/api`) — Xabarchi bilan bir qatorda ikkinchi provayder.
+1. Eskiz kabinetida (my.eskiz.uz) hisob oching, e-mail + parol va yuboruvchi nomi (nick; dastlab `4546`) — shular kiritiladi.
+2. Xodimlar ilovasi → Boshqaruv → Birlik (yoki SMS sozlamalari) → «SMS hisobi» → «O‘z hisobi» → provayder **Eskiz**:
+   e-mail, parol, yuboruvchi nomi. Saqlashda tizim Eskiz'ga bir marta kiradi — noto‘g‘ri parol darhol ko‘rinadi.
+   Davlat tuguniga kiritilsa — butun davlat muassasalari shu hisob orqali yuboradi; istalgan viloyat / tuman /
+   muassasa o‘ziga Xabarchi yoki Eskiz hisobini kiritib ustun qilishi yoki SMS'ni o‘chirishi mumkin (eng yaqin hisob ustun).
+3. «Ulanishni tekshirish» Eskiz'ning ruxsat etilgan test matnini («Bu Eskiz dan test») yuboradi va balansni ko‘rsatadi.
+4. Eskiz jonli hisobda faqat kabinetda tasdiqlangan (moderatsiyadan o‘tgan) shablon matnlarini yuboradi —
+   chek / natija / eslatma matnlarini Eskiz kabinetida shablon sifatida tasdiqlatib qo‘ying; mos kelmagan matn
+   outbox'da Eskiz xabari bilan «failed» bo‘ladi.
+5. Yetkazilganlik hisoboti: `ESKIZ_CALLBACK_URL` (yoki `PUBLIC_API_URL` asosida) → `POST /api/v1/messaging/eskiz/callback` —
+   outbox qatori `delivered` / `failed` bo‘ladi.
 
 ## Testlar va sifat
 

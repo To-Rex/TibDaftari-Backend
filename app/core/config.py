@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     # ---- integrations ------------------------------------------------------
     xabarchi_base_url: str = "https://manager-xabarchi-backend-bula2s-f6aaa1-13-140-185-49.sslip.io"
     xabarchi_timeout_seconds: float = 15
+    # Eskiz.uz (the second SMS provider; accounts are entered per unit, usually on the country node)
+    eskiz_base_url: str = "https://notify.eskiz.uz/api"
+    eskiz_timeout_seconds: float = 15
+    # where Eskiz posts delivery reports; empty → derived from PUBLIC_API_URL (none while that is localhost)
+    eskiz_callback_url: str = ""
     # Returns the OTP in the API response / logs. Never honoured in production.
     otp_dev_mode: bool = False
     otp_ttl_seconds: int = 300

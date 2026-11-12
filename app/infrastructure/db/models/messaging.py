@@ -20,16 +20,20 @@ from app.infrastructure.db.base import AuditMixin, Base, PKMixin, SoftDeleteMixi
 
 
 class MessagingAccount(PKMixin, AuditMixin, SoftDeleteMixin, Base):
-    """One SMS (Xabarchi) or Telegram bot account of a unit. Telegram with `api_key_enc NULL` = the platform bot
-    whose token comes from the environment (`settings.telegram_bot_token`)."""
+    """One SMS (Xabarchi or Eskiz) or Telegram bot account of a unit. Telegram with `api_key_enc NULL` = the
+    platform bot whose token comes from the environment (`settings.telegram_bot_token`)."""
 
     __tablename__ = "messaging_accounts"
 
     unit_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("org_units.id"), nullable=False, index=True)
     channel: Mapped[str] = mapped_column(String(10), nullable=False)  # sms | telegram
-    provider: Mapped[str] = mapped_column(String(20), nullable=False)  # sms: xabarchi | none ; telegram: telegram
-    api_key_enc: Mapped[str | None] = mapped_column(Text)  # Fernet-encrypted key / bot token
+    provider: Mapped[str] = mapped_column(String(20), nullable=False)  # sms: xabarchi | eskiz | none ; telegram: telegram
+    api_key_enc: Mapped[str | None] = mapped_column(Text)  # Fernet-encrypted key (Xabarchi) / password (Eskiz) / bot token
     api_key_masked: Mapped[str | None] = mapped_column(String(80))
+    #: Eskiz: the cabinet e-mail the token is obtained with
+    login: Mapped[str | None] = mapped_column(String(200))
+    #: Eskiz: the sender name (nick) messages go out under, e.g. 4546
+    sender: Mapped[str | None] = mapped_column(String(40))
     default_priority: Mapped[str] = mapped_column(String(20), nullable=False, default="transactional")
     sender_note: Mapped[str | None] = mapped_column(String(200))
     bot_username: Mapped[str | None] = mapped_column(String(80))

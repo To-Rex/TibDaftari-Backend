@@ -15,7 +15,8 @@ from app.core.schemas import CamelModel
 
 UnitLevel = Literal["country", "region", "district", "facility"]
 FacilityKind = Literal["ses", "clinic", "laboratory", "polyclinic", "hospital", "pharmacy", "other"]
-SmsProvider = Literal["xabarchi", "none"]
+SmsProvider = Literal["xabarchi", "eskiz", "none"]
+SmsProviderIn = Literal["xabarchi", "eskiz"]
 SmsPriority = Literal["urgent", "transactional", "bulk"]
 #: inherited = no account of its own (the nearest ancestor's is used) · own = its own Xabarchi key · off = no SMS here and below
 UnitSmsMode = Literal["inherited", "own", "off"]
@@ -52,9 +53,14 @@ class UnitSettingsOut(CamelModel):
 
 class UnitSmsOut(CamelModel):
     mode: UnitSmsMode
-    #: what really sends this unit's SMS: xabarchi (a key somewhere up the tree) or none
+    #: what really sends this unit's SMS: xabarchi / eskiz (an account somewhere up the tree) or none
     provider: SmsProvider = "none"
+    #: Xabarchi: the key's masked tail; Eskiz: the password, fully masked
     api_key_masked: str | None = None
+    #: Eskiz: the cabinet e-mail
+    login: str | None = None
+    #: Eskiz: the sender name (nick), e.g. 4546
+    sender: str | None = None
     default_priority: SmsPriority = "transactional"
     sender_note: str | None = None
     #: the unit whose account is in effect (itself, an ancestor, or None when nothing is configured)
@@ -63,11 +69,17 @@ class UnitSmsOut(CamelModel):
 
 
 class UnitSmsIn(CamelModel):
-    """`own` needs a key (a new one, or the one already saved); `inherited` drops this unit's account;
-    `off` switches SMS off for this unit and everything under it."""
+    """`own` needs the provider's credentials — Xabarchi: `apiKey`; Eskiz: `login` + `password` + `sender` — new
+    ones, or the ones already saved for the same provider; `inherited` drops this unit's account; `off` switches
+    SMS off for this unit and everything under it."""
 
     mode: UnitSmsMode
+    #: which provider the own account uses (default: the saved one, else Xabarchi)
+    provider: SmsProviderIn | None = None
     api_key: str | None = Field(default=None, max_length=200)
+    login: str | None = Field(default=None, max_length=200)
+    password: str | None = Field(default=None, max_length=200)
+    sender: str | None = Field(default=None, max_length=40)
     default_priority: SmsPriority | None = None
     sender_note: str | None = Field(default=None, max_length=200)
 
@@ -198,8 +210,11 @@ class SmsTestIn(CamelModel):
 
 class SmsTestOut(CamelModel):
     ok: bool
+    provider: SmsProvider = "xabarchi"
     provider_message_id: str | None = None
     to: str | None = None
+    #: Eskiz: the account's balance after the test (so‘m)
+    balance: int | None = None
 
 
 class TelegramSettingsIn(CamelModel):

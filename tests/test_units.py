@@ -10,6 +10,7 @@ from collections.abc import Iterator
 import pytest
 from app.infrastructure.db.models import Region
 from app.modules.messaging import service as messaging
+from app.modules.messaging import xabarchi
 from app.modules.messaging.xabarchi import ProviderResult, XabarchiError
 from app.modules.units import service as units_service
 from app.modules.units.reset import FACILITY_PARTS
@@ -87,7 +88,7 @@ def test_tree_and_card(ctx: dict) -> None:
     assert d["countryName"] == "O‘zbekiston" and d["regionName"] == f"T-{ctx['tag']} viloyati" and d["districtName"] == f"T-{ctx['tag']} tumani"
     assert d["path"] == f"O‘zbekiston Respublikasi › T-{ctx['tag']} viloyati › T-{ctx['tag']} tumani › T-{ctx['tag']} SES" and d["depth"] == 3
     assert d["timezone"] == "Asia/Tashkent" and d["isActive"] is True and d["settings"] == {"documentFreeViewDays": 0, "locale": None, "own": {}}
-    assert d["sms"] == {"mode": "inherited", "provider": "none", "apiKeyMasked": None, "defaultPriority": "transactional", "senderNote": None, "effectiveUnitId": None, "effectiveUnitName": None}
+    assert d["sms"] == {"mode": "inherited", "provider": "none", "apiKeyMasked": None, "login": None, "sender": None, "defaultPriority": "transactional", "senderNote": None, "effectiveUnitId": None, "effectiveUnitName": None}
     assert d["telegram"] == {"botUsername": None, "connected": False, "own": False, "effectiveUnitId": None}
     assert d["counts"] == {"regions": 0, "districts": 0, "facilities": 0, "employees": 0}
     region = c.get(f"{API}/units/{a['region']}", headers=h(ctx, "admin-a")).json()
@@ -190,7 +191,7 @@ def test_sms_account_inheritance(ctx: dict) -> None:
     body = {"mode": "own", "apiKey": "xab_live_abcdef7f2a", "defaultPriority": "urgent", "senderNote": "note"}
     r = c.put(f"{API}/units/{a['region']}/sms", json=body, headers=h(ctx, "admin-a"))
     assert r.status_code == 200, r.text
-    assert r.json() == {"mode": "own", "provider": "xabarchi", "apiKeyMasked": "xab_live_••••••••7f2a", "defaultPriority": "urgent", "senderNote": "note", "effectiveUnitId": a["region"], "effectiveUnitName": f"T-{ctx['tag']} viloyati"}
+    assert r.json() == {"mode": "own", "provider": "xabarchi", "apiKeyMasked": "xab_live_••••••••7f2a", "login": None, "sender": None, "defaultPriority": "urgent", "senderNote": "note", "effectiveUnitId": a["region"], "effectiveUnitName": f"T-{ctx['tag']} viloyati"}
     assert "abcdef" not in r.text
     fac = c.get(f"{API}/units/{a['facility']}/sms", headers=h(ctx, "admin-a")).json()
     assert fac["mode"] == "inherited" and fac["provider"] == "xabarchi" and fac["apiKeyMasked"] == "xab_live_••••••••7f2a" and fac["effectiveUnitId"] == a["region"] and fac["defaultPriority"] == "urgent"
@@ -213,7 +214,7 @@ def test_sms_account_inheritance(ctx: dict) -> None:
     # back to inheriting; dropping the region's account switches everything below off
     assert c.put(f"{API}/units/{a['facility']}/sms", json={"mode": "inherited"}, headers=h(ctx, "admin-a")).json()["provider"] == "xabarchi"
     r = c.put(f"{API}/units/{a['region']}/sms", json={"mode": "inherited"}, headers=h(ctx, "admin-a"))
-    assert r.json() == {"mode": "inherited", "provider": "none", "apiKeyMasked": None, "defaultPriority": "transactional", "senderNote": None, "effectiveUnitId": None, "effectiveUnitName": None}
+    assert r.json() == {"mode": "inherited", "provider": "none", "apiKeyMasked": None, "login": None, "sender": None, "defaultPriority": "transactional", "senderNote": None, "effectiveUnitId": None, "effectiveUnitName": None}
     assert c.get(f"{API}/units/{a['facility']}/sms", headers=h(ctx, "admin-a")).json()["provider"] == "none"
     assert c.put(f"{API}/units/{a['facility']}/sms", json={"mode": "off"}, headers=h(ctx, "admin-b")).status_code == 403
     assert c.get(f"{API}/units/{a['facility']}/sms", headers=h(ctx, "admin-b")).status_code == 403
@@ -231,10 +232,10 @@ def test_sms_test(ctx: dict, monkeypatch: pytest.MonkeyPatch) -> None:
         seen.update({"key": api_key, "to": to, "priority": priority, "text": text})
         return [ProviderResult(to=to[0], provider_id="777", status="queued", raw={})]
 
-    monkeypatch.setattr(units_service.xabarchi, "send_sms", fake_send)
+    monkeypatch.setattr(xabarchi, "send_sms", fake_send)
     # the facility sends with the inherited key
     r = c.post(f"{API}/units/{a['facility']}/sms/test", json={"to": "+998 90 765-43-21"}, headers=h(ctx, "admin-a"))
-    assert r.status_code == 200 and r.json() == {"ok": True, "providerMessageId": "777", "to": "998907654321"}
+    assert r.status_code == 200 and r.json() == {"ok": True, "provider": "xabarchi", "providerMessageId": "777", "to": "998907654321", "balance": None}
     assert seen["key"] == "xab_live_testkey1234" and seen["to"] == ["998907654321"] and seen["priority"] == "transactional"
     # default recipient: the unit's own phone (set in the update test), else the nearest ancestor's
     r = c.post(f"{API}/units/{a['facility']}/sms/test", json={}, headers=h(ctx, "admin-a"))
@@ -246,7 +247,7 @@ def test_sms_test(ctx: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     async def failing(*_: object, **__: object) -> list[ProviderResult]:
         raise XabarchiError("Xabarchi API kaliti rad etildi (401/403)", code="sms_auth_error")
 
-    monkeypatch.setattr(units_service.xabarchi, "send_sms", failing)
+    monkeypatch.setattr(xabarchi, "send_sms", failing)
     r = c.post(f"{API}/units/{a['facility']}/sms/test", json={}, headers=h(ctx, "admin-a"))
     assert r.status_code == 502 and r.json()["error"]["message"].startswith("Xabarchi API kaliti rad etildi")
     assert c.put(f"{API}/units/{a['region']}/sms", json={"mode": "inherited"}, headers=h(ctx, "admin-a")).status_code == 200

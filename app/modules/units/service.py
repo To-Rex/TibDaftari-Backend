@@ -23,7 +23,8 @@ from app.core.textutil import is_valid_uz_phone, norm_phone
 from app.core.timeutil import utcnow
 from app.infrastructure.db.models import CHILD_LEVEL, MessagingAccount, OrgUnit, SmsTemplate
 from app.infrastructure.redis import cache
-from app.modules.messaging import xabarchi
+from app.modules.messaging import eskiz, sms
+from app.modules.messaging.providers import SMS_PROVIDERS, SmsProviderError, SmsTransientError, account_to_sms
 from app.modules.units import repository as repo
 from app.modules.units.schemas import (
     OrgUnitOut,
@@ -172,11 +173,15 @@ def sms_out(unit: OrgUnit, ancestor_ids: list[uuid.UUID], accounts: dict[uuid.UU
         mode = "off" if own.provider == "none" else "own"
     else:
         mode = "inherited"
-    configured = effective is not None and effective.provider == "xabarchi" and bool(effective.api_key_enc)
+    configured = effective is not None and effective.provider in SMS_PROVIDERS and bool(effective.api_key_enc)
+    # the credentials shown: the unit's own live account, else the account in effect above it
+    shown = own if own is not None and own.provider in SMS_PROVIDERS else (effective if configured else None)
     return UnitSmsOut(
         mode=mode,  # type: ignore[arg-type]
-        provider="xabarchi" if configured else "none",
-        api_key_masked=own.api_key_masked if own is not None and own.provider == "xabarchi" else (effective.api_key_masked if configured else None),
+        provider=effective.provider if configured and effective is not None else "none",  # type: ignore[arg-type]
+        api_key_masked=shown.api_key_masked if shown is not None else None,
+        login=shown.login if shown is not None else None,
+        sender=shown.sender if shown is not None else None,
         default_priority=(effective.default_priority if effective is not None else "transactional"),  # type: ignore[arg-type]
         sender_note=own.sender_note if own is not None else (effective.sender_note if effective is not None else None),
         effective_unit_id=str(effective.unit_id) if configured and effective is not None else None,
@@ -481,7 +486,51 @@ def _retire_account(acc: MessagingAccount, staff: StaffPrincipal) -> None:
 def _sms_snapshot(acc: MessagingAccount | None) -> dict[str, Any]:
     if acc is None:
         return {"mode": "inherited"}
-    return {"mode": "off" if acc.provider == "none" else "own", "apiKeyMasked": acc.api_key_masked, "defaultPriority": acc.default_priority, "senderNote": acc.sender_note}
+    return {"mode": "off" if acc.provider == "none" else "own", "provider": acc.provider, "login": acc.login, "sender": acc.sender, "apiKeyMasked": acc.api_key_masked, "defaultPriority": acc.default_priority, "senderNote": acc.sender_note}
+
+
+PASSWORD_MASK = "••••••••"
+
+
+def _own_credentials(own: MessagingAccount, body: UnitSmsIn) -> None:
+    """The own account's provider and credentials from the request: Xabarchi — a key (new, or the saved one);
+    Eskiz — the cabinet e-mail, the password (new, or the saved one) and the sender name. Switching providers
+    always needs the new provider's secret."""
+    provider = body.provider or (own.provider if own.provider in SMS_PROVIDERS else "xabarchi")
+    same = own.provider == provider and bool(own.api_key_enc)
+    if provider == "eskiz":
+        login = (body.login or (own.login if same else None) or "").strip()
+        if not login:
+            raise ValidationError("Eskiz kabinet e-mail (login) kiritilmagan", code="sms_login_required", details={"field": "login"})
+        password = (body.password or "").strip()
+        if password:
+            own.api_key_enc = encrypt(password)
+            own.api_key_masked = PASSWORD_MASK
+        elif not same:
+            raise ValidationError("Eskiz paroli kiritilmagan", code="sms_api_key_required", details={"field": "password"})
+        own.login = login
+        own.sender = ((body.sender or "").strip() or (own.sender if same else None) or eskiz.DEFAULT_SENDER)[:40]
+    else:
+        key = (body.api_key or "").strip()
+        if key:
+            own.api_key_enc = encrypt(key)
+            own.api_key_masked = mask_secret(key)
+        elif not same:
+            raise ValidationError("Xabarchi API kaliti kiritilmagan", code="sms_api_key_required", details={"field": "apiKey"})
+        own.login = None
+        own.sender = None
+    own.provider = provider
+
+
+async def _verify_eskiz(own: MessagingAccount) -> None:
+    """A fresh Eskiz login with the saved credentials: wrong ones → 422 `sms_auth_error` (nothing is saved);
+    Eskiz unreachable → the account is saved anyway, the "check connection" button tells more."""
+    try:
+        await eskiz.check_account(own.id, own.login or "", decrypt(own.api_key_enc or "") or "")
+    except SmsProviderError as exc:
+        raise ValidationError(exc.message, code="sms_auth_error", details={"field": "password"}) from exc
+    except SmsTransientError as exc:
+        log.warning("eskiz: account of unit %s saved without verification: %s", own.unit_id, exc.message)
 
 
 async def set_sms(session: AsyncSession, unit_id: uuid.UUID, body: UnitSmsIn, staff: StaffPrincipal, meta: RequestMeta) -> UnitSmsOut:
@@ -502,18 +551,16 @@ async def set_sms(session: AsyncSession, unit_id: uuid.UUID, body: UnitSmsIn, st
             own.provider = "none"
             own.api_key_enc = None
             own.api_key_masked = None
+            own.login = None
+            own.sender = None
             own.sender_note = body.sender_note or None
         else:
-            key = (body.api_key or "").strip()
-            if key:
-                own.api_key_enc = encrypt(key)
-                own.api_key_masked = mask_secret(key)
-            elif not own.api_key_enc:
-                raise ValidationError("Xabarchi API kaliti kiritilmagan", code="sms_api_key_required", details={"field": "apiKey"})
-            own.provider = "xabarchi"
+            _own_credentials(own, body)
             own.default_priority = body.default_priority or own.default_priority or "transactional"
             own.sender_note = body.sender_note or None
     await session.flush()
+    if body.mode == "own" and own is not None and own.provider == "eskiz":
+        await _verify_eskiz(own)
     after = _sms_snapshot(None if body.mode == "inherited" else own)
     await audit(session, actor_type="staff", actor_id=staff.id, unit_id=unit.id, country_id=unit.country_id, action="sms_account", entity="unit", entity_id=unit.id, before=before, after=after, ip=meta.ip, request_id=meta.request_id)
     await invalidate_tree_caches(unit.id)
@@ -526,8 +573,8 @@ async def send_test_sms(session: AsyncSession, unit_id: uuid.UUID, to_raw: str |
     unit = await get_unit_or_404(session, unit_id)
     staff.require_unit(unit.id)
     scope = await scope_or_404(session, unit.id)
-    account = await repo.resolve_account(session, unit.id, "sms")
-    if account is None or account.provider == "none" or not account.api_key_enc:
+    account = account_to_sms(await repo.resolve_account(session, unit.id, "sms"))
+    if account is None:
         raise ValidationError("SMS provayder sozlanmagan", code="sms_not_configured")
     phone = unit.phone
     if not phone:
@@ -539,11 +586,10 @@ async def send_test_sms(session: AsyncSession, unit_id: uuid.UUID, to_raw: str |
     to = norm_phone(to_raw or phone)
     if not is_valid_uz_phone(to):
         raise ValidationError("Telefon raqam noto‘g‘ri", code="invalid_phone")
-    api_key = decrypt(account.api_key_enc) or ""
-    results = await xabarchi.send_sms(api_key, [to], SMS_TEST_TEXT.format(org=unit.short_name or unit.name), account.default_priority)
-    provider_id = results[0].provider_id if results else None
-    await audit(session, actor_type="staff", actor_id=staff.id, unit_id=unit.id, country_id=unit.country_id, action="sms_test", entity="unit", entity_id=unit.id, after={"to": to, "providerMessageId": provider_id, "accountUnitId": str(account.unit_id)}, ip=meta.ip, request_id=meta.request_id)
-    return SmsTestOut(ok=True, provider_message_id=provider_id, to=to)
+    result = await sms.send(account, to, sms.test_text(account, SMS_TEST_TEXT.format(org=unit.short_name or unit.name)))
+    balance = await eskiz.account_balance(account.account_id or account.unit_id, account.login or "", decrypt(account.key_enc) or "") if account.provider == "eskiz" else None
+    await audit(session, actor_type="staff", actor_id=staff.id, unit_id=unit.id, country_id=unit.country_id, action="sms_test", entity="unit", entity_id=unit.id, after={"to": to, "provider": account.provider, "providerMessageId": result.provider_id, "accountUnitId": str(account.unit_id)}, ip=meta.ip, request_id=meta.request_id)
+    return SmsTestOut(ok=True, provider=account.provider, provider_message_id=result.provider_id, to=to, balance=balance)  # type: ignore[arg-type]
 
 
 # ----------------------------------------------------------------------------- SMS texts

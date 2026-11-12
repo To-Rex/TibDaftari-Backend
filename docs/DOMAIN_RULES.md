@@ -76,7 +76,7 @@ verbatim in the UI.
 | 422 | region_required / district_required | Viloyat tanlanmagan · Tuman / shahar tanlanmagan  (quick start from a country / region node) |
 | 422 | validation_error | Davlat topilmadi · Viloyat topilmadi · Tuman topilmadi · Viloyat tanlangan davlatga tegishli emas · Tuman tanlangan viloyatga tegishli emas  (unit geo nesting) |
 | 422 | unit_required | Xodim uchun birlik tanlanmagan |
-| 422 | sms_not_configured / sms_api_key_required / telegram_invalid_token | SMS provayder sozlanmagan · Xabarchi API kaliti kiritilmagan · Telegram bot tokeni noto‘g‘ri  (unit settings pages) |
+| 422 | sms_not_configured / sms_api_key_required / sms_login_required / sms_auth_error / telegram_invalid_token | SMS provayder sozlanmagan · Xabarchi API kaliti kiritilmagan · Eskiz paroli kiritilmagan · Eskiz kabinet e-mail (login) kiritilmagan · Eskiz login yoki parol rad etildi (…) · Telegram bot tokeni noto‘g‘ri  (unit settings pages) |
 | 422 | invalid_phone | Telefon raqam noto‘g‘ri |
 | 422 | invalid_login / invalid_password | Login 3–40 belgi: lotin harflari, raqamlar va . _ - (harf yoki raqam bilan boshlanadi) · Parol bo‘sh joy bilan boshlanmasin va tugamasin |
 | 422 | invalid_permission | Noma’lum ruxsat kaliti: {keys} |
@@ -208,13 +208,38 @@ verbatim in the UI.
   unit's own overrides (`settings.own`).
 * **SMS account per unit** (`GET/PUT /units/{id}/sms`; GET with admin.settings.write | admin.unit.write |
   admin.unit.read, PUT with admin.settings.write | admin.unit.write): rows of `messaging_accounts (unit_id, channel
-  'sms', provider xabarchi|none, api_key_enc, priority, sender_note)`. `mode` = `inherited` (no account of its own —
+  'sms', provider xabarchi|eskiz|none, api_key_enc, login, sender, priority, sender_note)`. `mode` = `inherited` (no account of its own —
   the nearest ancestor's is used), `own` (its own Xabarchi key; required on the first save → 422
   `sms_api_key_required`; stored Fernet-encrypted, returned masked `xab_live_••••••••XXXX`; `defaultPriority`
   urgent | transactional | bulk, `senderNote`), `off` (provider `none` — SMS switched off for this unit and
   everything under it). The answer names the account in effect (`provider`, `effectiveUnitId/Name`).
   `POST /units/{id}/sms/test {to?}` sends a real SMS with that account (422 `sms_not_configured` "SMS provayder
   sozlanmagan" when none; 422 invalid_phone).
+* **Eskiz.uz — the second SMS provider** (2026-11-12, `db/v2/37_sms_eskiz.sql`, alembic `v2_0007`):
+  `messaging_accounts.provider` is `xabarchi | eskiz | none` for `channel = sms`; an Eskiz row keeps the cabinet
+  e-mail in `login`, the password Fernet-encrypted in `api_key_enc` (masked as `••••••••` — never a tail) and the
+  sender name (nick, default `4546`) in `sender`. `PUT /units/{id}/sms {mode: own, provider: eskiz, login,
+  password, sender?, senderNote?}`: the e-mail is required (422 `sms_login_required`), the password on the first
+  save or when switching providers (422 `sms_api_key_required`); the save logs in to Eskiz once (`eskiz.check_account`)
+  — wrong credentials → 422 `sms_auth_error` and nothing is stored, Eskiz unreachable → stored anyway (logged).
+  Switching to Xabarchi needs a Xabarchi key (the password is never reused). Inheritance, `off` and the nearest-
+  account rule are unchanged, so an Eskiz account on the **country node** serves every facility of the country
+  while any unit below may keep its own Xabarchi / Eskiz account. `GET …/sms` returns `provider`, `login`,
+  `sender` of the account in effect. The dispatcher and `POST …/sms/test` send through `messaging/sms.send()`,
+  which picks the client by provider (`xabarchi.py` / `eskiz.py`); errors are `SmsProviderError` (give up) /
+  `SmsTransientError` (retry with backoff) for both. Eskiz client (`https://notify.eskiz.uz/api`): `POST
+  /auth/login {email, password}` → bearer token (30 days; cached in Redis `eskiz:token:{accountId}` for 29, a 401
+  on send triggers one fresh login and a second try), `POST /message/sms/send {mobile_phone, message, from,
+  callback_url?}` → `{id: <request uuid>, status: waiting}` (`provider_message_id`), `GET /user/get-limit` →
+  balance (returned by the test endpoint: `SmsTestOut.balance`, `SmsTestOut.provider`). The test button sends
+  Eskiz's fixed test text «Bu Eskiz dan test» (an account in test status accepts nothing else); live accounts
+  send only texts matching templates approved in the Eskiz cabinet — a rejected text fails the outbox row with
+  Eskiz's message. Delivery reports: `POST /api/v1/messaging/eskiz/callback` (no login; JSON or urlencoded
+  `{request_id, message_id, phone_number, status, status_date}`) flips the outbox row with that request id to
+  `delivered` (DELIVRD / DELIVERED / PARTDELIVERED) or `failed` `eskiz:<STATE>` (UNDELIV, EXPIRED, REJECTD,
+  DELETED …), updates the result document's delivery entry, never undoes a delivery, ignores in-between states
+  and unknown ids. The callback URL is `ESKIZ_CALLBACK_URL`, else derived from `PUBLIC_API_URL` (none on
+  localhost). Settings: `ESKIZ_BASE_URL`, `ESKIZ_TIMEOUT_SECONDS`, `ESKIZ_CALLBACK_URL`.
 * **SMS texts per unit** (`GET/PUT /units/{id}/sms-templates`, same permissions): `sms_templates (unit_id, key,
   lang, body)` with keys `payment_receipt`, `result_ready`, `reminder`. Resolution per key: the unit's own →
   the nearest ancestor's → the platform default (an empty value = default). Answer `{unitId, templates

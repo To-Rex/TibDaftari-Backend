@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Query, Request, Response
 
 from app.api.deps import DbSession, Meta, Scope, Staff
 from app.core.schemas import OkOut, Page
@@ -40,6 +40,26 @@ async def send_messages(scope: Scope, body: SendIn, staff: Staff, session: DbSes
     if invalid:
         response.headers["X-Invalid-Recipients"] = ",".join(invalid)
     return created
+
+
+async def _report_payload(request: Request) -> dict[str, Any]:
+    """Eskiz posts the delivery report as JSON or as a form — take either."""
+    try:
+        data = await request.json()
+        if isinstance(data, dict):
+            return data
+    except ValueError:
+        pass
+    try:
+        return {k: v for k, v in (await request.form()).items()}
+    except Exception:
+        return {}
+
+
+@router.post("/messaging/eskiz/callback", response_model=OkOut, summary="Eskiz delivery report (called by Eskiz; matched by the request id it gave us)")
+async def eskiz_callback(request: Request, session: DbSession) -> OkOut:
+    await service.eskiz_delivery(session, await _report_payload(request))
+    return OkOut()
 
 
 @router.get("/notifications", response_model=list[NotificationOut], summary="My in-app notifications (newest 50)")

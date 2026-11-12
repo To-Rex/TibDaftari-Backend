@@ -1,4 +1,5 @@
-"""Outbox dispatcher — delivers queued messages (SMS via Xabarchi, Telegram via the unit's bot account).
+"""Outbox dispatcher — delivers queued messages (SMS via the account's provider — Xabarchi or Eskiz — Telegram via
+the unit's bot account).
 
 Runs from `workers/runner.py` every `settings.outbox_poll_seconds` under a Redis lease.
 One pass = claim a batch (FOR UPDATE SKIP LOCKED → `sending` + 60s lease, committed), then
@@ -14,11 +15,11 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.crypto import decrypt
 from app.infrastructure.db.models import MessagingAccount, OutboxMessage
 from app.infrastructure.db.session import session_scope
 from app.modules.messaging import repository as repo
-from app.modules.messaging import xabarchi
+from app.modules.messaging import sms
+from app.modules.messaging.providers import SmsProviderError, SmsTransientError
 from app.modules.messaging.service import (
     SMS_NOT_CONFIGURED,
     SmsAccount,
@@ -27,7 +28,6 @@ from app.modules.messaging.service import (
     outgoing_text,
     sms_account_for,
 )
-from app.modules.messaging.xabarchi import XabarchiError, XabarchiTransientError
 
 log = logging.getLogger("outbox")
 
@@ -88,20 +88,18 @@ async def _sms_account(session: AsyncSession, msg: OutboxMessage, accounts: dict
 
 async def _deliver_sms(session: AsyncSession, msg: OutboxMessage, now: datetime, accounts: dict[uuid.UUID, MessagingAccount]) -> None:
     account = await _sms_account(session, msg, accounts)
-    api_key = decrypt(account.key_enc) if account else None
-    if not account or not api_key:
+    if not account:
         _mark_failed(msg, SMS_NOT_CONFIGURED)
         return
     try:
-        results = await xabarchi.send_sms(api_key, [msg.to], outgoing_text(msg), account.priority)
-    except XabarchiTransientError as exc:
+        result = await sms.send(account, msg.to, outgoing_text(msg))
+    except SmsTransientError as exc:
         _mark_retry(msg, now, exc.message)
         return
-    except XabarchiError as exc:
+    except SmsProviderError as exc:
         _mark_failed(msg, exc.message)
         return
-    provider_id = next((r.provider_id for r in results if r.provider_id), None)
-    _mark_sent(msg, now, provider_id)
+    _mark_sent(msg, now, result.provider_id)
 
 
 async def _deliver_telegram(session: AsyncSession, msg: OutboxMessage, now: datetime) -> None:

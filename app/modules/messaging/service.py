@@ -13,11 +13,10 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import RequestMeta, StaffPrincipal
@@ -29,8 +28,11 @@ from app.core.schemas import Page
 from app.core.scope import UnitScope, ids_of, narrow_to
 from app.core.textutil import fmt_money_ru, is_valid_uz_phone, norm_phone
 from app.core.timeutil import to_iso
-from app.infrastructure.db.models import MessagingAccount, Notification, OutboxMessage, Patient
+from app.infrastructure.db.base import alive
+from app.infrastructure.db.models import Notification, OutboxMessage, Patient
 from app.modules.messaging import repository as repo
+from app.modules.messaging.eskiz import DELIVERED_STATES, FAILED_STATES
+from app.modules.messaging.providers import SmsAccount, account_to_sms
 from app.modules.messaging.schemas import NotificationOut, OutboxCountsOut, OutboxMessageOut, OutboxQuery, SendIn
 from app.modules.units import repository as units_repo
 from app.modules.units import service as units
@@ -135,23 +137,8 @@ async def portal_access_text(session: AsyncSession, unit_id: uuid.UUID | None, l
 # ----------------------------------------------------------------------------- SMS accounts
 
 
-@dataclass(frozen=True, slots=True)
-class SmsAccount:
-    """The Xabarchi account a message goes out through."""
-
-    key_enc: str
-    priority: str
-    #: the unit the account sits on (the facility itself or an ancestor whose key it inherits)
-    unit_id: uuid.UUID
-    #: the `messaging_accounts` row (recorded on the outbox row so the dispatcher sends with the same key)
-    account_id: uuid.UUID | None = None
-
-
-def account_to_sms(account: MessagingAccount | None) -> SmsAccount | None:
-    """A usable Xabarchi account, or None: missing, deleted, inactive, `provider='none'` (SMS switched off) or no key."""
-    if account is None or account.deleted_at is not None or not account.is_active or account.provider == "none" or not account.api_key_enc:
-        return None
-    return SmsAccount(key_enc=account.api_key_enc, priority=account.default_priority or "transactional", unit_id=account.unit_id, account_id=account.id)
+#: re-exported for the callers written against this module (dispatcher, units)
+__all__ = ["SmsAccount", "account_to_sms"]
 
 
 async def sms_account_for(session: AsyncSession, unit_id: uuid.UUID | None) -> SmsAccount | None:
@@ -322,6 +309,31 @@ async def notify(
 async def count_queued(session: AsyncSession, unit_ids: Sequence[uuid.UUID] | None) -> int:
     """Messages still waiting to go out from the given facilities (None = everywhere — the superadmin)."""
     return await repo.count_queued(session, unit_ids)
+
+
+async def eskiz_delivery(session: AsyncSession, payload: Mapping[str, Any]) -> str | None:
+    """An Eskiz delivery report (`callback_url`): `{request_id, message_id, phone_number, status, status_date}` —
+    the outbox row that went out with that request id becomes `delivered` or `failed`; reports for states in
+    between (ACCEPTED, ENROUTE …) and for unknown ids change nothing. Returns the new status, else None."""
+    request_id = str(payload.get("request_id") or payload.get("id") or "").strip()
+    state = str(payload.get("status") or "").strip().upper()
+    if not request_id or not state:
+        return None
+    if state in DELIVERED_STATES:
+        new_status, error = "delivered", None
+    elif state in FAILED_STATES:
+        new_status, error = "failed", f"eskiz:{state}"
+    else:
+        return None
+    msg = (await session.execute(select(OutboxMessage).where(OutboxMessage.provider_message_id == request_id, OutboxMessage.channel == "sms", alive(OutboxMessage)))).scalar_one_or_none()
+    if msg is None or msg.status == new_status or msg.status == "delivered":
+        return None
+    msg.status = new_status
+    msg.error = error
+    msg.updated_at = datetime.now(UTC)
+    if msg.document_id:
+        await mark_document_delivery(session, msg.document_id, "sms", new_status, error)
+    return new_status
 
 
 async def mark_document_delivery(session: AsyncSession, document_id: uuid.UUID, channel: str, status: str, detail: str | None = None) -> None:

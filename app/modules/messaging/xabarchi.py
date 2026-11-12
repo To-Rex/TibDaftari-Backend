@@ -8,13 +8,13 @@ Response 201 → [{"id": 123, "to": "998901234567", "status": "queued", ...}, ..
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Any
 
 import httpx
 
 from app.core.config import settings
-from app.core.exceptions import ExternalServiceError
+from app.modules.messaging.providers import ProviderResult, SmsProviderError, SmsTransientError
+
+__all__ = ["ProviderResult", "XabarchiError", "XabarchiTransientError", "close", "send_sms"]
 
 log = logging.getLogger("xabarchi")
 
@@ -33,19 +33,11 @@ def _http() -> httpx.AsyncClient:
     return _client
 
 
-@dataclass(slots=True)
-class ProviderResult:
-    to: str
-    provider_id: str | None
-    status: str
-    raw: dict[str, Any]
-
-
-class XabarchiError(ExternalServiceError):
+class XabarchiError(SmsProviderError):
     """Non-retryable provider rejection (401/403/422)."""
 
 
-class XabarchiTransientError(ExternalServiceError):
+class XabarchiTransientError(SmsTransientError):
     """Retryable failure (network, 5xx, 429)."""
 
 
