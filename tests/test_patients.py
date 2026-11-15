@@ -127,9 +127,10 @@ def test_create_conflicts_and_validation(env: dict[str, Any]) -> None:
     assert r.status_code == 201, r.text
     r = c.post(url, json={"fullName": "T-patients Pinfl two", "phone": phone(), "pinfl": pinfl}, headers=env["h_a"])
     assert (r.status_code, r.json()["error"]["message"]) == (409, "Bu JSHSHIR bilan bemor mavjud")
-    # phone dup only when neither passport nor pinfl given
+    # a shared number: an undocumented newcomer must say who they are to the people on it (the family module tests the rest)
     r = c.post(url, json={"fullName": "T-patients Same phone", "phone": p1["phone"]}, headers=env["h_a"])
-    assert (r.status_code, r.json()["error"]["code"]) == (409, "duplicate_phone")
+    assert (r.status_code, r.json()["error"]["code"]) == (409, "phone_relation_required")
+    assert p1["id"] in {x["id"] for x in r.json()["error"]["details"]["patients"]}
     r = c.post(url, json={"fullName": "T-patients Same phone with pinfl", "phone": p1["phone"], "pinfl": "4" + pinfl[1:]}, headers=env["h_a"])
     assert r.status_code == 201, r.text
     env["p_pinfl"] = r.json()

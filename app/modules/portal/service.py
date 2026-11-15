@@ -29,6 +29,7 @@ from app.modules.portal import repository as repo
 from app.modules.portal.schemas import (
     PortalAddressOut,
     PortalDocumentOut,
+    PortalFamilyMemberOut,
     PortalLinkOut,
     PortalOrderOut,
     PortalOrgOut,
@@ -164,8 +165,23 @@ async def overview(session: AsyncSession, principal: PatientPrincipal) -> Portal
         orgs.setdefault(org.id, org)
         if unit is not None:
             units.setdefault(unit.id, unit)
+    people = await repo.patients_by_ids(session, ids)
+    people.sort(key=lambda m: m.id != principal.id)  # the session's own patient first, the owner next
+    family = [
+        PortalFamilyMemberOut(
+            id=str(m.id),
+            full_name=m.full_name,
+            gender=m.gender,  # type: ignore[arg-type]
+            birth_date=m.birth_date,
+            relation=m.relation,
+            related_patient_id=str(m.related_patient_id) if m.related_patient_id else None,
+            is_self=m.id == principal.id,
+        )
+        for m in people
+    ]
     return PortalOverviewOut(
         patient=patient_out(principal.patient),
+        family=family,
         orders=[orders_svc.order_out(o) for o in orders],
         documents=[document_out(d) for d in documents],
         orgs=list(orgs.values()),

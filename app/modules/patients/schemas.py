@@ -10,6 +10,12 @@ from pydantic import Field
 from app.core.schemas import CamelModel, PageQuery
 
 Gender = Literal["male", "female"]
+#: who a patient is to the person they share a phone number with (`relatedPatientId`)
+Relation = Literal[
+    "child", "spouse", "father", "mother", "brother_older", "brother_younger",
+    "sister_older", "sister_younger", "grandchild", "grandparent", "relative", "other",
+]  # fmt: skip
+RELATIONS: tuple[str, ...] = Relation.__args__  # type: ignore[attr-defined]
 
 
 class PatientAddress(CamelModel):
@@ -57,6 +63,12 @@ class PatientOut(CamelModel):
     created_at: datetime
     updated_at: datetime
     created_by: str | None = None
+    #: one phone, a whole family: who this patient is to `relatedPatientId` (usually the number's owner)
+    relation: Relation | None = None
+    related_patient_id: str | None = None
+    related_patient_name: str | None = None
+    #: how many OTHER patients of the country use the same phone number
+    phone_shared: int = 0
 
 
 class PatientListQuery(PageQuery):
@@ -84,6 +96,10 @@ class PatientUpsertIn(CamelModel):
     tags: list[str] | None = None
     # the facility registering the patient (default: the path unit when it is a facility)
     registered_unit_id: str | None = Field(default=None, max_length=64)
+    #: the number already belongs to someone: who this person is to them (required when there is no passport / PINFL)
+    relation: Relation | None = None
+    #: the person on the number the relation points to (default: the number's owner)
+    related_patient_id: str | None = Field(default=None, max_length=64)
 
 
 class PatientPatchIn(CamelModel):
@@ -102,6 +118,32 @@ class PatientPatchIn(CamelModel):
     contract_number: str | None = Field(default=None, max_length=60)
     note: str | None = Field(default=None, max_length=5000)
     tags: list[str] | None = None
+    relation: Relation | None = None
+    related_patient_id: str | None = Field(default=None, max_length=64)
+
+
+class FamilyMemberOut(CamelModel):
+    """A person on the same phone number (or linked by a relation): enough to recognise them and open their card."""
+
+    id: str
+    full_name: str
+    phone: str
+    gender: Gender | None = None
+    birth_date: date | None = None
+    relation: Relation | None = None
+    related_patient_id: str | None = None
+    #: the number's owner — the person without a relation the others point to
+    is_owner: bool = False
+    registered_unit_name: str | None = None
+    last_visit_at: datetime | None = None
+
+
+class PatientFamilyOut(CamelModel):
+    """The patient's family as the registry sees it: everyone on the same number, plus relatives linked to / from them."""
+
+    patient_id: str
+    phone: str
+    members: list[FamilyMemberOut]
 
 
 class PatientDuplicatesIn(CamelModel):

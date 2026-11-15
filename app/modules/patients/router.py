@@ -17,6 +17,7 @@ from app.modules.patients.schemas import (
     CountryOut,
     DistrictOut,
     PatientDuplicatesIn,
+    PatientFamilyOut,
     PatientListQuery,
     PatientOut,
     PatientPatchIn,
@@ -66,6 +67,12 @@ async def get_patient(
 ) -> PatientOut:
     staff.require("reception.patient.read", "confirm.result.view")  # the patient block of an approved result
     return await service.get_patient_dto(session, patient_id, staff, unit_id)
+
+
+@router.get("/patients/{patient_id}/family", response_model=PatientFamilyOut, summary="Everyone on the patient's phone number (+ relatives linked by a relation), the number's owner first")
+async def patient_family(patient_id: uuid.UUID, staff: Staff, session: DbSession) -> PatientFamilyOut:
+    staff.require("reception.patient.read")
+    return await service.patient_family(session, patient_id, staff)
 
 
 @router.put("/patients/{patient_id}", response_model=PatientOut, summary="Update patient (partial)")

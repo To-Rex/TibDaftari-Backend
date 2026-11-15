@@ -13,8 +13,9 @@ from app.infrastructure.db.base import AuditMixin, Base, PKMixin, SoftDeleteMixi
 
 
 class Patient(PKMixin, AuditMixin, SoftDeleteMixin, Base):
-    """Identity rules (per country): passport & PINFL unique; else phone unique.
-    Enforced by partial unique indexes + service-level duplicate checks."""
+    """Identity rules (per country): passport & PINFL unique (partial unique indexes). A phone number may be shared
+    by a family: every person added to a number that already belongs to someone carries `relation` to
+    `related_patient_id` (required for an undocumented person — the service checks it)."""
 
     __tablename__ = "patients"
 
@@ -50,6 +51,9 @@ class Patient(PKMixin, AuditMixin, SoftDeleteMixin, Base):
     portal_password_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     portal_failed_logins: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0, server_default=text("0"))
     portal_locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # one phone, a whole family: who this patient is to `related_patient_id` (usually the number's owner)
+    related_patient_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("patients.id"))
+    relation: Mapped[str | None] = mapped_column(String(20))
 
     __table_args__ = (
         Index("ix_patients_registered_unit", "registered_unit_id", "created_at"),

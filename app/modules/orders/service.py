@@ -881,13 +881,15 @@ async def _telegram_push(
     document_id: uuid.UUID | None,
     payload: dict[str, Any],
 ) -> None:
-    if patient and patient.telegram_chat_id:
+    # the patient's own chat, else the chat linked to someone on the same number (a family shares one number)
+    chat_id = await patients_svc.telegram_chat_for(session, patient)
+    if chat_id:
         await messaging.enqueue(
             session,
             unit_id=order.unit_id,
             channel="telegram",
             kind=kind,
-            to=patient.telegram_chat_id,
+            to=chat_id,
             text=text,
             patient_id=order.patient_id,
             order_id=order.id,

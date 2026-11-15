@@ -126,6 +126,15 @@ raqamlari davom etadi). `29_`/`30_` Alembic baseline’ga kirmaydi — ular faqa
 Bemor portali: telefon raqam bo‘yicha OTP yoki qabulxona bergan login + parol. `OTP_DEV_MODE=true` bo‘lsa kod SMS
 o‘rniga javobda (`devCode`) va logda qaytadi — real Xabarchi kaliti shart emas.
 
+### Bitta raqam — butun oila
+
+Hujjatsiz (pasport / JSHSHIR kiritilmagan) bemorlar ham bitta telefon raqamidan foydalana oladi. Raqamda allaqachon
+bemor bo‘lsa, qabulxona formasi shu raqamdagilarni ko‘rsatadi: kerakli odamni «Shu odam» bilan ochish yoki yangi
+odamning kimligini (farzandi, turmush o‘rtog‘i, otasi, onasi, akasi, ukasi, opasi, singlisi, nevarasi, bobosi /
+buvisi, qarindoshi, boshqa) belgilab qo‘shish mumkin. Bir xil ism + tug‘ilgan sana bitta raqamda qayta ro‘yxatga
+olinmaydi. Bemor kartasida va qabulxonada «Shu raqamdagilar», portalda (SMS kod bilan kirganda) «Oila a’zolari»
+tanlovi; Telegram natijalari raqamga ulangan chatga boradi. Migratsiya: `v2_0008` (`db/v2/38_patient_relations.sql`).
+
 ## API haqida
 
 * Prefiks `/api/v1`, Swagger `/docs`, OpenAPI `/openapi.json`.

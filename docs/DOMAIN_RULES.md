@@ -63,7 +63,8 @@ verbatim in the UI.
 | 409 | approved | Tasdiqlangan natijani o‘zgartirib bo‘lmaydi |
 | 409 | state | Avval natijalarni saqlang · Faqat yuborilgan natijani tasdiqlash mumkin · Tasdiqlash uchun yuborilgan tahlil yo‘q · Faqat yuborilgan natijani qaytarish mumkin · Qaytarilgan to‘lovni o‘zgartirib bo‘lmaydi |
 | 409 | sms_not_configured / no_phone | public result link (§7): Bu muassasada SMS yuborish sozlanmagan — hujjatni havola orqali ochib bo‘lmaydi. … · Hujjatga telefon raqami bog‘lanmagan — SMS kod yuborib bo‘lmaydi. … |
-| 409 | duplicate_passport / duplicate_pinfl / duplicate_phone | Bu passport raqami bilan bemor mavjud · Bu JSHSHIR bilan bemor mavjud · Bu telefon raqami bilan bemor mavjud |
+| 409 | duplicate_passport / duplicate_pinfl / phone_relation_required / duplicate_person | Bu passport raqami bilan bemor mavjud · Bu JSHSHIR bilan bemor mavjud · Bu raqamda allaqachon bemor bor — yangi bemor ularning kimi ekanini belgilang (…) · Bu odam shu raqamda allaqachon ro‘yxatda: {fullName} |
+| 422 | relation_target / relation_required / relation_invalid | Qarindosh shu raqamdagi bemorlardan biri bo‘lishi kerak (yoki: Bu raqamda boshqa bemor yo‘q — qarindoshlikni belgilash shart emas) · Qarindoshlik turi tanlanmagan · Qarindoshlik turi noto‘g‘ri |
 | 410 | revoked | public result link of a revoked document |
 | 422 | facility_required | Bu amal faqat muassasa darajasida bajariladi |
 | 422 | leaf / kind_required / code_required | Muassasa ostida birlik yaratib bo‘lmaydi · Muassasa turi tanlanmagan · Muassasa kodi kiritilmagan |
@@ -430,8 +431,29 @@ verbatim in the UI.
 ## 4. Patients
 * `normPhone(p)`: digits; 9 → prefix 998. Stored `998XXXXXXXXX`.
 * **Identity per COUNTRY**: `countryId` = the registering facility's country — one registry per country, not per
-  organisation. Uniqueness within a country (DB partial unique indexes): passport (case-insensitive), PINFL, and
-  phone only for rows without passport/PINFL.
+  organisation. Uniqueness within a country (DB partial unique indexes): passport (case-insensitive) and PINFL.
+* **One phone, a whole family** (2026-11-15, `db/v2/38_patient_relations.sql`, alembic `v2_0008` — the unique
+  phone index for undocumented patients is gone): a number may be shared. Every person added to a number that
+  already belongs to someone carries `relation` (child | spouse | father | mother | brother_older |
+  brother_younger | sister_older | sister_younger | grandchild | grandparent | relative | other — *who this patient
+  is to* `relatedPatientId`; both set or both null, never self). Rules (`patients.service._resolve_family`, on
+  create, and on update when the number, the relation or the documents change):
+  * nobody else on the number → no relation (asking for one → 422 `relation_target`);
+  * an undocumented newcomer (no passport / PINFL) with the same folded name as someone on the number and the
+    same birth date (or either unknown) is that person → 409 `duplicate_person` (`details.patientId`, `details.patient`);
+  * an undocumented newcomer without a relation → 409 `phone_relation_required` with `details.patients` (the people
+    on the number: id, fullName, gender, birthDate, relation, relatedPatientId — the form asks who they are);
+  * a documented newcomer may share without a relation (as before) or give one;
+  * `relatedPatientId` must be one of the people on the number (422 `relation_target`); omitted → the number's
+    owner (no relation, registered first); a relation without a kind → 422 `relation_required`;
+  * moving a patient to another number without giving a relation clears it (it was about the old number);
+    unrelated edits leave it alone.
+  The DTO carries `relation`, `relatedPatientId`, `relatedPatientName` and `phoneShared` (how many OTHER alive
+  patients of the country use the number). `GET /patients/{id}/family` (reception.patient.read) → `{patientId,
+  phone, members[]}`: everyone on the number (country-wide) plus relatives linked to / from the patient by a
+  relation, the owner first (`isOwner`), the patient itself excluded. Telegram: a family member without an own
+  chat gets their result / payment pushes in the chat linked to someone on the same number
+  (`patients.service.telegram_chat_for`).
 * **`registeredUnitId`** = the facility that registered the patient (DB enforces the facility level; null on legacy
   rows); `registeredUnitName` in the DTO.
 * **Membership rule** (lists and id reads): a patient belongs to a unit's scope when registered at a facility of its
@@ -444,7 +466,7 @@ verbatim in the UI.
 * `findDuplicates(input)`: same country (`scope.countryId`); phone exact (normalized) OR passport case-insensitive OR pinfl exact; excludes nothing (client filters self).
 * `create` (`POST /units/{id}/patients`): the registering facility = the path unit when it is one, else
   `registeredUnitId` (a facility under it) → 404 "Muassasa topilmadi" / 422 `facility_required`; `countryId` = the
-  scope's country; checks in order → duplicate_passport (ci), duplicate_pinfl, then phone dup **only when neither passport nor pinfl given** → duplicate_phone. tags [], stats zero, portal.linked false. discountPercent default 0 (clamp 0..100).
+  scope's country; checks in order → duplicate_passport (ci), duplicate_pinfl, then the family rules above (relation / duplicate person). tags [], stats zero, portal.linked false. discountPercent default 0 (clamp 0..100).
 * `update`: partial; phone normalised; **FIX** apply the same uniqueness rules (within the patient's country) excluding self.
 * `countries()` / `regions(countryId?)` / `districts(regionId?)`: reference data (seeded by `db/v2/20_seed_reference.sql`
   / `python -m app.cli seed-reference`: countries, all 14 regions of Uzbekistan + districts); `regions` without
@@ -633,6 +655,8 @@ if status != cancelled: status = completed if (active and all approved) else ope
 ## 11. Portal (patient token)
 * Identity: an SMS-code session acts for every alive patient sharing its phone (the whole registry); a portal-login
   session (§2, `via=login`) for its own patient only — ownership checks of orders / documents use that set.
+  `overview.family` lists that set (`{id, fullName, gender, birthDate, relation, relatedPatientId, isSelf}`, the
+  session's own patient first) — the portal shows a "whose results" switch when it holds more than one person.
 * `overview`: patient projection (no note/discount/tags/pinfl; `registeredUnitId`), orders (every facility, non-cancelled, newest first), documents of those orders (newest first), **`orgs`** [PortalOrgOut — the organisation behind each cheque: the nearest non-facility unit above its facility (letterhead data: name, legalName, phone, email, address, logo)] and **`units`** [PortalUnitOut — the facilities the cheques were written at: name, code, kind, address, phone, `orgId`], both in order of first appearance.
 * `order(id)`: order must belong to patient else 404 (**FIX**: no existence leak); items (all statuses) but `values`/`labNote` only for approved items (**FIX**), documents, `org`, `unit`.
 * `document(id)`: {document, template, item?, order, items (covered), schemas, serviceCodes{stId: code|id}, category?, org, unit}; PDF at `/portal/documents/{id}/pdf`.

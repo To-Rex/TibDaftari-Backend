@@ -4,7 +4,7 @@ indexes), identity lookups, geo reference lists. No rules, no HTTP."""
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -110,6 +110,49 @@ async def find_by_phone(
     if exclude_id:
         stmt = stmt.where(Patient.id != exclude_id)
     return (await session.execute(stmt.order_by(Patient.created_at).limit(1))).scalar_one_or_none()
+
+
+async def on_phone(session: AsyncSession, country_id: uuid.UUID, phone: str, exclude_id: uuid.UUID | None = None) -> list[Patient]:
+    """Every alive patient of the country on this number, the number's owner first (no relation, oldest), then by
+    registration."""
+    stmt = base_select(country_id).where(Patient.phone == phone)
+    if exclude_id:
+        stmt = stmt.where(Patient.id != exclude_id)
+    stmt = stmt.order_by(Patient.relation.is_not(None), Patient.created_at, Patient.id).limit(100)
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def linked_to(session: AsyncSession, patient: Patient) -> list[Patient]:
+    """Alive relatives linked to / from the patient by a relation (whatever their numbers are now)."""
+    clauses: list[ColumnElement[bool]] = [Patient.related_patient_id == patient.id]
+    if patient.related_patient_id:
+        clauses.append(Patient.id == patient.related_patient_id)
+    stmt = select(Patient).where(or_(*clauses), Patient.id != patient.id, alive(Patient)).order_by(Patient.created_at).limit(100)
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def names_by_ids(session: AsyncSession, ids: Iterable[uuid.UUID | None]) -> dict[uuid.UUID, str]:
+    """Full names of the given patients (deleted ones too — a relation keeps naming its person)."""
+    wanted = {i for i in ids if i}
+    if not wanted:
+        return {}
+    rows = await session.execute(select(Patient.id, Patient.full_name).where(Patient.id.in_(wanted)))
+    return {r[0]: r[1] for r in rows}
+
+
+async def phone_counts(session: AsyncSession, pairs: Iterable[tuple[uuid.UUID, str]]) -> dict[tuple[uuid.UUID, str], int]:
+    """How many alive patients use each (country, phone)."""
+    wanted = set(pairs)
+    if not wanted:
+        return {}
+    countries = {c for c, _ in wanted}
+    phones = {ph for _, ph in wanted}
+    stmt = (
+        select(Patient.country_id, Patient.phone, func.count())
+        .where(Patient.country_id.in_(countries), Patient.phone.in_(phones), alive(Patient))
+        .group_by(Patient.country_id, Patient.phone)
+    )
+    return {(r[0], r[1]): int(r[2]) for r in await session.execute(stmt)}
 
 
 async def find_duplicates(

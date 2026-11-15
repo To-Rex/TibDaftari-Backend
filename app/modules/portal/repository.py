@@ -28,6 +28,14 @@ async def patient_ids_by_phone(session: AsyncSession, phone: str, country_id: uu
     return [r[0] for r in await session.execute(stmt)]
 
 
+async def patients_by_ids(session: AsyncSession, ids: Sequence[uuid.UUID]) -> list[PatientModel]:
+    """The identity set's patient rows, the number's owner first (no relation, oldest)."""
+    if not ids:
+        return []
+    stmt = select(PatientModel).where(PatientModel.id.in_(list(ids))).order_by(PatientModel.relation.is_not(None), PatientModel.created_at, PatientModel.id)
+    return list((await session.execute(stmt)).scalars())
+
+
 async def orders_of_patients(session: AsyncSession, patient_ids: Sequence[uuid.UUID]) -> list[Order]:
     """Non-cancelled orders of the identity set, newest first (uses ix_orders_patient_created)."""
     if not patient_ids:

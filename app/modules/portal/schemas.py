@@ -76,8 +76,23 @@ class PortalUnitOut(CamelModel):
     phone: str | None = None
 
 
+class PortalFamilyMemberOut(CamelModel):
+    """A person whose visits this portal session sees (everyone on the number; a login session — itself only)."""
+
+    id: str
+    full_name: str
+    gender: Literal["male", "female"] | None = None
+    birth_date: date | None = None
+    #: who they are to `relatedPatientId` (usually the number's owner); None = the owner
+    relation: str | None = None
+    related_patient_id: str | None = None
+    is_self: bool = False
+
+
 class PortalOverviewOut(CamelModel):
     patient: PortalPatientOut
+    #: everyone this session acts for (the family on the number), the session's own patient first
+    family: list[PortalFamilyMemberOut] = []
     orders: list[OrderOut]
     documents: list[ResultDocumentOut]
     #: the organisations behind the patient's cheques, in order of first appearance
