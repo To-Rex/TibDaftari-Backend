@@ -467,13 +467,15 @@ async def services_report(session: AsyncSession, scope: UnitScope, q: RangeQuery
 SMS_STATUS_KEYS = ("queued", "sent", "delivered", "failed", "cancelled")
 
 
-def _sms_status(status: str) -> str:
+def _sms_bucket(status: str) -> str:
+    """An outbox status → the SMS report column it counts in (named apart from `_sms_status`, the results report's
+    delivery reader above)."""
     return "queued" if status in ("queued", "sending", "scheduled") else status if status in SMS_STATUS_KEYS else "failed"
 
 
 def _bump(counts: dict[str, Any], status: str, n: int, cost: float) -> None:
     counts["total"] += n
-    counts[_sms_status(status)] += n
+    counts[_sms_bucket(status)] += n
     counts["cost"] += cost
 
 
