@@ -382,6 +382,30 @@ def test_a_read_tool_runs_at_once_and_the_model_sees_only_allowed_tools(ctx: dic
     assert detail["thread"]["title"].startswith("Mening viloyatimdagi") and len(detail["messages"]) == 3
 
 
+def test_the_owner_renames_and_deletes_a_thread(ctx: dict, fake: FakeProvider) -> None:
+    c = ctx["client"]
+    tid = new_thread(ctx, "admin-a", ctx["a"]["region"])
+    url = f"{API}/assistant/threads/{tid}"
+    # a name of the owner's choosing — trimmed, never blank, never somebody else's thread
+    r = c.patch(url, json={"title": "  Oylik hisobot  "}, headers=h(ctx, "admin-a"))
+    assert r.status_code == 200 and r.json()["title"] == "Oylik hisobot" and r.json()["id"] == tid, r.text
+    assert c.patch(url, json={"title": "   "}, headers=h(ctx, "admin-a")).status_code == 422
+    assert c.patch(url, json={"title": "x" * 201}, headers=h(ctx, "admin-a")).status_code == 422
+    assert c.patch(url, json={"title": "Begona"}, headers=h(ctx, "admin-b")).status_code == 404
+    # the first message no longer names a thread that already has a name
+    fake.say("Xo‘p.")
+    out = send(ctx, "admin-a", tid, "Shu oy tushumini ko‘rsat")
+    assert out["thread"]["title"] == "Oylik hisobot"
+    mine = c.get(f"{API}/assistant/threads", headers=h(ctx, "admin-a")).json()
+    assert next(t for t in mine if t["id"] == tid)["title"] == "Oylik hisobot"
+    # deleting: only the owner, and it is gone from the list and by id
+    assert c.delete(url, headers=h(ctx, "admin-b")).status_code == 404
+    assert c.delete(url, headers=h(ctx, "admin-a")).status_code == 204
+    assert all(t["id"] != tid for t in c.get(f"{API}/assistant/threads", headers=h(ctx, "admin-a")).json())
+    assert c.get(url, headers=h(ctx, "admin-a")).status_code == 404
+    assert c.patch(url, json={"title": "Yana"}, headers=h(ctx, "admin-a")).status_code == 404
+
+
 def test_whoami_and_secrets_are_stripped(ctx: dict, fake: FakeProvider) -> None:
     tid = new_thread(ctx, "admin-a", ctx["a"]["region"])
     fake.call("whoami", {})

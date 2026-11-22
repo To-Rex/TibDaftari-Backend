@@ -95,6 +95,12 @@ class ThreadCreateIn(CamelModel):
     title: str | None = Field(default=None, max_length=200)
 
 
+class ThreadUpdateIn(CamelModel):
+    """Rename a conversation — the title the employee gives replaces the one taken from the first message."""
+
+    title: str = Field(min_length=1, max_length=200)
+
+
 class FileOut(CamelModel):
     """A file a tool built (export_data / export_table) — downloaded from `GET /assistant/files/{id}` by its owner."""
 

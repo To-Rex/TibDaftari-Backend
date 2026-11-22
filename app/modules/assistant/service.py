@@ -404,6 +404,14 @@ async def get_thread(session: AsyncSession, thread_id: uuid.UUID, staff: StaffPr
     return ThreadDetailOut(thread=_thread_out(t), messages=_outs(rows, actions, await _files_of(session, t.id)), pending=_action_out(pending) if pending else None)
 
 
+async def rename_thread(session: AsyncSession, thread_id: uuid.UUID, staff: StaffPrincipal, title: str) -> ThreadOut:
+    """The owner names the conversation; the title no longer follows the first message."""
+    t = await _thread_or_404(session, thread_id, staff)
+    t.title = title.strip()[:200]
+    await session.flush()
+    return _thread_out(t)
+
+
 async def delete_thread(session: AsyncSession, thread_id: uuid.UUID, staff: StaffPrincipal) -> None:
     t = await _thread_or_404(session, thread_id, staff)
     t.deleted_at = utcnow()

@@ -432,8 +432,9 @@ verbatim in the UI.
     (`x` = label column, `y` = value columns, same filters / sort / limit). Every result is an `assistant_files`
     row (7 days) shown on the tool call (`file`) and the message (`files`; pictures preview inline), downloaded by
     its owner only from `GET /assistant/files/{id}` (404 otherwise or after expiry; purged by the maintenance worker).
-  * **Threads** (`GET/POST /assistant/threads`, `GET/DELETE /assistant/threads/{id}`): the caller's own only (404
-    otherwise). `POST /assistant/threads/{id}/messages {content, unitId?}` (`unitId` = the working unit, inside the
+  * **Threads** (`GET/POST /assistant/threads`, `GET/PATCH/DELETE /assistant/threads/{id}`): the caller's own only (404
+    otherwise); `PATCH {title}` renames one (1–200 chars after trimming, else 422) — a named thread keeps its title,
+    an unnamed one takes the first 60 chars of its first message. `POST /assistant/threads/{id}/messages {content, unitId?}` (`unitId` = the working unit, inside the
     territory; else the thread's / home unit; a superadmin must name one → 422 `unit_required`): rate-limited per
     employee (30 / 10 min → 429 `assistant_rate_limited`), 409 `assistant_not_configured` when no account with a key
     is in effect. The loop (max 6 tool rounds, history window 400 turns / 800k chars — sized for a 1M context — starting at a

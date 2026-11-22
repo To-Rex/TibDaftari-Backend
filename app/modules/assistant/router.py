@@ -20,6 +20,7 @@ from app.modules.assistant.schemas import (
     ThreadCreateIn,
     ThreadDetailOut,
     ThreadOut,
+    ThreadUpdateIn,
 )
 
 router = APIRouter()
@@ -45,6 +46,11 @@ async def create_thread(staff: Staff, session: DbSession, body: ThreadCreateIn |
 @router.get("/assistant/threads/{thread_id}", response_model=ThreadDetailOut, summary="A conversation with its turns and the write waiting for a yes")
 async def get_thread(thread_id: uuid.UUID, staff: Staff, session: DbSession) -> ThreadDetailOut:
     return await service.get_thread(session, thread_id, staff)
+
+
+@router.patch("/assistant/threads/{thread_id}", response_model=ThreadOut, summary="Rename a conversation")
+async def rename_thread(thread_id: uuid.UUID, body: ThreadUpdateIn, staff: Staff, session: DbSession) -> ThreadOut:
+    return await service.rename_thread(session, thread_id, staff, body.title)
 
 
 @router.delete("/assistant/threads/{thread_id}", status_code=204, summary="Delete a conversation")
