@@ -70,6 +70,8 @@ class AssistantToolOut(CamelModel):
     group: str = "general"
     #: a write that cannot be taken back
     danger: bool = False
+    #: a write the employee can take back afterwards (within a day, while nobody changed it since)
+    undoable: bool = False
 
 
 class AssistantContextOut(CamelModel):
@@ -146,6 +148,22 @@ class ActionDetailOut(CamelModel):
     value: str
 
 
+class ActionUndoOut(CamelModel):
+    """The way back of a done action (`POST /assistant/actions/{id}/undo`)."""
+
+    #: can be taken back right now (not yet undone, still inside the window)
+    available: bool
+    #: what undoing does, in one line
+    label: str = ""
+    until: datetime | None = None
+    undone_at: datetime | None = None
+
+
+class StopOut(CamelModel):
+    #: a run was working on the thread and has been told to stop; false = nothing was running
+    stopping: bool
+
+
 class ActionOut(CamelModel):
     id: str
     thread_id: str
@@ -163,6 +181,10 @@ class ActionOut(CamelModel):
     danger: bool = False
     #: while pending: the word the employee must type to confirm an irreversible write (`POST …/confirm {confirm}`)
     confirm_word: str | None = None
+    #: this kind of write has a way back (known before it runs)
+    undoable: bool = False
+    #: once done: the way back, if this run left one
+    undo: ActionUndoOut | None = None
 
 
 class ConfirmIn(CamelModel):
@@ -189,6 +211,10 @@ class MessageOut(CamelModel):
     files: list[FileOut] = Field(default_factory=list)
     #: the assistant asked the employee to choose
     choices: ChoicesOut | None = None
+    #: the employee stopped the run here (the content is a note for the model, not an answer)
+    stopped: bool = False
+    #: this message reports that the action with this id was taken back
+    undo_of: str | None = None
     created_at: datetime
 
 

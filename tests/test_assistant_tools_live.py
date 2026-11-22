@@ -17,6 +17,7 @@ from app.core.timeutil import utcnow
 from app.infrastructure.db.models import ResultTemplate
 from app.modules.assistant import describe as ds
 from app.modules.assistant import tools as tl
+from app.modules.assistant import undo as ud
 from app.modules.units import service as units_svc
 from fastapi.testclient import TestClient
 
@@ -62,6 +63,17 @@ class Desk:
         except AppError as e:
             assert e.code in allow or allow == ANY, f"{name}: {e.code} — {e.message}"
             return {"refused": e.code}
+
+
+    async def back(self, name: str, /, **args: Any) -> tuple[Any, list[str]]:
+        """A write and its way back, as the confirmation and the undo run them: remember → write → plan → undo."""
+        t = tl.REGISTRY[name]
+        self.used.add(name)
+        memory = await ud.remember(self.ctx, name, args)
+        result = await tl.run_tool(t, self.ctx, args)
+        kept = await ud.plan(self.ctx, name, args, memory, result)
+        assert kept and kept["label"] and kept["steps"], f"{name}: no way back was kept"
+        return result, await ud.run(self.ctx, kept)
 
 
 async def desk(s: Any, employee_id: uuid.UUID, unit_id: str) -> Desk:
@@ -227,3 +239,90 @@ def test_the_registrar_cannot_reach_past_the_desk(ctx: dict) -> None:
         assert away.value.code in ("forbidden", "not_found")
 
     db(ctx["client"], tries)
+
+
+def test_every_way_back_works(ctx: dict) -> None:
+    tag = ctx["tag"]
+
+    async def rounds(s: Any) -> set[str]:
+        d = await desk(s, ctx["super"], ctx["facility"])
+        call, back = d.call, d.back
+        get = lambda name, **a: tl.run_tool(tl.REGISTRY[name], d.ctx, a)  # noqa: E731
+
+        # ---- units
+        was = (await get("get_unit", unitId=ctx["facility"]))["phone"]
+        await back("update_unit", unitId=ctx["facility"], phone="+998 62 555-55-55", shortName="Qisqa")
+        assert (await get("get_unit", unitId=ctx["facility"]))["phone"] == was
+        made, _ = await back("create_unit", parentId=ctx["district"], name=f"T-{tag} Xato birlik", kind="clinic", code=f"X{tag}")
+        assert (await get("get_unit", unitId=made["id"]))["isActive"] is False  # switched off, not erased
+
+        # ---- catalogue
+        gone, _ = await back("create_category", name=f"Xato kategoriya {tag}")
+        assert all(c["id"] != gone["id"] for c in (await get("list_categories"))["items"])
+        cat = await call("create_category", name=f"Qaytish {tag}", code="Q1")
+        await back("update_category", categoryId=cat["id"], name=f"Qaytish yangi {tag}", code="Q2")
+        assert next(c for c in (await get("list_categories"))["items"] if c["id"] == cat["id"])["code"] == "Q1"
+        schema = await call("create_schema", name=f"Qaytish sxema {tag}", fields=[{"key": "a", "label": "A", "type": "number"}])
+        await back("update_schema", schemaId=schema["id"], fields=[{"key": "a", "label": "A", "type": "number"}, {"key": "b", "label": "B", "type": "text"}])
+        assert [f["key"] for f in (await get("get_schema", schemaId=schema["id"]))["fields"]] == ["a"]
+        await call("publish_schema", schemaId=schema["id"])
+        gone, _ = await back("create_service_type", categoryId=cat["id"], name=f"Xato xizmat {tag}", price=1)
+        svc = await call("create_service_type", categoryId=cat["id"], name=f"Qaytish xizmat {tag}", price=20_000, schemaId=schema["id"])
+        cheap = await call("create_service_type", categoryId=cat["id"], name=f"Qaytish arzon {tag}", price=5_000)
+        await back("update_service_type", serviceTypeId=svc["id"], price=99_000, turnaroundDays=5, unitPrices={ctx["facility"]: 1})
+        after = await get("get_service_type", serviceTypeId=svc["id"])
+        assert after["price"] == 20_000 and not after["unitPrices"]
+
+        # ---- templates
+        gone, _ = await back("create_default_receipt", name=f"Xato chek {tag}")
+        tpl = await call("create_default_receipt", name=f"Qaytish chek {tag}")
+        await back("duplicate_template", templateId=tpl["id"], name=f"Xato nusxa {tag}")
+        await back("update_template", templateId=tpl["id"], name=f"Boshqa nom {tag}", description="x")
+        await back("set_template_status", templateId=tpl["id"], status="active")
+        kept = await get("get_template", templateId=tpl["id"])
+        assert kept["name"] == f"Qaytish chek {tag}" and kept["status"] == "draft"
+
+        # ---- staff
+        gone, _ = await back("create_role", name=f"Xato rol {tag}", permissions=[])
+        role = await call("create_role", name=f"Qaytish rol {tag}", permissions=["reception.patient.read"])
+        await back("update_role", roleId=role["id"], name=f"Boshqa rol {tag}", permissions=["reception.patient.read", "reception.order.create"])
+        assert next(r for r in (await get("list_roles"))["items"] if r["id"] == role["id"])["permissions"] == ["reception.patient.read"]
+        off, _ = await back("create_employee", fullName=f"Xato xodim {tag}", login=f"xato-{tag.lower()}", roleKey="laborant")
+        assert (await get("get_employee", employeeId=off["id"]))["status"] == "inactive"
+        emp = await call("create_employee", fullName=f"Qaytish xodim {tag}", login=f"qayt-{tag.lower()}", roleKey="laborant")
+        await back("update_employee", employeeId=emp["id"], fullName="Boshqa ism", roleKey="vrach", phone="+998900000001")
+        same = await get("get_employee", employeeId=emp["id"])
+        assert same["fullName"] == f"Qaytish xodim {tag}" and same["roleId"] == emp["roleId"]
+        await back("set_employee_overrides", employeeId=emp["id"], allow=["reports.operations.read"], deny=[])
+
+        # ---- reception
+        pat = await call("create_patient", fullName=f"Qaytish Bemor {tag}", phone=phone(), gender="female", birthDate="1985-01-02")
+        await back("update_patient", patientId=pat["id"], fullName="Boshqa Bemor", workplace="Zavod", tags=["x"])
+        assert (await get("get_patient", patientId=pat["id"]))["fullName"] == f"Qaytish Bemor {tag}"
+        gone, _ = await back("create_order", patientId=pat["id"], serviceTypeIds=[cheap["id"]])
+        assert "refused" in await call("get_order", ("not_found",), orderId=gone["order"]["id"])
+        order = (await call("create_order", patientId=pat["id"], serviceTypeIds=[svc["id"]]))["order"]
+        await back("add_order_items", orderId=order["id"], serviceTypeIds=[cheap["id"]])
+        bundle = await get("get_order", orderId=order["id"])
+        assert [i["serviceName"] for i in bundle["items"] if i["status"] != "cancelled"] == [f"Qaytish xizmat {tag}"]
+        _, lines = await back("pay_order", orderId=order["id"], amount=bundle["order"]["total"], method="cash")
+        assert lines and all(p.get("refundedAt") for p in (await get("get_order", orderId=order["id"]))["payments"])
+        await call("pay_order", orderId=order["id"], amount=bundle["order"]["total"], method="card")
+
+        # ---- the laboratory and the approval
+        item = next(i["id"] for i in bundle["items"] if i["serviceName"] == f"Qaytish xizmat {tag}")
+        await call("save_result_values", itemId=item, values={"a": 1})
+        await back("save_result_values", itemId=item, values={"a": 2}, labNote="xato")
+        assert (await get("get_order_item", itemId=item))["values"] == {"a": 1}
+        await back("submit_result", itemId=item)
+        assert (await get("get_order_item", itemId=item))["status"] != "submitted"
+        await call("submit_result", itemId=item)
+        s.add(ResultTemplate(owner_unit_id=uuid.UUID(ctx["facility"]), name=f"Qaytish natija {tag}", status="active", version=1, service_type_ids=[uuid.UUID(svc["id"])], category_ids=[], scope="item", doc={"elements": []}))
+        await s.flush()
+        d.used.add("approve_result")
+        kept = await ud.plan(d.ctx, "approve_result", {"itemId": item}, None, {})
+        assert kept and kept["steps"][0]["tool"] == "revoke_result" and kept["steps"][0]["fixed"]["itemId"] == item
+        return d.used
+
+    tried = db(ctx["client"], rounds)
+    assert set(ud.RECIPES) - tried == set(), sorted(set(ud.RECIPES) - tried)

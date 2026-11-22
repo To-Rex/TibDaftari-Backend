@@ -18,6 +18,7 @@ from app.modules.assistant.schemas import (
     ConfirmIn,
     SendIn,
     SendOut,
+    StopOut,
     ThreadCreateIn,
     ThreadDetailOut,
     ThreadOut,
@@ -67,6 +68,16 @@ async def send_message(thread_id: uuid.UUID, body: SendIn, staff: Staff, session
 @router.post("/assistant/actions/{action_id}/confirm", response_model=SendOut, summary="Run a write the model proposed — with the caller's own rights")
 async def confirm_action(action_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta, body: ConfirmIn | None = None) -> SendOut:
     return await service.confirm_action(session, action_id, staff, meta, body.confirm if body else None)
+
+
+@router.post("/assistant/threads/{thread_id}/stop", response_model=StopOut, summary="Stop what the assistant is doing in the thread right now (the running request answers with what it had done)")
+async def stop_thread(thread_id: uuid.UUID, staff: Staff, session: DbSession) -> StopOut:
+    return await service.stop_thread(session, thread_id, staff)
+
+
+@router.post("/assistant/actions/{action_id}/undo", response_model=SendOut, summary="Take a confirmed write back — with the caller's own rights, only what nobody changed since")
+async def undo_action(action_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta) -> SendOut:
+    return await service.undo_action(session, action_id, staff, meta)
 
 
 @router.post("/assistant/actions/{action_id}/cancel", response_model=SendOut, summary="Decline a write the model proposed")

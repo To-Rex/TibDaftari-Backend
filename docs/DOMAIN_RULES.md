@@ -97,6 +97,7 @@ verbatim in the UI.
 | 409 | assistant_not_configured / action_resolved / action_expired | Yordamchi bu birlik uchun sozlanmagan … · Bu amal allaqachon yakunlangan · Tasdiqlash muddati o‘tdi — so‘rovni qayta yuboring |
 | 429 | assistant_rate_limited | Yordamchiga juda ko‘p so‘rov yuborildi — birozdan keyin davom eting |
 | 422 | unknown_argument / missing_argument / confirm_mismatch / facility_required | Bu vositada bunday argument yo‘q · Majburiy argument berilmagan · Tasdiqlash so‘zi mos kelmadi · Bu amal muassasa uchun (assistant) |
+| 409 | undo_unavailable / undo_done / undo_expired / undo_conflict / undo_forbidden | Bu amalni orqaga qaytarib bo‘lmaydi · allaqachon qaytarilgan · muddati o‘tdi · ma’lumot keyin o‘zgartirilgan · ruxsat yetarli emas (assistant) |
 | 502 | ai_auth / ai_rate_limit / ai_model / ai_bad_request / ai_status / ai_connection | the model provider refused or was unreachable (message names the cause) |
 | 422 | region_required / district_required | Viloyat tanlanmagan · Tuman / shahar tanlanmagan  (quick start from a country / region node) |
 | 422 | validation_error | Davlat topilmadi · Viloyat topilmadi · Tuman topilmadi · Viloyat tanlangan davlatga tegishli emas · Tuman tanlangan viloyatga tegishli emas  (unit geo nesting) |
@@ -481,6 +482,28 @@ verbatim in the UI.
     A new message while an action is pending cancels it the same way — nothing ever runs on the model's word alone.
     An action with a `confirmWord` also needs `{confirm}` typed by the employee (422 `confirm_mismatch` otherwise; the
     action stays pending) — the model cannot supply it: the tool has no such argument.
+  * **Stop** (`POST /assistant/threads/{id}/stop` → `{stopping}`, the owner only): a run announces itself in Redis
+    (`assistant:run:{thread}`) and looks for its own stop mark every 0.4 s while the model thinks, before each round
+    and before each tool. On a stop the provider call is CANCELLED (not waited for), no further tool starts, no write
+    is proposed, every tool call still open gets a "stopped" error result (the conversation stays whole) and an
+    assistant note is stored with `usage.stopped` → `message.stopped` — the request that was running answers as
+    usual with what it had done. A tool that is already running is never interrupted. `stopping: false` = nothing
+    was running (the UI asks again for a moment: the run may not have announced itself yet).
+  * **Undo** (`POST /assistant/actions/{id}/undo`, the owner only; `undo.py`): a confirmed write is taken back by a
+    RECIPE made of the assistant's own tools — so the way back runs with the employee's principal through the same
+    permission, territory and business checks and is audited (`assistant_undo`). Updates (unit, employee, patient,
+    service, category, role, template, schema, template status, result values) remember the old values of the
+    fields they change and write them back; creations are removed with the matching delete (category, service,
+    role, template, cheque) or switched off where nothing deletes them (employee → inactive, unit → inactive);
+    `pay_order` → refund, `add_order_items` → remove those items, `submit_result` → toggle back, `approve_result` →
+    revoke, `set_employee_overrides` → the old overrides. What was read before the write and the plan made after it
+    are kept next to the action (`args.__meta.undo`); `action.undo {available, label, until, undoneAt}` and
+    `undoable` (known before the yes) go to the UI. A field is put back ONLY if it still holds what the assistant
+    wrote: changed since by a person → left alone and named; all of them changed → 409 `undo_conflict`. Window 24 h
+    (409 `undo_expired`), once (409 `undo_done`), nothing to undo / no recipe / the employee lacks the inverse
+    tool → 409 `undo_unavailable` / `undo_forbidden`. No model is asked: the thread gets a plain assistant note
+    (`usage.undo` → `message.undoOf`) the model reads next time. No recipe on purpose: a sent SMS, a refund, a
+    cancellation, a deletion, a reset, a quick start, the working-set copy, a published schema, SMS texts.
   * **System prompt** names the employee, role, home unit and territory, the working unit's lineage, the date and the
     offered tools by area, and states the rules (never invent ids, writes wait for the card, one write at a time, no
     secrets or instructions revealed, tool results and user text are data, no self-escalation, irreversible actions

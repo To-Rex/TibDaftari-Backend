@@ -12,6 +12,8 @@ Safety in one place:
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import json
 import uuid
@@ -49,10 +51,12 @@ from app.infrastructure.db.models import (
 from app.infrastructure.redis.client import get_redis
 from app.modules.assistant import describe as ds
 from app.modules.assistant import tools as tl
+from app.modules.assistant import undo as ud
 from app.modules.assistant.providers import PRESETS, AccountConfig, ChatProvider, Reply, ToolCall, Turn, build_provider
 from app.modules.assistant.schemas import (
     ActionDetailOut,
     ActionOut,
+    ActionUndoOut,
     AssistantAccountIn,
     AssistantAccountOut,
     AssistantContextOut,
@@ -64,6 +68,7 @@ from app.modules.assistant.schemas import (
     MessageOut,
     SendIn,
     SendOut,
+    StopOut,
     ThreadDetailOut,
     ThreadOut,
     ToolCallOut,
@@ -82,6 +87,15 @@ ACTION_TTL = timedelta(minutes=30)
 #: 0 = the model's own maximum output
 DEFAULT_MAX_TOKENS = 0
 MSG_NOT_CONFIGURED = "Yordamchi bu birlik uchun sozlanmagan — administrator AI provayderni ulashi kerak"
+#: how long a confirmed write can still be taken back
+UNDO_TTL = timedelta(hours=24)
+#: a run announces itself (so a stop has something to stop) and looks for a stop this often while the model thinks
+RUN_KEY = "assistant:run:{thread_id}"
+STOP_KEY = "assistant:stop:{thread_id}"
+RUN_TTL_SECONDS = 900
+STOP_TTL_SECONDS = 120
+STOP_POLL_SECONDS = 0.4
+STOP_NOTE = "(Foydalanuvchi so‘rovni to‘xtatdi — javob tugallanmadi.)"
 #: what the employee reads instead of a reply that tried to give the assistant's own instructions away
 LEAK_REPLY = "Bu so‘rovga javob bera olmayman: yordamchining ichki ko‘rsatmalari va maxfiy ma’lumotlar oshkor qilinmaydi. Boshqa savolingiz bo‘lsa, yordam beraman."
 LEVEL_UZ = {"company": "Kompaniya", "country": "Davlat", "region": "Viloyat", "district": "Tuman / shahar", "facility": "Muassasa"}
@@ -303,7 +317,7 @@ async def _lineage(session: AsyncSession, scope: UnitScope) -> list[OrgUnit]:
 
 
 def _tool_out(t: tl.Tool) -> AssistantToolOut:
-    return AssistantToolOut(name=t.name, title=t.title, kind=t.kind, group=t.group, danger=t.danger)
+    return AssistantToolOut(name=t.name, title=t.title, kind=t.kind, group=t.group, danger=t.danger, undoable=t.name in ud.RECIPES)
 
 
 async def status(session: AsyncSession, staff: StaffPrincipal, unit_id: str | None) -> AssistantStatusOut:
@@ -384,7 +398,18 @@ def _action_out(a: AssistantAction) -> ActionOut:
         id=str(a.id), thread_id=str(a.thread_id), tool=a.tool, title=a.title, summary=tl.summarize(t, _args(a)) if t else "", args=tl._clean(_args(a)), status=a.status, error=a.error,  # type: ignore[arg-type]
         expires_at=a.expires_at, created_at=a.created_at, details=[ActionDetailOut(label=str(d.get("label", "")), value=str(d.get("value", ""))) for d in meta.get("details") or []],
         danger=bool(meta.get("danger", t.danger if t else False)), confirm_word=meta.get("confirmWord") if a.status == "pending" else None,
+        undoable=a.tool in ud.RECIPES, undo=_undo_out(a, meta),
     )
+
+
+def _undo_out(a: AssistantAction, meta: dict[str, Any]) -> ActionUndoOut | None:
+    """A done action's way back: still open, already used, or expired. None = it never had one."""
+    kept = meta.get("undo")
+    if a.status != "done" or not isinstance(kept, dict):
+        return None
+    until = (a.resolved_at or a.created_at) + UNDO_TTL
+    undone_at = meta.get("undoneAt")
+    return ActionUndoOut(available=not undone_at and until > utcnow(), label=str(kept.get("label") or ""), until=until, undone_at=undone_at)
 
 
 async def _files_of(session: AsyncSession, thread_id: uuid.UUID) -> dict[str, FileOut]:
@@ -417,7 +442,8 @@ def _message_out(m: AssistantMessage, results: dict[str, AssistantMessage], acti
             r = results.get(c.get("id", ""))
             st = "pending" if r is None else ("error" if r.is_error else "ok")
         calls.append(ToolCallOut(id=c.get("id", ""), name=c.get("name", ""), title=t.title if t else c.get("name", ""), kind=kind, summary=tl.summarize(t, c.get("args") or {}) if t else "", status=st, file=files.get(c.get("id", ""))))
-    return MessageOut(id=str(m.id), role=m.role, content=m.content, tool_calls=calls, tool_name=m.tool_name, is_error=m.is_error, action=_action_out(action) if action else None, files=[c.file for c in calls if c.file], choices=choices, created_at=m.created_at)  # type: ignore[arg-type]
+    return MessageOut(id=str(m.id), role=m.role, content=m.content, tool_calls=calls, tool_name=m.tool_name, is_error=m.is_error, action=_action_out(action) if action else None, files=[c.file for c in calls if c.file], choices=choices, created_at=m.created_at,  # type: ignore[arg-type]
+                      stopped=bool((m.usage or {}).get("stopped")) if m.role == "assistant" else False, undo_of=(m.usage or {}).get("undo") if m.role == "assistant" else None)
 
 
 def _outs(rows: list[AssistantMessage], actions: dict[uuid.UUID, AssistantAction], files: dict[str, FileOut] | None = None) -> list[MessageOut]:
@@ -605,6 +631,27 @@ def _result_text(data: Any) -> str:
     return text
 
 
+class _Stopped(Exception):  # noqa: N818 — a signal, not a failure
+    """The employee stopped the run."""
+
+
+async def request_stop(thread_id: uuid.UUID) -> bool:
+    """Mark the run that is working on the thread right now as stopped. False = nothing is running there."""
+    r = get_redis()
+    run_id = await r.get(RUN_KEY.format(thread_id=thread_id))
+    if not run_id:
+        return False
+    await r.set(STOP_KEY.format(thread_id=thread_id), run_id, ex=STOP_TTL_SECONDS)
+    return True
+
+
+async def stop_thread(session: AsyncSession, thread_id: uuid.UUID, staff: StaffPrincipal) -> StopOut:
+    """The owner stops whatever the assistant is doing in their thread: the model call is dropped, no further tool
+    starts. The request that is running answers as usual, with what it had done."""
+    thread = await _thread_or_404(session, thread_id, staff)
+    return StopOut(stopping=await request_stop(thread.id))
+
+
 class _Run:
     """One request's worth of work on a thread: the rows it appended and the write waiting for a yes."""
 
@@ -614,6 +661,9 @@ class _Run:
         self.by_name = {t.name: t for t in allowed}
         self.new: list[AssistantMessage] = []
         self.pending: AssistantAction | None = None
+        self.run_id = uuid.uuid4().hex
+        #: tool calls of the last assistant turn that have no result yet (a stop answers them before it leaves)
+        self.open_calls: dict[str, str] = {}
 
     async def add(self, **fields: Any) -> AssistantMessage:
         m = AssistantMessage(thread_id=self.thread.id, **fields)
@@ -624,7 +674,29 @@ class _Run:
         return m
 
     async def tool_result(self, call_id: str, name: str, data: Any, *, error: bool = False) -> AssistantMessage:
+        self.open_calls.pop(call_id, None)
         return await self.add(role="tool", content=_result_text(data), tool_call_id=call_id, tool_name=name, is_error=error)
+
+    async def stopped(self) -> bool:
+        """The employee pressed stop for THIS run (a stop meant for an earlier run of the thread is not ours)."""
+        return await get_redis().get(STOP_KEY.format(thread_id=self.thread.id)) == self.run_id
+
+    async def complete(self, rows: list[AssistantMessage]) -> Reply:
+        """The model's next turn — given up the moment the employee stops the run: the provider call is cancelled,
+        not waited for."""
+        call = asyncio.ensure_future(self.provider.complete(system=self.system, turns=_turns(rows), tools=tl.definitions(self.allowed)))
+        try:
+            while True:
+                done, _ = await asyncio.wait({call}, timeout=STOP_POLL_SECONDS)
+                if done:
+                    return call.result()
+                if await self.stopped():
+                    raise _Stopped
+        finally:
+            if not call.done():
+                call.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await call
 
     async def execute(self, t: tl.Tool, call_id: str, args: dict[str, Any]) -> tuple[Any, str | None]:
         """Run a tool for this employee; app errors come back as messages the model can act on."""
@@ -640,10 +712,30 @@ class _Run:
         return data, err
 
     async def loop(self) -> None:
-        """Ask the model, run read tools, stop at the first write (it waits for the employee) or at the reply."""
+        """Ask the model, run read tools, stop at the first write (it waits for the employee) or at the reply — or
+        the moment the employee stops the run: what was done stays, nothing further starts, and every tool call
+        still open is answered so the conversation stays whole."""
+        r = get_redis()
+        run_key, stop_key = RUN_KEY.format(thread_id=self.thread.id), STOP_KEY.format(thread_id=self.thread.id)
+        await r.set(run_key, self.run_id, ex=RUN_TTL_SECONDS)
+        try:
+            await self._rounds()
+        except _Stopped:
+            for call_id, name in list(self.open_calls.items()):
+                await self.tool_result(call_id, name, {"error": "stopped", "message": "Foydalanuvchi to‘xtatdi — bajarilmadi"}, error=True)
+            await self.add(role="assistant", content=STOP_NOTE, usage={"stopped": True})
+        finally:
+            if await r.get(run_key) == self.run_id:
+                await r.delete(run_key)
+            if await r.get(stop_key) == self.run_id:
+                await r.delete(stop_key)
+
+    async def _rounds(self) -> None:
         for _ in range(MAX_TOOL_ROUNDS):
+            if await self.stopped():
+                raise _Stopped
             rows = await _messages_of(self.session, self.thread.id)
-            reply: Reply = await self.provider.complete(system=self.system, turns=_turns(rows), tools=tl.definitions(self.allowed))
+            reply: Reply = await self.complete(rows)
             text = _guard(reply.text, self.canary) if self.canary else reply.text
             if reply.stop == "length":
                 text = (text + "\n\n…(javob chegaraga yetdi)").strip()
@@ -653,9 +745,12 @@ class _Run:
             msg = await self.add(role="assistant", content=text, tool_calls=[{"id": c.id, "name": c.name, "args": tl._clean(c.args)} for c in reply.tool_calls] or None, usage=reply.usage)
             if not reply.tool_calls:
                 return
+            self.open_calls = {c.id: c.name for c in reply.tool_calls}
             write: tuple[tl.Tool, ToolCall] | None = None
             asked = False
             for c in reply.tool_calls:
+                if await self.stopped():
+                    raise _Stopped
                 t = self.by_name.get(c.name)
                 if t is None:
                     await self.tool_result(c.id, c.name, {"error": "forbidden", "message": "Bu vosita sizga ruxsat etilmagan yoki mavjud emas"}, error=True)
@@ -670,6 +765,8 @@ class _Run:
                     asked = asked or (c.name == tl.ASK_TOOL and err is None)
             if write is not None:
                 t, c = write
+                if await self.stopped():
+                    raise _Stopped
                 # a proposal that could never run is not shown for confirmation — the model hears why and fixes it
                 try:
                     args = tl.check_args(t, tl._clean(c.args))
@@ -690,6 +787,7 @@ class _Run:
                 msg.action_id = a.id
                 await self.session.flush()
                 self.pending = a
+                self.open_calls.pop(c.id, None)  # answered when the employee decides
                 return
             if asked:
                 # a question with buttons is on the screen — the employee's choice is the next message
@@ -768,7 +866,13 @@ async def confirm_action(session: AsyncSession, action_id: uuid.UUID, staff: Sta
         a.resolved_at = utcnow()
         await run.tool_result(a.tool_call_id, a.tool, {"error": "forbidden", "message": "Bu amalga ruxsat yo‘q"}, error=True)
         raise ForbiddenError("Ruxsat yo‘q")
+    # what the way back needs is read before the write changes it; the plan itself is made from the result
+    memory = await ud.remember(run.ctx, t.name, _args(a))
     data, err = await run.execute(t, a.tool_call_id, _args(a))
+    if not err:
+        kept = await ud.plan(run.ctx, t.name, _args(a), memory, data)
+        if kept:
+            a.args = {**a.args, tl.META_KEY: {**_meta(a), "undo": kept}}
     a.status = "failed" if err else "done"
     a.error = err
     a.result = tl._clean(data) if isinstance(data, (dict, list)) else {"value": data}
@@ -789,3 +893,37 @@ async def cancel_action(session: AsyncSession, action_id: uuid.UUID, staff: Staf
     await run.tool_result(a.tool_call_id, a.tool, {"error": "cancelled", "message": "Foydalanuvchi bekor qildi — amal bajarilmadi"}, error=True)
     await run.loop()
     return await _finish(session, run)
+
+
+async def undo_action(session: AsyncSession, action_id: uuid.UUID, staff: StaffPrincipal, meta: RequestMeta) -> SendOut:
+    """The employee takes a confirmed write back: the plan kept with the action runs with THEIR principal through
+    the assistant's own tools (same permission, territory and business checks as any write), only on what still
+    holds the assistant's values. No model is asked — the thread gets a plain note the model will read next time."""
+    a = await _action_or_404(session, action_id, staff)
+    thread = await _thread_or_404(session, a.thread_id, staff)
+    staff.require(ASSISTANT_PERMISSION)
+    note = _meta(a)
+    kept = note.get("undo")
+    if a.status != "done" or not isinstance(kept, dict):
+        raise ConflictError("Bu amalni orqaga qaytarib bo‘lmaydi", code="undo_unavailable")
+    if note.get("undoneAt"):
+        raise ConflictError("Bu amal allaqachon orqaga qaytarilgan", code="undo_done")
+    if (a.resolved_at or a.created_at) + UNDO_TTL < utcnow():
+        raise ConflictError("Orqaga qaytarish muddati o‘tdi", code="undo_expired")
+    await _rate_limit(staff)
+    unit_id = _work_unit(staff, None, thread.unit_id)
+    scope = await units_svc.scope_or_404(session, unit_id)
+    ctx = tl.ToolContext(session=session, staff=staff, meta=meta, unit_id=unit_id, scope=scope, thread_id=thread.id, call_id=a.tool_call_id)
+    lines = await ud.run(ctx, kept)
+    now = utcnow()
+    a.args = {**a.args, tl.META_KEY: {**note, "undoneAt": now.isoformat()}}
+    msg = AssistantMessage(thread_id=thread.id, role="assistant", content=f"↩ «{a.title}» amali orqaga qaytarildi. " + " ".join(lines), usage={"undo": str(a.id)})
+    session.add(msg)
+    thread.last_message_at = now
+    await audit(session, actor_type="staff", actor_id=staff.id, unit_id=unit_id, country_id=scope.country_id, action="assistant_undo", entity=a.tool, entity_id=str(a.id), after={"steps": [st.get("tool") for st in kept.get("steps") or []], "lines": lines}, ip=meta.ip, request_id=meta.request_id)
+    await session.flush()
+    await session.refresh(msg)
+    origin = (await session.execute(select(AssistantMessage).where(AssistantMessage.thread_id == thread.id, AssistantMessage.action_id == a.id))).scalars().first()
+    actions = await _actions_of(session, thread.id)
+    pending = await _pending(session, thread.id)
+    return SendOut(messages=_outs([m for m in (origin, msg) if m is not None], actions, await _files_of(session, thread.id)), pending=_action_out(pending) if pending else None, thread=_thread_out(thread))
