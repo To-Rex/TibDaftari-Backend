@@ -1,15 +1,23 @@
 """The assistant's tools — thin wrappers over the ordinary service functions, so every call carries the caller's
 `StaffPrincipal` and is checked exactly like the HTTP route would check it (403 outside the territory, 404 for
-what they may not see). A tool is OFFERED to the model only when the employee holds one of its keys, and a WRITE
-tool never runs on the model's word: it becomes a pending action the employee confirms in the UI.
+what they may not see). A tool is OFFERED to the model only when the employee holds one of its keys (the same keys
+the route asks for), and a WRITE tool never runs on the model's word: it becomes a pending action the employee
+confirms in the UI — with the names of what it touches resolved for them (`describe`), and for an irreversible one
+a word they type themselves.
 
-Outputs are DTOs with the secret-looking keys stripped (`_clean`): no password hashes, no API keys, no tokens."""
+Nothing secret reaches the model: DTO keys that look like secrets are stripped and secret-shaped strings masked
+(`_clean` / `redact`), the arguments are checked against the tool's own schema (no smuggled fields), and what the
+platform keeps secret by design — provider keys, bot tokens, portal passwords, superadmin rights — has no tool.
+
+This module holds the registry and the core tools; `tools_admin` (units, staff, catalogue, templates) and
+`tools_work` (reception, laboratory, results, reports, messages) register the rest at the bottom."""
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any, Literal
 
@@ -48,8 +56,29 @@ ToolKind = Literal["read", "write"]
 Handler = Callable[["ToolContext", dict[str, Any]], Awaitable[Any]]
 
 #: keys that never reach the model, whatever DTO they sit in
-SECRET_KEYS = frozenset({"password", "passwordHash", "password_hash", "apiKey", "apiKeyEnc", "api_key", "api_key_enc", "apiKeyMasked", "botToken", "token", "accessToken", "secret", "sms", "telegram"})
+SECRET_KEYS = frozenset({
+    "password", "passwordHash", "password_hash", "newPassword", "currentPassword", "defaultPassword", "apiKey", "apiKeyEnc", "api_key", "api_key_enc", "apiKeyMasked",
+    "botToken", "token", "accessToken", "refreshToken", "publicToken", "public_token", "verifyToken", "verify_token", "secret", "webhookSecret", "jti", "otp", "sms", "telegram",
+})
 LIST_LIMIT = 200
+#: the key under which the server keeps its own notes about a proposed write next to the arguments (never the model's)
+META_KEY = "__meta"
+MASK = "•••"
+#: strings that are secrets by their shape, wherever they turn up: JWTs, provider keys, bot tokens, bearer values, result links
+_SECRET_SHAPES = (
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}"), MASK),
+    (re.compile(r"\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}"), MASK),
+    (re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{30,}"), MASK),
+    (re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{20,}"), r"\1" + MASK),
+    (re.compile(r"(/(?:d|v)/)[A-Za-z0-9_-]{12,}"), r"\1" + MASK),
+)
+
+
+def redact(text: str) -> str:
+    """Mask what is a secret by its shape (tokens, provider keys, public result links) inside any text."""
+    for rx, repl in _SECRET_SHAPES:
+        text = rx.sub(repl, text)
+    return text
 
 
 @dataclass
@@ -77,19 +106,85 @@ class Tool:
     handler: Handler
     #: which argument keys name the thing acted on, for the one-line summary shown to the employee
     summary_keys: tuple[str, ...] = ()
+    #: where the tool belongs in the "what I can do" list of the UI
+    group: str = "general"
+    #: a write that cannot be taken back (delete, refund, reset) — the confirmation says so
+    danger: bool = False
+    #: the word the employee must type themselves to confirm (irreversible resets): args → word
+    confirm_word: Callable[[ToolContext, dict[str, Any]], Awaitable[str]] | None = None
 
 
 REGISTRY: dict[str, Tool] = {}
 
 
-def tool(name: str, title: str, description: str, *, params: dict[str, Any] | None = None, kind: ToolKind = "read", perms: Iterable[str] = (), summary_keys: Iterable[str] = ()) -> Callable[[Handler], Handler]:
-    schema = {"type": "object", "properties": params or {}, "additionalProperties": False}
-    required = [k for k, v in (params or {}).items() if v.pop("req", False)]
+_SCHEMA_NOISE = frozenset({"title", "default", "$defs", "additionalProperties", "maxLength", "minLength", "pattern", "maxItems", "minItems", "format"})
+
+
+def _simplify(node: Any, defs: dict[str, Any], depth: int = 0) -> Any:
+    """A Pydantic JSON schema as a plain tool schema: `$ref`s inlined, `X | None` → `X`, validation noise dropped
+    (every provider understands the result; the service validates for real anyway)."""
+    if isinstance(node, list):
+        return [_simplify(x, defs, depth) for x in node]
+    if not isinstance(node, dict):
+        return node
+    if "$ref" in node:
+        return _simplify(defs.get(str(node["$ref"]).rsplit("/", 1)[-1], {}), defs, depth + 1) if depth < 6 else {"type": "object"}
+    for key in ("anyOf", "oneOf"):
+        if key in node:
+            options = [o for o in node[key] if o.get("type") != "null"]
+            rest = {k: v for k, v in node.items() if k != key}
+            return _simplify({**options[0], **rest} if len(options) == 1 else {**rest, "type": "object"} if not options else {**rest, **options[0]}, defs, depth)
+    out: dict[str, Any] = {}
+    for k, v in node.items():
+        if k in _SCHEMA_NOISE:
+            continue
+        if k == "properties":
+            out[k] = {pk: _simplify(pv, defs, depth) for pk, pv in v.items()}
+        elif k == "items":
+            out[k] = _simplify(v, defs, depth)
+        elif k == "description":
+            out[k] = " ".join(str(v).split())[:240]
+        else:
+            out[k] = v
+    return out
+
+
+def params_of(model: Any, *, omit: Iterable[str] = (), only: Iterable[str] | None = None) -> tuple[dict[str, Any], list[str]]:
+    """(properties, required) of an API input model, in the wire's camelCase — a tool built on it can never drift
+    from what the route accepts."""
+    schema = model.model_json_schema(by_alias=True)
+    plain = _simplify({k: v for k, v in schema.items() if k != "$defs"}, schema.get("$defs", {}))
+    skip = set(omit) | SECRET_KEYS
+    keep = set(only) if only is not None else None
+    props = {k: v for k, v in (plain.get("properties") or {}).items() if k not in skip and (keep is None or k in keep)}
+    return props, [k for k in plain.get("required") or [] if k in props]
+
+
+def tool(
+    name: str, title: str, description: str, *, params: dict[str, Any] | None = None, model: Any = None, omit: Iterable[str] = (), only: Iterable[str] | None = None,
+    kind: ToolKind = "read", perms: Iterable[str] = (), summary_keys: Iterable[str] = (), group: str = "general", danger: bool = False,
+    confirm_word: Callable[[ToolContext, dict[str, Any]], Awaitable[str]] | None = None,
+) -> Callable[[Handler], Handler]:
+    """Register a tool. `params` are written by hand (`"req": True` marks a required one); `model` adds the fields
+    of an API input model (minus `omit`, or `only` those) — the hand-written ones win."""
+    props: dict[str, Any] = {}
+    required: list[str] = []
+    if model is not None:
+        props, required = params_of(model, omit=omit, only=only)
+    for k, v in (params or {}).items():
+        v = dict(v)
+        req = v.pop("req", False)
+        props[k] = v
+        if req and k not in required:
+            required.append(k)
+        elif not req and k in required:
+            required.remove(k)
+    schema: dict[str, Any] = {"type": "object", "properties": props, "additionalProperties": False}
     if required:
         schema["required"] = required
 
     def deco(fn: Handler) -> Handler:
-        REGISTRY[name] = Tool(name=name, title=title, description=description, params=schema, kind=kind, perms=tuple(perms), handler=fn, summary_keys=tuple(summary_keys))
+        REGISTRY[name] = Tool(name=name, title=title, description=description, params=schema, kind=kind, perms=tuple(perms), handler=fn, summary_keys=tuple(summary_keys), group=group, danger=danger, confirm_word=confirm_word)
         return fn
 
     return deco
@@ -119,11 +214,27 @@ def summarize(t: Tool, args: dict[str, Any]) -> str:
 
 
 def _clean(obj: Any) -> Any:
+    """What may leave the server towards the model or the chat: no secret keys, no secret-shaped strings."""
     if isinstance(obj, dict):
-        return {k: _clean(v) for k, v in obj.items() if k not in SECRET_KEYS}
+        return {k: _clean(v) for k, v in obj.items() if k not in SECRET_KEYS and k != META_KEY}
     if isinstance(obj, list):
         return [_clean(x) for x in obj]
+    if isinstance(obj, str):
+        return redact(obj)
     return obj
+
+
+def check_args(t: Tool, args: dict[str, Any]) -> dict[str, Any]:
+    """The arguments a tool really takes: nothing outside its schema (a field the tool does not offer cannot be
+    smuggled into the service's input model), nothing required left out."""
+    props = t.params.get("properties") or {}
+    unknown = sorted(k for k in args if k not in props)
+    if unknown:
+        raise ValidationError(f"Bu vositada bunday argument yo‘q: {', '.join(unknown[:6])}", code="unknown_argument")
+    missing = [k for k in t.params.get("required") or [] if args.get(k) in (None, "", [])]
+    if missing:
+        raise ValidationError(f"Majburiy argument berilmagan: {', '.join(missing)}", code="missing_argument")
+    return {k: v for k, v in args.items() if v is not None}
 
 
 def _dump(dto: Any, keys: Iterable[str] | None = None) -> Any:
@@ -166,7 +277,10 @@ UNIT_KEYS = ("id", "name", "level", "kind", "code", "path", "parentId", "isActiv
 EMP_KEYS = ("id", "fullName", "login", "phone", "email", "roleId", "roleKey", "roleName", "unitId", "unitName", "unitIds", "status", "categoryIds")
 
 
-@tool("whoami", "Mening hisobim", "Who the current employee is: name, role, home unit, working unit, permissions and the tools available to them. Call it when the user asks what they can do.")
+ASK_TOOL = "ask_user"
+
+
+@tool("whoami", "Mening hisobim", "Who the current employee is: name, role, home unit and the other units they work in, the working unit, permissions and the tools available to them. Call it when the user asks what they can do.")
 async def whoami(ctx: ToolContext, args: dict[str, Any]) -> Any:
     s = ctx.staff
     return {
@@ -175,20 +289,31 @@ async def whoami(ctx: ToolContext, args: dict[str, Any]) -> Any:
         "role": {"key": s.role_key, "name": s.role.name if s.role else None},
         "isSuperAdmin": s.is_super_admin,
         "homeUnit": {"id": _str(s.home_unit.id), "name": s.home_unit.name, "level": s.home_unit.level} if s.home_unit else None,
+        "territory": "butun platforma" if s.is_super_admin else [str(u) for u in s.unit_ids],
         "workingUnit": {"id": str(ctx.scope.id), "name": ctx.scope.unit.name, "level": ctx.scope.unit.level},
         "permissions": sorted(s.permissions) if not s.is_super_admin else ["*"],
         "tools": [t.name for t in tools_for(s)],
     }
 
 
-@tool("list_units", "Birliklar ro‘yxati", "List organisation units (company / country / region / district / facility) the user may see, optionally under one parent, filtered by name/code and level. Returns id, name, level, code, path, counts.",
+@tool(ASK_TOOL, "Aniqlashtirish", "Ask the employee to choose when the request is ambiguous — several units / patients / templates match, or a detail is missing: one short question and 2–8 short options. They appear as buttons under your message and the choice arrives as the next message. Put the question in `question`, do not repeat the options in your text. Use it instead of guessing.",
+      params={"question": {"type": "string", "req": True}, "options": {"type": "array", "items": {"type": "string"}, "req": True, "description": "2–8 short labels, each understandable on its own (e.g. the unit's name with its district)"}})
+async def ask_user(ctx: ToolContext, args: dict[str, Any]) -> Any:
+    options = [str(o).strip()[:120] for o in (args.get("options") or []) if str(o).strip()][:8]
+    if len(options) < 2:
+        raise ValidationError("Kamida ikkita variant kerak — bitta bo‘lsa, shuni ishlating yoki oddiy savol bering")
+    return {"status": "shown", "note": "Variantlar foydalanuvchiga ko‘rsatildi. Javobini kuting — o‘zingiz tanlamang."}
+
+
+@tool("list_units", "Birliklar ro‘yxati", "List organisation units (company / country / region / district / facility) the user may see, optionally under one parent, filtered by level and by words of the name / code / path — `search` matches the unit AND the places above it, so search='shovot' level='facility' finds the facilities of Shovot district. Returns id, name, level, code, path (Company › Country › Region › District › Facility), counts.",
       params={"parentId": {"type": "string", "description": "limit to the subtree of this unit"}, "search": {"type": "string"}, "level": {"type": "string", "enum": ["company", "country", "region", "district", "facility"]}, "includeInactive": {"type": "boolean"}})
 async def list_units(ctx: ToolContext, args: dict[str, Any]) -> Any:
     rows = await units_svc.list_tree(ctx.session, ctx.staff, UnitTreeQuery(root_id=_str(args.get("parentId")), include_inactive=bool(args.get("includeInactive", False))))
     q = str(args.get("search") or "").strip().lower()
     level = args.get("level")
-    out = [u for u in rows if (not level or u.level == level) and (not q or q in f"{u.name} {u.code or ''} {u.path}".lower())]
-    return {"total": len(out), "items": [_dump(u, UNIT_KEYS) for u in out[:LIST_LIMIT]]}
+    words = q.split()
+    out = [u for u in rows if (not level or u.level == level) and all(w in f"{u.name} {u.code or ''} {u.path} {u.region_name or ''} {u.district_name or ''}".lower() for w in words)]
+    return {"total": len(out), "items": [_dump(u, (*UNIT_KEYS, "companyName", "regionName", "districtName")) for u in out[:LIST_LIMIT]]}
 
 
 @tool("get_unit", "Birlik kartasi", "One unit's card: profile, contacts, effective settings, counts.", params={"unitId": {"type": "string", "req": True}})
@@ -298,20 +423,24 @@ async def outbox_counts(ctx: ToolContext, args: dict[str, Any]) -> Any:
 # ============================================================================= write tools (confirmed by the employee)
 
 
-@tool("update_unit", "Birlikni tahrirlash", "Change a unit's profile: name, short name, legal name, phone, email, address, active flag; for a facility also its kind and cheque code. Only the given fields change.",
-      params={"unitId": {"type": "string", "req": True}, "name": {"type": "string"}, "shortName": {"type": "string"}, "legalName": {"type": "string"}, "phone": {"type": "string"}, "email": {"type": "string"}, "address": {"type": "string"}, "isActive": {"type": "boolean"}, "kind": {"type": "string", "enum": ["ses", "clinic", "laboratory", "polyclinic", "hospital", "pharmacy", "other"]}, "code": {"type": "string"}},
-      kind="write", perms=("admin.unit.write",), summary_keys=("unitId", "name", "phone", "isActive"))
+@tool("update_unit", "Birlikni tahrirlash", "Change a unit: name, short / legal name, phone, email, address, active flag, time zone, order; for a facility its kind and cheque code; and two settings — documentFreeViewDays (how many days a result link opens without an SMS code) and locale. Only the given fields change.",
+      model=UnitUpdateIn, omit=("logoUrl",), params={"unitId": {"type": "string", "req": True}}, kind="write", perms=("admin.unit.write", "admin.settings.write"), summary_keys=("unitId", "name", "phone", "isActive"), group="units")
 async def update_unit(ctx: ToolContext, args: dict[str, Any]) -> Any:
     uid = _uuid(args["unitId"], "unitId")
     fields = {k: v for k, v in args.items() if k != "unitId"}
     if not fields:
         raise ValidationError("O‘zgartiriladigan maydon yo‘q")
-    return _dump(await units_svc.update_unit(ctx.session, uid, UnitUpdateIn.model_validate(fields), ctx.staff, ctx.meta), UNIT_KEYS)
+    body = UnitUpdateIn.model_validate(fields)
+    # the settings page may change the two settings only; the profile needs the unit-write key (as the route does)
+    if set(body.model_fields_set) <= {"document_free_view_days", "locale"}:
+        ctx.staff.require("admin.settings.write", "admin.unit.write")
+    else:
+        ctx.staff.require("admin.unit.write")
+    return _dump(await units_svc.update_unit(ctx.session, uid, body, ctx.staff, ctx.meta), UNIT_KEYS)
 
 
-@tool("create_unit", "Birlik yaratish", "Create a unit under a parent: a region node needs the geo regionId, a district node districtId, a facility needs kind and a cheque code.",
-      params={"parentId": {"type": "string", "req": True}, "name": {"type": "string", "req": True}, "kind": {"type": "string"}, "code": {"type": "string"}, "regionId": {"type": "string"}, "districtId": {"type": "string"}, "phone": {"type": "string"}, "address": {"type": "string"}},
-      kind="write", perms=("admin.unit.manage",), summary_keys=("name", "kind", "code"))
+@tool("create_unit", "Birlik yaratish", "Create a unit under a parent (parentId; default: the working unit): under a company — a country node (countryId from list_geo); under a country — a region node (geo regionId); under a region — a district node (geo districtId); under a district — a facility (kind and a cheque code). Without a parent and for a platform admin only: a new company (name). For a facility ready to work use quick_start.",
+      model=UnitCreateIn, omit=("sortOrder",), kind="write", perms=("admin.unit.manage", "platform.unit.manage"), summary_keys=("name", "parentId", "kind", "code"), group="units")
 async def create_unit(ctx: ToolContext, args: dict[str, Any]) -> Any:
     return _dump(await units_svc.create_unit(ctx.session, UnitCreateIn.model_validate(args), ctx.staff, ctx.meta), UNIT_KEYS)
 
@@ -319,32 +448,32 @@ async def create_unit(ctx: ToolContext, args: dict[str, Any]) -> Any:
 @tool("quick_start", "Muassasani tezkor ishga tushirish", "Create a facility ready to work in one go under a country / region / district: missing region / district nodes (geo ids), the facility, default staff accounts (registrator, vrach, laborant, rahbar) with one password, and the catalogue + templates copied from a sample facility.",
       params={"parentId": {"type": "string", "req": True}, "regionId": {"type": "string"}, "districtId": {"type": "string"}, "facility": {"type": "object", "req": True, "properties": {"name": {"type": "string"}, "kind": {"type": "string"}, "code": {"type": "string"}, "phone": {"type": "string"}, "address": {"type": "string"}}, "required": ["name", "kind", "code"]},
               "staff": {"type": "array", "items": {"type": "object", "properties": {"role": {"type": "string", "enum": ["registrator", "vrach", "laborant", "rahbar", "admin"]}, "fullName": {"type": "string"}, "login": {"type": "string"}}, "required": ["role", "fullName", "login"]}},
-              "password": {"type": "string"}, "sampleFacilityId": {"type": "string"}},
+              "sampleFacilityId": {"type": "string", "description": "from quick_start_options / list_sample_facilities"}},
       kind="write", perms=("admin.unit.manage",), summary_keys=("facility", "regionId", "districtId", "sampleFacilityId"))
 async def quick_start(ctx: ToolContext, args: dict[str, Any]) -> Any:
     parent = await units_svc.get_unit_or_404(ctx.session, _uuid(args["parentId"], "parentId"))
     body = QuickStartIn.model_validate({
         "regionId": args.get("regionId"), "districtId": args.get("districtId"), "facility": args["facility"], "staff": args.get("staff") or [],
-        "password": args.get("password") or "123456", "sample": {"facilityId": args["sampleFacilityId"], "owner": "region"} if args.get("sampleFacilityId") else None,
+        "password": staff_svc.DEFAULT_PASSWORD, "sample": {"facilityId": args["sampleFacilityId"], "owner": "region"} if args.get("sampleFacilityId") else None,
     })
     out = await quickstart.quick_start(ctx.session, parent, body, ctx.staff, ctx.meta)
     return {"facility": _dump(out.facility, UNIT_KEYS), "regionCreated": out.region.name if out.region else None, "districtCreated": out.district.name if out.district else None,
             "employees": [{"fullName": e.full_name, "login": e.login, "role": e.role_key} for e in out.employees], "catalog": _dump(out.catalog), "receipt": _dump(out.receipt) if out.receipt else None}
 
 
-@tool("create_employee", "Xodim qo‘shish", "Create an employee at a unit (default: the working unit) with a role (roleKey: registrator | vrach | laborant | rahbar | admin, or a roleId from list_roles). Password defaults to 123456.",
-      params={"fullName": {"type": "string", "req": True}, "login": {"type": "string", "req": True}, "roleKey": {"type": "string"}, "roleId": {"type": "string"}, "unitId": {"type": "string"}, "phone": {"type": "string"}, "email": {"type": "string"}, "password": {"type": "string"}},
-      kind="write", perms=("admin.employee.write",), summary_keys=("fullName", "login", "roleKey", "roleId", "unitId"))
+@tool("create_employee", "Xodim qo‘shish", "Create an employee at a unit (default: the working unit) with a role — roleKey (registrator | vrach | laborant | rahbar | admin) or a roleId from list_roles; unitIds = extra units they also work in, categoryIds = the lab categories a laborant is limited to. The account starts with the standard password; the employee or an administrator changes it on the employee card (passwords are never set through the chat).",
+      model=EmployeeCreateIn, omit=("overrides", "isSuperAdmin", "status"), params={"roleId": {"type": "string"}, "roleKey": {"type": "string"}},
+      kind="write", perms=("admin.employee.write",), summary_keys=("fullName", "login", "roleKey", "roleId", "unitId"), group="staff")
 async def create_employee(ctx: ToolContext, args: dict[str, Any]) -> Any:
     scope = await _scope(ctx, args.get("unitId"))
     role_id = _str(args.get("roleId")) or await _system_role_id(ctx.session, str(args.get("roleKey") or "registrator"))
-    body = EmployeeCreateIn(full_name=str(args["fullName"]), login=str(args["login"]), password=args.get("password"), phone=args.get("phone"), email=args.get("email"), role_id=role_id, unit_id=str(scope.id))
+    body = EmployeeCreateIn.model_validate({**{k: v for k, v in args.items() if k != "roleKey"}, "roleId": role_id, "unitId": str(scope.id)})
     return _dump(await staff_svc.create_employee(ctx.session, scope, body, ctx.staff, ctx.meta), EMP_KEYS)
 
 
-@tool("update_employee", "Xodimni tahrirlash", "Change an employee: name, phone, email, status (active / inactive), role (roleKey or roleId), home unit, or set a new password. Only the given fields change.",
-      params={"employeeId": {"type": "string", "req": True}, "fullName": {"type": "string"}, "phone": {"type": "string"}, "email": {"type": "string"}, "status": {"type": "string", "enum": ["active", "inactive"]}, "roleKey": {"type": "string"}, "roleId": {"type": "string"}, "unitId": {"type": "string"}, "password": {"type": "string"}},
-      kind="write", perms=("admin.employee.write",), summary_keys=("employeeId", "fullName", "status", "roleKey", "roleId", "unitId"))
+@tool("update_employee", "Xodimni tahrirlash", "Change an employee: name, login, phone, email, status (active / inactive), role (roleKey or roleId), home unit, extra units (unitIds, wholesale), lab categories (categoryIds, wholesale). Only the given fields change. Passwords and superadmin rights are not changed through the chat.",
+      model=EmployeeUpdateIn, omit=("overrides", "isSuperAdmin"), params={"employeeId": {"type": "string", "req": True}, "roleKey": {"type": "string"}},
+      kind="write", perms=("admin.employee.write",), summary_keys=("employeeId", "fullName", "status", "roleKey", "roleId", "unitId"), group="staff")
 async def update_employee(ctx: ToolContext, args: dict[str, Any]) -> Any:
     eid = _uuid(args["employeeId"], "employeeId")
     fields = {k: v for k, v in args.items() if k not in ("employeeId", "roleKey")}
@@ -355,35 +484,35 @@ async def update_employee(ctx: ToolContext, args: dict[str, Any]) -> Any:
     return _dump(await staff_svc.update_employee(ctx.session, eid, EmployeeUpdateIn.model_validate(fields), ctx.staff, ctx.meta), EMP_KEYS)
 
 
-@tool("update_service_type", "Xizmatni tahrirlash", "Change a service type: name, code, base price (UZS), turnaround days, active flag.",
-      params={"serviceTypeId": {"type": "string", "req": True}, "name": {"type": "string"}, "code": {"type": "string"}, "price": {"type": "integer", "minimum": 0}, "turnaroundDays": {"type": "integer", "minimum": 0}, "isActive": {"type": "boolean"}},
-      kind="write", perms=("admin.catalog.write",), summary_keys=("serviceTypeId", "name", "price", "isActive"))
+SERVICE_OUT = ("id", "name", "code", "price", "unitPrices", "disabledUnitIds", "isActive", "turnaroundDays", "categoryId", "schemaId", "documentScope", "defaultTemplateId")
+
+
+@tool("update_service_type", "Xizmatni tahrirlash", "Change a service type: name, code, base price (UZS), per-unit prices (unitPrices = {unitId: price}, wholesale), the units where it is switched off (disabledUnitIds, wholesale), turnaround days, active flag, category, result schema, default template, document scope.",
+      model=ServiceTypeUpdateIn, params={"serviceTypeId": {"type": "string", "req": True}}, kind="write", perms=("admin.catalog.write",), summary_keys=("serviceTypeId", "name", "price", "isActive"), group="catalog")
 async def update_service_type(ctx: ToolContext, args: dict[str, Any]) -> Any:
     sid = _uuid(args["serviceTypeId"], "serviceTypeId")
     fields = {k: v for k, v in args.items() if k != "serviceTypeId"}
     if not fields:
         raise ValidationError("O‘zgartiriladigan maydon yo‘q")
-    return _dump(await catalog_svc.update_service_type(ctx.session, sid, ServiceTypeUpdateIn.model_validate(fields), ctx.staff, ctx.meta), ("id", "name", "code", "price", "isActive", "turnaroundDays", "categoryId"))
+    return _dump(await catalog_svc.update_service_type(ctx.session, sid, ServiceTypeUpdateIn.model_validate(fields), ctx.staff, ctx.meta), SERVICE_OUT)
 
 
-@tool("create_service_type", "Xizmat qo‘shish", "Create a service type in a category, owned by the working unit (or unitId): name, base price, optional code and turnaround days.",
-      params={"categoryId": {"type": "string", "req": True}, "name": {"type": "string", "req": True}, "price": {"type": "integer", "minimum": 0}, "code": {"type": "string"}, "turnaroundDays": {"type": "integer", "minimum": 0}, "unitId": {"type": "string"}},
-      kind="write", perms=("admin.catalog.write",), summary_keys=("name", "price", "categoryId"))
+@tool("create_service_type", "Xizmat qo‘shish", "Create a service type in a category, owned by the working unit (or unitId): name, base price, optional code, turnaround days, result schema, default template.",
+      model=ServiceTypeCreateIn, params={"unitId": {"type": "string"}}, kind="write", perms=("admin.catalog.write",), summary_keys=("name", "price", "categoryId"), group="catalog")
 async def create_service_type(ctx: ToolContext, args: dict[str, Any]) -> Any:
     scope = await _scope(ctx, args.get("unitId"))
     body = ServiceTypeCreateIn.model_validate({k: v for k, v in args.items() if k != "unitId"})
-    return _dump(await catalog_svc.create_service_type(ctx.session, scope, body, ctx.staff, ctx.meta), ("id", "name", "code", "price", "isActive", "turnaroundDays", "categoryId"))
+    return _dump(await catalog_svc.create_service_type(ctx.session, scope, body, ctx.staff, ctx.meta), SERVICE_OUT)
 
 
-@tool("update_category", "Kategoriyani tahrirlash", "Rename a category, change its order or active flag.",
-      params={"categoryId": {"type": "string", "req": True}, "name": {"type": "string"}, "isActive": {"type": "boolean"}, "order": {"type": "integer", "minimum": 0}},
-      kind="write", perms=("admin.catalog.write",), summary_keys=("categoryId", "name", "isActive"))
+@tool("update_category", "Kategoriyani tahrirlash", "Change a category: name, code, parent, order, active flag, workflow, phone.",
+      model=CategoryUpdateIn, params={"categoryId": {"type": "string", "req": True}}, kind="write", perms=("admin.catalog.write",), summary_keys=("categoryId", "name", "isActive"), group="catalog")
 async def update_category(ctx: ToolContext, args: dict[str, Any]) -> Any:
     cid = _uuid(args["categoryId"], "categoryId")
     fields = {k: v for k, v in args.items() if k != "categoryId"}
     if not fields:
         raise ValidationError("O‘zgartiriladigan maydon yo‘q")
-    return _dump(await catalog_svc.update_category(ctx.session, cid, CategoryUpdateIn.model_validate(fields), ctx.staff, ctx.meta), ("id", "name", "code", "isActive", "parentId"))
+    return _dump(await catalog_svc.update_category(ctx.session, cid, CategoryUpdateIn.model_validate(fields), ctx.staff, ctx.meta), ("id", "name", "code", "isActive", "parentId", "workflow"))
 
 
 @tool("set_template_status", "Andoza holati", "Activate, archive or return a template to draft.", params={"templateId": {"type": "string", "req": True}, "status": {"type": "string", "enum": ["draft", "active", "archived"], "req": True}},
@@ -665,4 +794,22 @@ async def export_chart(ctx: ToolContext, args: dict[str, Any]) -> Any:
 
 
 async def run_tool(t: Tool, ctx: ToolContext, args: dict[str, Any]) -> Any:
-    return await t.handler(ctx, dict(args or {}))
+    return await t.handler(ctx, check_args(t, {k: v for k, v in (args or {}).items() if k != META_KEY}))
+
+
+_GROUPS = {
+    "units": ("list_units", "get_unit", "quick_start"),
+    "staff": ("list_employees", "get_employee", "list_roles"),
+    "catalog": ("list_categories", "list_service_types"),
+    "templates": ("list_templates", "set_template_status"),
+    "reception": ("list_orders", "get_order", "search_patients", "get_patient"),
+    "reports": ("dashboard", "breakdown"),
+    "messaging": ("outbox_counts", "send_sms"),
+    "files": ("export_data", "export_table", "export_document", "export_chart"),
+}
+for _group, _names in _GROUPS.items():
+    for _name in _names:
+        REGISTRY[_name] = replace(REGISTRY[_name], group=_group)
+
+# the rest of the tools register themselves on import (they need the registry above)
+from app.modules.assistant import tools_admin, tools_work  # noqa: E402, F401

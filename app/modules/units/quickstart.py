@@ -345,13 +345,26 @@ class _Copied:
 
 
 async def copy_working_set(
-    session: AsyncSession, sample: OrgUnit, facility: OrgUnit, owner: OrgUnit, staff: StaffPrincipal
+    session: AsyncSession, sample: OrgUnit, facility: OrgUnit, owner: OrgUnit, staff: StaffPrincipal, *, skip_existing: bool = False
 ) -> _Copied:
     """Copy what `sample` works with onto `facility`: catalogue rows not inherited by the facility are re-owned by
-    `owner`; every template usable at the sample is copied, remapped and bound to the facility."""
+    `owner`; every template usable at the sample is copied, remapped and bound to the facility.
+
+    `skip_existing` is for a facility that already works (the assistant's "add the sample's set here"): a category,
+    service, schema or template the facility already has under the same name is reused instead of copied twice."""
     res = _Copied()
     sample_path = await scope_ancestor_ids(session, sample.id)
-    new_path = set(await scope_ancestor_ids(session, facility.id))
+    facility_path = await scope_ancestor_ids(session, facility.id)
+    new_path = set(facility_path)
+    have_schemas: dict[str, uuid.UUID] = {}
+    have_categories: dict[tuple[uuid.UUID | None, str], uuid.UUID] = {}
+    have_services: dict[tuple[uuid.UUID, str], uuid.UUID] = {}
+    have_templates: dict[tuple[str, str], uuid.UUID] = {}
+    if skip_existing:
+        have_schemas = {x.name.strip().lower(): x.id for x in await catalog_repo.list_schemas(session, facility_path) if x.status != "archived"}
+        have_categories = {(x.parent_id, x.name.strip().lower()): x.id for x in await catalog_repo.list_categories(session, facility_path)}
+        have_services = {(x.category_id, x.name.strip().lower()): x.id for x in await catalog_repo.list_service_types(session, facility_path)}
+        have_templates = {(x.scope, x.name.strip().lower()): x.id for x in await _templates_usable(session, facility_path)}
     cats = await catalog_repo.list_categories(session, sample_path)
     services = await catalog_repo.list_service_types(session, sample_path)
     schemas = await catalog_repo.list_schemas(session, sample_path)
@@ -364,6 +377,10 @@ async def copy_working_set(
             res.inherited.schemas += 1
             continue
         if s.status == "archived":
+            continue
+        if s.name.strip().lower() in have_schemas:
+            res.schemas[s.id] = have_schemas[s.name.strip().lower()]
+            res.inherited.schemas += 1
             continue
         row = AttributeSchema(
             id=uuid7(),
@@ -393,6 +410,12 @@ async def copy_working_set(
         rest = []
         for c in pending:
             if c.parent_id is None or c.parent_id in res.categories:
+                twin = have_categories.get((res.categories.get(c.parent_id) if c.parent_id else None, c.name.strip().lower()))
+                if twin is not None:
+                    res.categories[c.id] = twin
+                    res.inherited.categories += 1
+                    progressed = True
+                    continue
                 row = Category(
                     id=uuid7(),
                     owner_unit_id=owner.id,
@@ -445,6 +468,10 @@ async def copy_working_set(
         category_id = res.categories.get(s.category_id)
         if category_id is None:
             continue
+        if (category_id, s.name.strip().lower()) in have_services:
+            res.services[s.id] = have_services[(category_id, s.name.strip().lower())]
+            res.inherited.service_types += 1
+            continue
         row = ServiceType(
             id=uuid7(),
             owner_unit_id=owner.id,
@@ -468,7 +495,15 @@ async def copy_working_set(
     await session.flush()
 
     bind_to = [facility.id] if owner.id != facility.id else []
+    made: list[uuid.UUID] = []
     for t in templates:
+        if (t.scope, t.name.strip().lower()) in have_templates:
+            res.templates[t.id] = have_templates[(t.scope, t.name.strip().lower())]
+            if t.scope == "receipt":
+                res.inherited.receipts += 1
+            else:
+                res.inherited.templates += 1
+            continue
         row = ResultTemplate(
             id=uuid7(),
             owner_unit_id=owner.id,
@@ -487,12 +522,13 @@ async def copy_working_set(
         )
         session.add(row)
         res.templates[t.id] = row.id
+        made.append(row.id)
         if t.scope == "receipt":
             res.copied.receipts += 1
         else:
             res.copied.templates += 1
     await session.flush()
-    for new_id in res.templates.values():
+    for new_id in made:
         for unit_id in bind_to:
             session.add(TemplateUnit(template_id=new_id, unit_id=unit_id))
     for src, row in copied_services:

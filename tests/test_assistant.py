@@ -527,7 +527,7 @@ def test_rate_limit_and_tool_round_cap(ctx: dict, fake: FakeProvider, monkeypatc
     monkeypatch.setattr(service, "RATE_WINDOW_SECONDS", 600)  # long: the tool rounds below are slow over a tunnel
     reset_rate_limit(c)
     tid = new_thread(ctx, "super", ctx["a"]["region"])
-    for _ in range(8):
+    for _ in range(service.MAX_TOOL_ROUNDS + 2):
         fake.call("whoami", {})
     fake.say("never reached")
     out = send(ctx, "super", tid, "loop", unit_id=ctx["a"]["region"])

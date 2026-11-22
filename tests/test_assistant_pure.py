@@ -60,7 +60,17 @@ def test_tools_follow_the_keys_of_the_role() -> None:
         "update_category",
         "set_template_status",
         "send_sms",
-    } == writes
+    } <= writes
+    # the reception sees its own writes and nobody else's; a laborant theirs
+    reception = {t.name for t in tools.tools_for(principal(["assistant.use", "reception.patient.read", "reception.patient.write", "reception.order.create", "reception.payment.create"]))}
+    assert {"create_patient", "update_patient", "create_order", "add_order_items", "pay_order", "list_patients"} <= reception
+    assert not ({"refund_payment", "cancel_order", "delete_order", "save_result_values", "approve_result", "create_role", "reset_unit", "copy_working_set", "update_sms_templates"} & reception)
+    lab = {t.name for t in tools.tools_for(principal(["assistant.use", "lab.worklist.read", "lab.result.write", "lab.result.submit"]))}
+    assert {"worklist", "worklist_counts", "get_order_item", "save_result_values", "submit_result"} <= lab
+    assert not ({"approve_result", "revoke_result", "create_order", "pay_order", "list_patients", "update_unit"} & lab)
+    leader = {t.name for t in tools.tools_for(principal(["assistant.use", "reports.operations.read", "reports.finance.read", "admin.unit.read", "admin.employee.read", "admin.catalog.read", "admin.template.read"]))}
+    assert {"dashboard", "patients_report", "results_report", "sms_report", "services_report", "territory_stats", "get_template", "list_schemas"} <= leader
+    assert all(tools.REGISTRY[n].kind == "read" for n in leader)
 
 
 def test_definitions_are_json_schema_objects() -> None:

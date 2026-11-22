@@ -66,6 +66,19 @@ class AssistantToolOut(CamelModel):
     name: str
     title: str
     kind: ToolKind
+    #: where the tool belongs in the "what I can do" list: units, staff, catalog, templates, reception, lab, results, reports, messaging, files, general
+    group: str = "general"
+    #: a write that cannot be taken back
+    danger: bool = False
+
+
+class AssistantContextOut(CamelModel):
+    """One step of the working unit's lineage (company → … → the unit) — what the assistant is told about where the employee works."""
+
+    level: Literal["company", "country", "region", "district", "facility"]
+    id: str
+    name: str
+    code: str | None = None
 
 
 class AssistantStatusOut(CamelModel):
@@ -78,6 +91,8 @@ class AssistantStatusOut(CamelModel):
     effective_unit_name: str | None = None
     effective_platform: bool = False
     tools: list[AssistantToolOut] = Field(default_factory=list)
+    #: the working unit's lineage, company first (empty when no working unit could be resolved)
+    context: list[AssistantContextOut] = Field(default_factory=list)
     #: messages per rate-limit window and the window length
     rate_limit: int
     rate_window_seconds: int
@@ -126,6 +141,11 @@ class ToolCallOut(CamelModel):
     file: FileOut | None = None
 
 
+class ActionDetailOut(CamelModel):
+    label: str
+    value: str
+
+
 class ActionOut(CamelModel):
     id: str
     thread_id: str
@@ -137,6 +157,24 @@ class ActionOut(CamelModel):
     error: str | None = None
     expires_at: datetime
     created_at: datetime
+    #: what the write touches, ids resolved to names (as the employee could see them when it was proposed)
+    details: list[ActionDetailOut] = Field(default_factory=list)
+    #: cannot be taken back
+    danger: bool = False
+    #: while pending: the word the employee must type to confirm an irreversible write (`POST …/confirm {confirm}`)
+    confirm_word: str | None = None
+
+
+class ConfirmIn(CamelModel):
+    #: the word an irreversible action asks for, typed by the employee
+    confirm: str | None = Field(default=None, max_length=200)
+
+
+class ChoicesOut(CamelModel):
+    """A question the assistant asked with ready answers — the employee taps one (it is sent as their next message)."""
+
+    question: str
+    options: list[str]
 
 
 class MessageOut(CamelModel):
@@ -149,6 +187,8 @@ class MessageOut(CamelModel):
     action: ActionOut | None = None
     #: files the tools of this turn produced (also on the tool calls themselves)
     files: list[FileOut] = Field(default_factory=list)
+    #: the assistant asked the employee to choose
+    choices: ChoicesOut | None = None
     created_at: datetime
 
 

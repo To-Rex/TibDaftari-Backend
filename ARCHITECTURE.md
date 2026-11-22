@@ -33,7 +33,7 @@ tests/                    pytest (unit + API tests against a throwaway database 
 docs/                     DOMAIN_RULES.md (behaviour), RENDERER_SPEC.md (PDF), V2_PORT.md (company/branch → org tree contract)
 ```
 
-Modules: `auth`, `assistant` (the AI assistant: tools over the services, confirmed writes, files on request — `export.py` tables, `render.py` documents and charts, per-unit / platform model accounts), `units` (organisation tree, inherited SMS / texts / Telegram settings, superadmin reset, quick start), `staff`,
+Modules: `auth`, `assistant` (the AI assistant: ~85 tools over the services gated by the routes' own permission keys — `tools.py`, `tools_admin.py`, `tools_work.py` — confirmed writes described with names (`describe.py`), questions with buttons, typed confirmation of irreversible ones, files on request — `export.py` tables, `render.py` documents and charts, per-unit / platform model accounts), `units` (organisation tree, inherited SMS / texts / Telegram settings, superadmin reset, quick start), `staff`,
 `patients` (+ geo reference), `catalog`, `templates` (+ renderer), `orders`, `messaging`, `reports`, `platform`
 (territory activity view), `portal`, `telegram`, `files`, `health`.
 
@@ -136,7 +136,7 @@ units:     GET /units/tree  POST /units  GET/PUT /units/{id}  GET/PUT /units/{id
            GET/PUT /units/{id}/assistant · POST /units/{id}/assistant/test  (the unit's AI account, inherited downwards; falls back to the platform account)
 assistant  GET/PUT /assistant/platform-account · POST /assistant/platform-account/test  (superadmin: the account everyone without a closer one uses)
            GET /assistant/status · GET/POST /assistant/threads · GET/PATCH/DELETE /assistant/threads/{id} · POST /assistant/threads/{id}/messages
-           POST /assistant/actions/{id}/confirm | cancel  (writes the model proposed run only after the employee's yes)
+           POST /assistant/actions/{id}/confirm {confirm?} | cancel  (writes the model proposed run only after the employee's yes; an irreversible one needs the typed word)
            GET /assistant/files/{id}  (a file the export tools built — Excel / CSV / JSON, owner only, 7 days)
 staff:     GET/POST /units/{uid}/employees  GET/PUT /employees/{id}  PUT /employees/{id}/overrides
            GET/POST /units/{uid}/roles  PUT/DELETE /roles/{id}

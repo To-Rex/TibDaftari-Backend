@@ -15,6 +15,7 @@ from app.modules.assistant.schemas import (
     AssistantAccountOut,
     AssistantStatusOut,
     AssistantTestOut,
+    ConfirmIn,
     SendIn,
     SendOut,
     ThreadCreateIn,
@@ -64,8 +65,8 @@ async def send_message(thread_id: uuid.UUID, body: SendIn, staff: Staff, session
 
 
 @router.post("/assistant/actions/{action_id}/confirm", response_model=SendOut, summary="Run a write the model proposed — with the caller's own rights")
-async def confirm_action(action_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta) -> SendOut:
-    return await service.confirm_action(session, action_id, staff, meta)
+async def confirm_action(action_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta, body: ConfirmIn | None = None) -> SendOut:
+    return await service.confirm_action(session, action_id, staff, meta, body.confirm if body else None)
 
 
 @router.post("/assistant/actions/{action_id}/cancel", response_model=SendOut, summary="Decline a write the model proposed")
