@@ -1,7 +1,7 @@
 """SQL helpers for the Telegram module (bot accounts, chat prefs, links, patient lookups, bot-facing reads).
 
-A bot is one `messaging_accounts` row (channel 'telegram'). Patients form one registry per country, so a bot
-serves the patients of its unit's country; a patient's cheques, payments and documents are their own rows,
+A bot is one `messaging_accounts` row (channel 'telegram'). Patients form one registry per company and country, so
+a bot serves the patients of its unit's company and country; a patient's cheques, payments and documents are their own rows,
 whichever facility wrote them.
 """
 
@@ -11,9 +11,10 @@ import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import ColumnElement, false, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.scope import Registry
 from app.infrastructure.db.base import alive
 from app.infrastructure.db.models import (
     MessagingAccount,
@@ -26,6 +27,7 @@ from app.infrastructure.db.models import (
     TelegramChatPref,
     TelegramLink,
 )
+from app.modules.patients import repository as patients_repo
 
 CHANNEL = "telegram"
 
@@ -71,35 +73,41 @@ async def set_lang(session: AsyncSession, account_id: uuid.UUID, chat_id: str, l
 # ----------------------------------------------------------------------------- patients / links
 
 
-async def linked_patient(session: AsyncSession, country_id: uuid.UUID | None, chat_id: str) -> Patient | None:
-    """The patient of the country currently linked to `chat_id` (oldest when several)."""
+def in_registry(reg: Registry | None) -> ColumnElement[bool]:
+    """The patients a bot serves: its unit's company, and that unit's country unless the account sits on the company
+    itself. An account whose unit is gone serves nobody."""
+    return patients_repo.in_registry(reg) if reg is not None else false()
+
+
+async def linked_patient(session: AsyncSession, reg: Registry | None, chat_id: str) -> Patient | None:
+    """The patient of the bot's registry currently linked to `chat_id` (oldest when several)."""
     stmt = (
         select(Patient)
-        .where(Patient.country_id == country_id, Patient.telegram_chat_id == chat_id, alive(Patient))
+        .where(in_registry(reg), Patient.telegram_chat_id == chat_id, alive(Patient))
         .order_by(Patient.created_at.asc(), Patient.id.asc())
         .limit(1)
     )
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def patient_by_phone(session: AsyncSession, country_id: uuid.UUID | None, phone: str) -> Patient | None:
-    """Oldest alive patient of the country's registry with this normalised phone."""
+async def patient_by_phone(session: AsyncSession, reg: Registry | None, phone: str) -> Patient | None:
+    """Oldest alive patient of the bot's registry with this normalised phone."""
     stmt = (
         select(Patient)
-        .where(Patient.country_id == country_id, Patient.phone == phone, alive(Patient))
+        .where(in_registry(reg), Patient.phone == phone, alive(Patient))
         .order_by(Patient.created_at.asc(), Patient.id.asc())
         .limit(1)
     )
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def unlink_chat(session: AsyncSession, country_id: uuid.UUID | None, chat_id: str, now: datetime) -> list[uuid.UUID]:
-    """Detach `chat_id` from every patient of the country; closes their open link rows. Returns affected patient ids."""
+async def unlink_chat(session: AsyncSession, reg: Registry | None, chat_id: str, now: datetime) -> list[uuid.UUID]:
+    """Detach `chat_id` from every patient of the bot's registry; closes their open link rows. Returns affected patient ids."""
     rows = list(
         (
             await session.execute(
                 update(Patient)
-                .where(Patient.country_id == country_id, Patient.telegram_chat_id == chat_id, alive(Patient))
+                .where(in_registry(reg), Patient.telegram_chat_id == chat_id, alive(Patient))
                 .values(telegram_chat_id=None, updated_at=now)
                 .returning(Patient.id)
             )

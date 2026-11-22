@@ -30,7 +30,7 @@ PERMISSIONS: tuple[str, ...] = (
     "admin.unit.reset",
     # the AI assistant («Yordamchi»): chat with the model and run its tools — each tool is gated by the keys above
     "assistant.use",
-    # the whole tree, every country (superadmin)
+    # the whole tree, every company and country (superadmin)
     "platform.unit.manage",
 )
 PERMISSION_SET = frozenset(PERMISSIONS)
@@ -60,16 +60,18 @@ LEADER_PERMISSIONS: tuple[str, ...] = (
     "admin.unit.read", "admin.employee.read", "admin.catalog.read", "admin.template.read",
     ASSISTANT_PERMISSION,
 )
-#: the four read-only leader roles, one per level of the tree: role key → the level the employee is homed at
-#: («Davlat rahbari» sits on a country node, «Viloyat rahbari» on a region, …); extra units = more nodes of the
-#: same level in the same country
+#: the five read-only leader roles, one per level of the tree: role key → the level the employee is homed at
+#: («Kompaniya rahbari» sits on a company, «Davlat rahbari» on a country node, «Viloyat rahbari» on a region, …);
+#: extra units = more nodes of the same level in the same company (and country, below the company)
 LEADER_ROLES: dict[str, str] = {
+    "leader_company": "company",
     "leader_country": "country",
     "leader_region": "region",
     "leader_district": "district",
     "leader_facility": "facility",
 }
 LEADER_ROLE_NAMES: dict[str, str] = {
+    "leader_company": "Kompaniya rahbari",
     "leader_country": "Davlat rahbari",
     "leader_region": "Viloyat rahbari",
     "leader_district": "Tuman rahbari",
@@ -91,15 +93,15 @@ def leader_level(key: str | None) -> str | None:
 
 SUPERADMIN_ROLE_KEY = "superadmin"
 #: O‘rnatuvchi — like a superadmin, but only inside the units a superadmin gave them (their viloyat, several
-#: viloyats, or a whole country); they never cross into another country
+#: viloyats, a whole country or a whole company); they never cross into another company or country
 INSTALLER_ROLE_KEY = "installer"
 ADMIN_ROLE_KEY = "admin"
 #: roles only a superadmin may grant, and whose holders only a superadmin may edit or remove
 PROTECTED_ROLE_KEYS = frozenset({SUPERADMIN_ROLE_KEY, INSTALLER_ROLE_KEY})
 #: keys a unit role may not take (system roles live under them)
 RESERVED_ROLE_KEYS = PROTECTED_ROLE_KEYS | LEADER_ROLE_KEYS
-#: where an installer may be homed (extra units: regions of the same country)
-INSTALLER_HOME_LEVELS = frozenset({"country", "region"})
+#: where an installer may be homed (extra units: regions of the same company and country)
+INSTALLER_HOME_LEVELS = frozenset({"company", "country", "region"})
 INSTALLER_EXTRA_LEVELS = frozenset({"region"})
 
 
@@ -124,8 +126,8 @@ def invalid_permission_keys(keys: Iterable[str]) -> list[str]:
     return [k for k in keys if normalize_key(k) not in PERMISSION_SET]
 
 
-# System roles (scope_unit_id NULL) — seeded by db/v2/21_seed_roles.sql (+ 32_, 36_) with fixed ids; keys are stable
-# machine names used by the frontend. WHERE a role applies comes from the employee's unit — except the four leader
+# System roles (scope_unit_id NULL) — seeded by db/v2/21_seed_roles.sql (+ 32_, 36_, 39_) with fixed ids; keys are stable
+# machine names used by the frontend. WHERE a role applies comes from the employee's unit — except the five leader
 # roles, which are pinned to one level of the tree each (`LEADER_ROLES`).
 SYSTEM_ROLES: tuple[dict, ...] = (
     {"key": SUPERADMIN_ROLE_KEY, "name": "Superadmin", "is_system": True, "permissions": list(PERMISSIONS)},
@@ -167,7 +169,7 @@ SYSTEM_ROLES: tuple[dict, ...] = (
             "reception.payment.late_edit", ASSISTANT_PERMISSION,
         ],
     },
-    # the read-only leaders of a territory (db/v2/36_leader_roles.sql)
+    # the read-only leaders of a company / territory (db/v2/36_leader_roles.sql, 39_company_level.sql)
     *({"key": key, "name": name, "is_system": True, "permissions": list(LEADER_PERMISSIONS)} for key, name in LEADER_ROLE_NAMES.items()),
 )
 #: kept for callers written against v1 naming

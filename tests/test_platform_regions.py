@@ -51,8 +51,12 @@ def test_parse_query() -> None:
         service.parse_query(RegionStatsQuery(date_from="2020-01-01", date_to="2026-11-01"))
     with pytest.raises(PydanticValidationError):  # not a calendar day
         RegionStatsQuery(date_from="2026-1-1", date_to="2026-11-01")
-    with pytest.raises(PydanticValidationError):  # `company` is no level of the tree any more
-        RegionStatsQuery(date_from="2026-11-01", date_to="2026-11-01", group_by="company")
+    with pytest.raises(PydanticValidationError):  # a branch is no level of the tree
+        RegionStatsQuery(date_from="2026-11-01", date_to="2026-11-01", group_by="branch")
+    # the company is: asked for by name (never the default), and a filter of its own
+    by_company = service.parse_query(RegionStatsQuery(date_from="2026-11-01", date_to="2026-11-01", group_by="company", company_id=str(C)))
+    assert (by_company.group_by, by_company.company_id, by_company.resolve_group_by()) == ("company", C, "company")
+    assert service.parse_query(RegionStatsQuery(date_from="2026-11-01", date_to="2026-11-01", company_id=str(C))).resolve_group_by("company") == "region"
 
 
 def test_fold_rows_sorts_and_sums() -> None:
@@ -108,7 +112,7 @@ async def test_whole_tree_is_platform_only_and_a_unit_needs_the_scope(monkeypatc
         await service.region_stats(None, q, principal("admin.unit.read", "reports.finance.read"))  # type: ignore[arg-type]
 
     # with a `unitId` inside their scope they fold their own subtree
-    unit = SimpleNamespace(id=A, level="region")
+    unit = SimpleNamespace(id=A, level="region", company_id=C)
 
     async def get_unit(_s, uid):
         return unit if uid == A else None
@@ -164,11 +168,12 @@ async def test_build_compiles_every_statement_and_fills_the_trend() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("group_by", ["country", "region", "district", "unit"])
+@pytest.mark.parametrize("group_by", ["company", "country", "region", "district", "unit"])
 async def test_names_compile_for_every_level(group_by: str) -> None:
     from app.modules.platform import repository as repo
 
     session = _CompilingSession()
     assert await repo.names(session, group_by, {A}) == {}  # type: ignore[arg-type]
     assert len(session.sql) == 1
-    assert ("org_units.code" in session.sql[0]) == (group_by == "unit")
+    # a company and a facility are tree nodes themselves; a territory is named from the geo reference
+    assert ("org_units.code" in session.sql[0]) == (group_by in ("unit", "company"))

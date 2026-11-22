@@ -4,9 +4,30 @@ The frontend (Clinic-Web) was first built on `src/data/mock/repos/*.mock.ts`. Th
 that behaviour 1:1 (wire shape + rules) **except** where marked **FIX** (deliberate corrections) —
 those are bugs in the mock that must not be reproduced. When in doubt, read the mock source.
 
-**Tenancy (2026-11-09, v2):** there is no company and no branch any more. Every row hangs off the
-organisation tree `org_units` — Davlat (country) → Viloyat (region) → Tuman/Shahar (district) →
-Muassasa(lar) (facility, any number per district). Cheques, payments, documents, outbox rows and
+**The company (2026-11-22, `db/v2/39_company_level.sql`, alembic `v2_0009`):** the root of the tree is a **company**
+— Kompaniya → Davlat → Viloyat → Tuman/Shahar → Muassasa(lar). `level = 'company'` has no parent and no territory
+(`countryId` null); every node carries `companyId` (a company: itself — the DB trigger copies it from the parent and
+never lets it change). One company works in any number of countries (one country node per country), and several
+companies work in the same country without seeing one another: one node per (company, country) / (company, region)
+/ (company, district); codes (cheque prefixes) are unique **inside a company**; company names are unique (409
+`company_exists`). **Patients are per company AND country** (`patients.company_id` — the company of the registering
+facility): the same passport or PINFL in two companies is two rows, search / duplicates / the family of a number /
+Telegram bots never cross a company, and a cheque takes a patient of the facility's own company only. The patient
+portal alone looks across companies (phone + SMS code proves the person: they see their own rows wherever they were
+treated). Settings, catalogue, templates, SMS / Telegram / assistant accounts and roles placed on the company node
+are inherited by everything under it. Everything that existed before the company moved under ONE company
+(«TibDaftari», id `01a1be00-0000-7000-8000-0000000000c0`; rename it in the interface) — ids, cheque numbers and
+settings unchanged. Companies are created by the platform (`POST /units` without `parentId`,
+`platform.unit.manage`), a country node under a company by whoever manages the company (`countryId` required —
+422 `country_required`; 409 `node_exists` when the company already has it). Quick start opens under a country, a
+region or a district — under a company it answers 422 `country_required`. `GET /units/tree?companyId=` and
+`GET /platform/regions?companyId=&groupBy=company` look at one company / fold the activity by company. The fifth
+read-only leader is «Kompaniya rahbari» (`leader_company`, homed on a company); an installer may be homed on a
+company too. Nobody is handed units of two companies: no unit of the tree holds both.
+
+**Tenancy (2026-11-09, v2; the company on top since 2026-11-22):** there is no branch any more. Every row hangs off
+the organisation tree `org_units` — Kompaniya (company) → Davlat (country) → Viloyat (region) → Tuman/Shahar
+(district) → Muassasa(lar) (facility, any number per district). Cheques, payments, documents, outbox rows and
 patient registrations point at a **facility** (`unitId`); catalogue rows are **owned** by a unit of any level
 (`ownerUnitId`) and visible to its whole subtree; settings, SMS accounts and SMS texts are inherited
 downwards (nearest level wins). Every tenant URL is `/units/{unit_id}/…` — the unit the client works in
@@ -68,6 +89,8 @@ verbatim in the UI.
 | 410 | revoked | public result link of a revoked document |
 | 422 | facility_required | Bu amal faqat muassasa darajasida bajariladi |
 | 422 | leaf / kind_required / code_required | Muassasa ostida birlik yaratib bo‘lmaydi · Muassasa turi tanlanmagan · Muassasa kodi kiritilmagan |
+| 422 | country_required | Davlat tanlanmagan · Davlat topilmadi (a country node under a company) · Kompaniya ostida muassasa ochish uchun avval davlatni tanlang (quick start) |
+| 409 | company_exists | Bu nomdagi kompaniya allaqachon mavjud |
 | 422 | unit_required / ai_api_key_required / ai_base_url_required / ai_provider_required | Ish birligi tanlanmagan · AI provayder API kaliti kiritilmagan · Provayder manzili (base URL) kiritilmagan · AI provayder tanlanmagan  (assistant) |
 | 403 | platform_only | Platforma hisobini faqat superadmin boshqaradi (assistant) |
 | 422 | export_dataset / export_column / export_filter / export_format / export_range / export_document / chart_type / chart_data | Noma’lum to‘plam · Noma’lum ustun (availableColumns) · Filtr xatosi · Noma’lum fayl formati · dateFrom / dateTo kerak (assistant export tools — returned to the model as tool errors) |
@@ -117,7 +140,8 @@ verbatim in the UI.
 * System roles (`scopeUnitId` null — available everywhere; fixed ids in `21_seed_roles.sql` + `32_installer_role.sql`
   + `36_leader_roles.sql`): `superadmin` (all 37), `installer` ("O‘rnatuvchi": all except platform.* — incl.
   `admin.unit.reset`), `admin` (all except platform.* and reset), `registrator`, `laborant`, `vrach`, `rahbar`, and
-  the four read-only leaders `leader_country` / `leader_region` / `leader_district` / `leader_facility`.
+  the five read-only leaders `leader_company` / `leader_country` / `leader_region` / `leader_district` /
+  `leader_facility`.
 * **Leaders — «Davlat / Viloyat / Tuman / Muassasa rahbari»** (2026-11-12): read-only accounts for the heads of a
   territory. `LEADER_PERMISSIONS` = reception.patient.read, lab.worklist.read, confirm.result.read + view,
   reports.finance.read + operations.read + export, admin.unit.read + employee.read + catalog.read + template.read,
@@ -173,8 +197,9 @@ verbatim in the UI.
 * `logout(token)`: revoke jti (Redis + sessions.revoked_at). Idempotent.
 
 ## 3. Organisation units / staff
-* **The tree** (`db/v2/02_org.sql`): one table `org_units` for every level — `level` ∈ country | region | district |
-  facility; `parentId` (null only for a country node); `countryId`, `regionId`, `districtId` (geo reference rows);
+* **The tree** (`db/v2/02_org.sql` + `39_company_level.sql`): one table `org_units` for every level — `level` ∈
+  company | country | region | district | facility; `parentId` (null only for a company); `companyId` (the company the
+  node lives in); `countryId` (null only for a company), `regionId`, `districtId` (geo reference rows);
   `kind` (facility only: ses | clinic | laboratory | polyclinic | hospital | pharmacy | other); `code` (facility: the
   cheque prefix `UR-000123`; optional above); profile (`name`, `shortName`, `legalName`, `phone`, `email`, `address`,
   `timezone`, `logoUrl`), `isActive`, `sortOrder`, `settings` (inherited jsonb). `org_unit_closure (ancestor,
@@ -190,9 +215,10 @@ verbatim in the UI.
   unit lies in the caller's scope or on the path above it, else 403; unknown → 404 "Birlik topilmadi". Cached
   `unit:{id}:dto`.
 * `createUnit` (`POST /units`, `admin.unit.manage` | `platform.unit.manage`; the parent must be inside the caller's
-  scope): **level follows from the parent** (country → region → district → facility; under a facility → 422 `leaf`
-  "Muassasa ostida birlik yaratib bo‘lmaydi"). Without a parent a **country node** is created (`countryId`
-  required, `platform.unit.manage`; one live node per country). **Geo nesting**: a region node needs `regionId`
+  scope): **level follows from the parent** (company → country → region → district → facility; under a facility →
+  422 `leaf` "Muassasa ostida birlik yaratib bo‘lmaydi"). Without a parent a **company** is created
+  (`platform.unit.manage`; unique name — 409 `company_exists`); a **country node** hangs under a company (`countryId`
+  required — 422 `country_required`; one live node per country in a company). **Geo nesting**: a region node needs `regionId`
   belonging to the parent's country, a district node `districtId` belonging to the parent's region (422 "Viloyat /
   Tuman topilmadi", "… tegishli emas"); one live node per region / district row. A **facility** inherits the
   district's geo and needs `kind` (422 `kind_required`) + `code` (422 `code_required`; upper-cased,

@@ -78,7 +78,12 @@ async def staff_session_out(session: AsyncSession, p: StaffPrincipal, token: str
     home = p.home_unit
     unit_out = None
     if home is not None:
-        unit_out = SessionUnitOut(id=str(home.id), level=home.level, name=home.name, code=home.code, country_id=str(home.country_id), path=await units.unit_path(session, home.id))  # type: ignore[arg-type]
+        unit_out = SessionUnitOut(  # type: ignore[arg-type]
+            id=str(home.id), level=home.level, name=home.name, code=home.code,
+            company_id=str(home.company_id) if home.company_id else None,
+            country_id=str(home.country_id) if home.country_id else None,
+            path=await units.unit_path(session, home.id),
+        )  # fmt: skip
     return StaffSessionOut(
         employee_id=str(p.employee.id),
         unit_id=str(p.employee.unit_id) if p.employee.unit_id else None,

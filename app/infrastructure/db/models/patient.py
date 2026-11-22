@@ -1,4 +1,4 @@
-"""Patients (one registry per country) + Telegram links."""
+"""Patients (one registry per company and country) + Telegram links."""
 
 from __future__ import annotations
 
@@ -13,14 +13,18 @@ from app.infrastructure.db.base import AuditMixin, Base, PKMixin, SoftDeleteMixi
 
 
 class Patient(PKMixin, AuditMixin, SoftDeleteMixin, Base):
-    """Identity rules (per country): passport & PINFL unique (partial unique indexes). A phone number may be shared
+    """Identity rules (per company and country — companies never share a patient row): passport & PINFL unique
+    (partial unique indexes). A phone number may be shared
     by a family: every person added to a number that already belongs to someone carries `relation` to
     `related_patient_id` (required for an undocumented person — the service checks it)."""
 
     __tablename__ = "patients"
 
+    #: the company whose registry the patient belongs to. NOT NULL in the database — a trigger takes it from the
+    #: registering facility when a row comes without it
+    company_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("org_units.id"), nullable=True)
     country_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("countries.id"), nullable=False)
-    #: the facility that registered the patient — lists are scoped by it, identity is country-wide
+    #: the facility that registered the patient — lists are scoped by it, identity is company- and country-wide
     registered_unit_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("org_units.id"))
     full_name: Mapped[str] = mapped_column(String(200), nullable=False)
     phone: Mapped[str] = mapped_column(String(20), nullable=False)  # normalized 998XXXXXXXXX
@@ -57,8 +61,8 @@ class Patient(PKMixin, AuditMixin, SoftDeleteMixin, Base):
 
     __table_args__ = (
         Index("ix_patients_registered_unit", "registered_unit_id", "created_at"),
-        Index("ix_patients_country_phone", "country_id", "phone"),
-        Index("ix_patients_country_created", "country_id", "created_at"),
+        Index("ix_patients_country_phone", "company_id", "country_id", "phone"),
+        Index("ix_patients_country_created", "company_id", "country_id", "created_at"),
         Index("ix_patients_telegram_chat", "telegram_chat_id"),
     )
 

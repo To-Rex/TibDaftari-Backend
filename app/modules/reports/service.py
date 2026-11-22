@@ -123,7 +123,7 @@ async def _build_dashboard(session: AsyncSession, scope: UnitScope, unit_ids: li
     today = today_local()
     t_start, t_end = day_range(today, today)
     start, end = day_range(d_from, d_to)
-    counters = await repo.dashboard_counters(session, unit_ids, t_start, t_end, country_id=scope.country_id)
+    counters = await repo.dashboard_counters(session, unit_ids, t_start, t_end, registry=scope.registry)
     sms_queued = await messaging_service.count_queued(session, unit_ids)
     trend_map = await repo.order_trend(session, unit_ids, start, end)
     trend: list[TrendPoint] = []

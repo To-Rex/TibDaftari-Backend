@@ -48,6 +48,7 @@ pip install -r requirements-dev.txt   # faqat prod: requirements.txt
 cp .env.example .env              # DATABASE_URL, REDIS_URL, JWT_SECRET ni to‘g‘rilang
 python -m app                     # alembic upgrade head (bo‘sh bazaga db/v2/*.sql) + uvicorn 0.0.0.0:$PORT
 python -m app.cli seed-reference  # davlatlar, viloyat/tumanlar
+python -m app.cli create-company --name "TibDaftari"           # daraxt ildizi — kompaniya
 python -m app.cli create-country-root --country UZ --name "O‘zbekiston Respublikasi" --short-name "O‘zbekiston"
 python -m app.cli create-superadmin --login owner --password 'S3cret!' --name "Platforma egasi"
 ```
@@ -113,7 +114,8 @@ raqamlari davom etadi). `29_`/`30_` Alembic baseline’ga kirmaydi — ular faqa
 | Buyruq | Vazifa |
 |---|---|
 | `seed-reference` | Davlatlar (`seed/reference/countries.json`), O‘zbekiston viloyat/tumanlari (`seed/reference/uz-regions.json`), idempotent upsert |
-| `create-country-root --country UZ --name "…" [--short-name …] [--code UZ]` | Daraxtning davlat tuguni (bo‘lmasa yaratadi) va davlatni yoqadi |
+| `create-company --name "…"` | Kompaniya — daraxtning ildizi (shu nomdagi kompaniya bo‘lmasa yaratadi) |
+| `create-country-root --country UZ --name "…" [--company "…"] [--short-name …] [--code UZ]` | Kompaniyaning davlat tuguni (bo‘lmasa yaratadi) va davlatni yoqadi; `--company` berilmasa — yagona kompaniya (daraxt bo‘sh bo‘lsa «TibDaftari» yaratiladi) |
 | `create-superadmin --login L --password P --name "F.I.O."` | Platforma superadmini: tizim `superadmin` roli, birliksiz (`is_super_admin`), hamma narsani ko‘radi |
 | *(UI: Xodimlar → rol «O‘rnatuvchi»)* | Hudud o‘rnatuvchisi: superadmin kabi, lekin faqat o‘z viloyati (yoki butun davlati) va superadmin bergan qo‘shimcha viloyatlar ichida; boshqa davlatga chiqolmaydi. Faqat superadmin beradi |
 | *(UI: Xodimlar → rol «Davlat / Viloyat / Tuman / Muassasa rahbari»)* | Faqat ko‘ruvchi rahbar: o‘z darajasidagi tugunga (davlat, viloyat, tuman yoki muassasa) biriktiriladi, hududidagi hamma hisobot, statistika, ro‘yxat va hujjatlarni ko‘radi, hech narsani o‘zgartirmaydi |

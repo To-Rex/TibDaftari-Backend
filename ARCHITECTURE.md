@@ -44,9 +44,12 @@ module provides / may rely on are listed in `docs/V2_PORT.md` ("Inter-module API
 
 ## Tenancy: the organisation tree
 
-There are no companies and no branches. **One table, `org_units`**, holds the whole hierarchy —
-`level` ∈ `country` → `region` → `district` → `facility` (Davlat → Viloyat → Tuman/Shahar → Muassasa(lar); any number
-of facilities per district). `org_unit_closure (ancestor_id, descendant_id, depth)` is maintained by DB triggers, so
+**One table, `org_units`**, holds the whole hierarchy — `level` ∈ `company` → `country` → `region` → `district` →
+`facility` (Kompaniya → Davlat → Viloyat → Tuman/Shahar → Muassasa(lar); any number of countries per company and of
+facilities per district). A **company** is the root: no parent, no territory; every node carries `company_id` (the DB
+trigger copies it from the parent). Several companies may work in the same country and never see one another: one
+node per territory, one code and one patient registry **per company** (`Registry(company_id, country_id)` in
+`app/core/scope.py` — `scope.registry`, `registry_of(unit | patient)`). `org_unit_closure (ancestor_id, descendant_id, depth)` is maintained by DB triggers, so
 "everything under X" is one indexed `IN (...)` and never a recursive query.
 
 * **Operational rows** (orders, items, payments, documents, outbox, patient registrations) point at a **facility**
@@ -54,8 +57,8 @@ of facilities per district). `org_unit_closure (ancestor_id, descendant_id, dept
   are **owned** by a unit of any level (`owner_unit_id`) and are visible to its whole subtree. **Settings**
   (`org_units.settings` jsonb), **messaging accounts** (SMS / Telegram) and **SMS texts** attach to any unit and are
   inherited downwards — the nearest level wins (`effective_settings(unit)`, `resolve_messaging_account(unit, channel)`,
-  `resolve_sms_template(unit, key, lang)`). Patients form one registry **per country** (`country_id`,
-  `registered_unit_id` = the registering facility). Cheque numbers come from `next_order_number(facility)` →
+  `resolve_sms_template(unit, key, lang)`). Patients form one registry **per company and country**
+  (`company_id`, `country_id`, `registered_unit_id` = the registering facility). Cheque numbers come from `next_order_number(facility)` →
   `<facility code>-000123` (`order_counters`).
 * **Staff scope**: an employee has a home `unit_id` (any level; NULL only for a superadmin) plus optional
   `employee_units`; their effective scope is the union of those subtrees (`StaffPrincipal.allowed_unit_ids`,

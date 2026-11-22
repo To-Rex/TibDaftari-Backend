@@ -1,7 +1,7 @@
 """Session-wide test hygiene for the v2 (organisation tree) suite.
 
 Tests run against a throwaway database (`temodb_test`, never production) and build their own fixture tree with
-`tests/helpers.make_tree()` under the seeded O‘zbekiston country node: a `T-…` region / district pair in the geo
+`tests/helpers.make_tree()` under the seeded O‘zbekiston country node (or under a `T-…` company of their own): a `T-…` region / district pair in the geo
 reference, the matching region / district nodes and a facility whose code starts with `T`. Everything they create
 is marked `T-` / `t-` and dated inside the run, so the end-of-session cleanup can find it:
 
@@ -51,6 +51,8 @@ _CLEANUP_SQL = [
     f"UPDATE org_units SET deleted_at = now(), is_active = false, region_id = :region, district_id = NULL WHERE level = 'region' AND id IN ({_FIXTURE_UNITS})",
     f"UPDATE org_units SET deleted_at = now(), is_active = false, region_id = :region, district_id = :district WHERE level = 'district' AND id IN ({_FIXTURE_UNITS})",
     f"UPDATE org_units SET deleted_at = now(), is_active = false, region_id = :region, district_id = :district WHERE level = 'facility' AND id IN ({_FIXTURE_UNITS})",
+    # fixture companies and their country nodes (no territory to re-point)
+    f"UPDATE org_units SET deleted_at = now(), is_active = false WHERE level IN ('country', 'company') AND deleted_at IS NULL AND id IN ({_FIXTURE_UNITS})",
     # fixture geo rows (shared reference data, no soft delete) — only those nothing points at any more (a unit of
     # another run still using them is left alone; that run removes them itself)
     "UPDATE patients SET region_id = NULL, district_id = NULL WHERE (region_id IN (SELECT id FROM regions WHERE name LIKE 'T-%') OR district_id IN (SELECT d.id FROM districts d JOIN regions r ON r.id = d.region_id WHERE r.name LIKE 'T-%')) AND created_at >= :started",

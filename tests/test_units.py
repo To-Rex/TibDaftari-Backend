@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from tests.helpers import (
     API,
+    COMPANY_UNIT_ID,
     COUNTRY_ID,
     COUNTRY_UNIT_ID,
     app_instance,
@@ -77,8 +78,13 @@ def test_tree_and_card(ctx: dict) -> None:
     ids = {u["id"] for u in mine.json()}
     assert {a["country"], a["region"], a["district"], a["facility"]} <= ids and not ({b["region"], b["district"], b["facility"]} & ids)
     by_id = {u["id"]: u for u in mine.json()}
-    assert by_id[a["facility"]]["parentId"] == a["district"] and by_id[a["region"]]["parentId"] == a["country"] and by_id[a["country"]]["parentId"] is None
-    assert [by_id[a[k]]["depth"] for k in ("country", "region", "district", "facility")] == [0, 1, 2, 3]
+    assert by_id[a["facility"]]["parentId"] == a["district"] and by_id[a["region"]]["parentId"] == a["country"]
+    # the company is the root: the country hangs under it, every node says which company it lives in
+    company = by_id[str(COMPANY_UNIT_ID)]
+    assert by_id[a["country"]]["parentId"] == company["id"] and company["parentId"] is None and company["level"] == "company"
+    assert company["countryId"] is None and company["companyId"] == company["id"] and company["depth"] == 0
+    assert {by_id[a[k]]["companyId"] for k in ("country", "region", "district", "facility")} == {company["id"]}
+    assert [by_id[a[k]]["depth"] for k in ("country", "region", "district", "facility")] == [1, 2, 3, 4]
     # the card
     r = c.get(f"{API}/units/{a['facility']}", headers=h(ctx, "admin-a"))
     assert r.status_code == 200, r.text
@@ -86,13 +92,14 @@ def test_tree_and_card(ctx: dict) -> None:
     assert d["level"] == "facility" and d["kind"] == "ses" and d["code"] == ctx["code_a"] and d["parentId"] == a["district"]
     assert d["countryId"] == str(COUNTRY_ID) and d["regionId"] == ctx["geo_region_a"] and d["districtId"] == ctx["geo_district_a"]
     assert d["countryName"] == "O‘zbekiston" and d["regionName"] == f"T-{ctx['tag']} viloyati" and d["districtName"] == f"T-{ctx['tag']} tumani"
-    assert d["path"] == f"O‘zbekiston Respublikasi › T-{ctx['tag']} viloyati › T-{ctx['tag']} tumani › T-{ctx['tag']} SES" and d["depth"] == 3
+    assert d["path"] == f"{company['name']} › O‘zbekiston Respublikasi › T-{ctx['tag']} viloyati › T-{ctx['tag']} tumani › T-{ctx['tag']} SES" and d["depth"] == 4
+    assert d["companyId"] == company["id"] and d["companyName"] == company["name"]
     assert d["timezone"] == "Asia/Tashkent" and d["isActive"] is True and d["settings"] == {"documentFreeViewDays": 0, "locale": None, "own": {}}
     assert d["sms"] == {"mode": "inherited", "provider": "none", "apiKeyMasked": None, "login": None, "sender": None, "defaultPriority": "transactional", "senderNote": None, "effectiveUnitId": None, "effectiveUnitName": None}
     assert d["telegram"] == {"botUsername": None, "connected": False, "own": False, "effectiveUnitId": None}
-    assert d["counts"] == {"regions": 0, "districts": 0, "facilities": 0, "employees": 0}
+    assert d["counts"] == {"countries": 0, "regions": 0, "districts": 0, "facilities": 0, "employees": 0}
     region = c.get(f"{API}/units/{a['region']}", headers=h(ctx, "admin-a")).json()
-    assert region["counts"] == {"regions": 0, "districts": 1, "facilities": 1, "employees": 1} and region["depth"] == 1
+    assert region["counts"] == {"countries": 0, "regions": 0, "districts": 1, "facilities": 1, "employees": 1} and region["depth"] == 2
     # isolation: another tree → 403, the path above → readable context, unknown → 404
     r = c.get(f"{API}/units/{b['facility']}", headers=h(ctx, "admin-a"))
     assert r.status_code == 403 and r.json()["error"]["message"] == "Ruxsat yo‘q"
@@ -115,8 +122,8 @@ def test_create_child_units_geo_and_codes(ctx: dict) -> None:
     r = c.post(f"{API}/units", json={"parentId": a["country"], "regionId": ctx["spare_region"], "name": f"T-{tag}2 viloyati", "code": f"tr{tag}2"}, headers=h(ctx, "super"))
     assert r.status_code == 201, r.text
     region2 = r.json()
-    assert region2["level"] == "region" and region2["regionId"] == ctx["spare_region"] and region2["code"] == f"TR{tag}2" and region2["depth"] == 1
-    assert region2["parentId"] == str(COUNTRY_UNIT_ID) and region2["path"] == f"O‘zbekiston Respublikasi › T-{tag}2 viloyati"
+    assert region2["level"] == "region" and region2["regionId"] == ctx["spare_region"] and region2["code"] == f"TR{tag}2" and region2["depth"] == 2
+    assert region2["parentId"] == str(COUNTRY_UNIT_ID) and region2["path"].endswith(f" › O‘zbekiston Respublikasi › T-{tag}2 viloyati")
     # one alive node per region
     r = c.post(f"{API}/units", json={"parentId": a["country"], "regionId": ctx["spare_region"], "name": "T-dup"}, headers=h(ctx, "super"))
     assert r.status_code == 409 and r.json()["error"]["code"] == "node_exists"
@@ -135,7 +142,7 @@ def test_create_child_units_geo_and_codes(ctx: dict) -> None:
     assert r.status_code == 201, r.text
     clinic = r.json()
     assert clinic["level"] == "facility" and clinic["kind"] == "clinic" and clinic["code"] == f"T{tag}K" and clinic["timezone"] == "Asia/Tashkent"
-    assert (clinic["regionId"], clinic["districtId"]) == (ctx["geo_region_a"], ctx["geo_district_a"]) and clinic["depth"] == 3 and clinic["path"].endswith(f"› T-{tag} klinika")
+    assert (clinic["regionId"], clinic["districtId"]) == (ctx["geo_region_a"], ctx["geo_district_a"]) and clinic["depth"] == 4 and clinic["path"].endswith(f"› T-{tag} klinika")
     ctx["state"]["clinic"] = clinic["id"]
     # the parent's counts follow; nothing hangs under a facility; other trees are out of reach
     assert c.get(f"{API}/units/{a['district']}", headers=h(ctx, "admin-a")).json()["counts"]["facilities"] == 2

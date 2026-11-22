@@ -6,12 +6,20 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from app.cli import CliError, build_parser, create_country_root, create_superadmin, district_kind, seed_reference
+from app.cli import (
+    CliError,
+    build_parser,
+    create_company,
+    create_country_root,
+    create_superadmin,
+    district_kind,
+    seed_reference,
+)
 from app.infrastructure.db.models import Country, Employee, OrgUnit, Role
 from app.infrastructure.db.session import SessionLocal, session_scope
 from sqlalchemy import select
 
-from tests.helpers import COUNTRY_ID, COUNTRY_UNIT_ID, run_async
+from tests.helpers import COMPANY_UNIT_ID, COUNTRY_ID, COUNTRY_UNIT_ID, run_async
 
 SFX = uuid.uuid4().hex[:8]
 
@@ -22,7 +30,11 @@ def test_parser_knows_every_command() -> None:
     args = build_parser().parse_args(["create-superadmin", "--login", "root", "--password", "pw", "--name", "Root"])
     assert (args.command, args.login, args.password, args.name) == ("create-superadmin", "root", "pw", "Root")
     args = build_parser().parse_args(["create-country-root", "--country", "uz", "--name", "O‘zbekiston Respublikasi", "--short-name", "O‘zbekiston"])
-    assert (args.command, args.country, args.short_name, args.code) == ("create-country-root", "uz", "O‘zbekiston", None)
+    assert (args.command, args.country, args.short_name, args.code, args.company) == ("create-country-root", "uz", "O‘zbekiston", None, None)
+    args = build_parser().parse_args(["create-country-root", "--company", "TibDaftari", "--country", "KZ", "--name", "Qozog‘iston"])
+    assert (args.company, args.country) == ("TibDaftari", "KZ")
+    args = build_parser().parse_args(["create-company", "--name", "TibDaftari"])
+    assert (args.command, args.name) == ("create-company", "TibDaftari")
     args = build_parser().parse_args(["set-password", "--login", "a", "--password", "b"])
     assert args.command == "set-password"
     assert build_parser().parse_args(["ensure-partitions", "--months", "5"]).months == 5
@@ -54,17 +66,26 @@ def test_create_superadmin_uses_the_system_role_and_refuses_a_taken_login() -> N
     assert role.key == "superadmin" and role.scope_unit_id is None and role.is_system is True
 
 
-def test_create_country_root_is_idempotent_for_a_seeded_country() -> None:
-    async def flow() -> tuple[tuple[str, bool], Country]:
-        out = await create_country_root(country_code="uz", name="O‘zbekiston Respublikasi")
-        async with session_scope() as s:
-            return out, await s.get(Country, COUNTRY_ID)
+def test_create_company_and_country_root_are_idempotent_for_the_seeded_tree() -> None:
+    """The seeded company and its O‘zbekiston node are found, not made again (other test modules keep `T-…` companies
+    of their own alive during a run, so the company is named)."""
 
-    (unit_id, created), country = run_async(flow)
+    async def flow() -> tuple[str, tuple[str, bool], tuple[str, bool], Country]:
+        async with session_scope() as s:
+            name = (await s.get(OrgUnit, COMPANY_UNIT_ID)).name
+        company = await create_company(name=name.upper())  # names match case-insensitively
+        out = await create_country_root(country_code="uz", name="O‘zbekiston Respublikasi", company=name)
+        async with session_scope() as s:
+            return name, company, out, await s.get(Country, COUNTRY_ID)
+
+    name, (company_id, company_created), (unit_id, created), country = run_async(flow)
+    assert company_created is False and uuid.UUID(company_id) == COMPANY_UNIT_ID
     assert created is False and uuid.UUID(unit_id) == COUNTRY_UNIT_ID
     assert country.is_enabled is True
     with pytest.raises(CliError):
-        run_async(create_country_root(country_code="ZZ", name="Nowhere"))
+        run_async(create_country_root(country_code="ZZ", name="Nowhere", company=name))
+    with pytest.raises(CliError):  # a company that does not exist is never made on the way
+        run_async(create_country_root(country_code="uz", name="O‘zbekiston", company="T-no-such-company"))
 
 
 def test_seed_reference_upserts_without_duplicating() -> None:

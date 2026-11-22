@@ -47,7 +47,7 @@ async def list_tree(q: Annotated[UnitTreeQuery, Query()], staff: Staff, session:
     return await service.list_tree(session, staff, q)
 
 
-@router.post("/units", response_model=OrgUnitOut, status_code=201, summary="Create a unit under a parent (or a country node — platform admin)")
+@router.post("/units", response_model=OrgUnitOut, status_code=201, summary="Create a unit under a parent (or a company — platform admin)")
 async def create_unit(body: UnitCreateIn, staff: Staff, session: DbSession, meta: Meta) -> OrgUnitOut:
     return await service.create_unit(session, body, staff, meta)
 

@@ -1,11 +1,12 @@
 """Patients: list/search/duplicates/create/update + geo reference data (countries/regions/districts).
 
-Rules (DOMAIN_RULES section 4): phone normalised to `998XXXXXXXXX`; identity uniqueness per country
+Rules (DOMAIN_RULES section 4): phone normalised to `998XXXXXXXXX`; identity uniqueness per registry (a company
+and a country of it — companies never share a patient row)
 (passport case-insensitive, then PINFL); a phone number may be shared by a family — every person added to a number
 that already belongs to someone says who they are to them (`relation` → `relatedPatientId`, required without a
 passport / PINFL), and the same name + birth date on one number is the same person (409 `duplicate_person`);
 discountPercent clamped 0..100; every mutation audited. Lists are scoped by the organisation unit
-(`registered_unit_id` or an order inside the unit's subtree), identity is national.
+(`registered_unit_id` or an order inside the unit's subtree), identity is registry-wide.
 Other modules use `get_patient_or_404`, `patient_out` and `patient_dto`.
 """
 
@@ -25,7 +26,7 @@ from app.core.config import settings
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.pagination import page_of, paginate_query, sort_clause
 from app.core.schemas import Page
-from app.core.scope import UnitScope, ids_of, load_scope
+from app.core.scope import Registry, UnitScope, ids_of, load_scope, registry_of
 from app.core.textutil import digits, fold, is_valid_uz_phone, norm_phone
 from app.infrastructure.db.models import Country, District, Patient, Region
 from app.infrastructure.redis import cache
@@ -151,10 +152,10 @@ async def _outs(session: AsyncSession, rows: Sequence[Patient], unit_ids: Sequen
     units = await units_repo.units_by_ids(session, [p.registered_unit_id for p in rows])
     names = {uid: u.name for uid, u in units.items()}
     relatives = await repo.names_by_ids(session, [p.related_patient_id for p in rows])
-    counts = await repo.phone_counts(session, [(p.country_id, p.phone) for p in rows])
+    counts = await repo.phone_counts(session, [repo.phone_key(p) for p in rows])
 
     def out(p: Patient, stats: tuple[int, datetime | None, int] | None) -> PatientOut:
-        shared = max(0, counts.get((p.country_id, p.phone), 1) - (0 if p.deleted_at else 1))
+        shared = max(0, counts.get(repo.phone_key(p), 1) - (0 if p.deleted_at else 1))
         return patient_out(p, stats, names.get(p.registered_unit_id), related_name=relatives.get(p.related_patient_id) if p.related_patient_id else None, phone_shared=shared)
 
     if unit_ids is None:
@@ -211,6 +212,11 @@ async def get_patient_or_404(
     else:
         units = _visible_units(staff) or []
     p = await repo.get_by_id(session, pid, units)
+    if p is not None and units is not None and p.registered_unit_id is None:
+        # a patient nobody registered (an import) is visible everywhere — inside their own company only
+        homes = await units_repo.units_by_ids(session, staff.unit_ids)
+        if p.company_id not in {u.company_id for u in homes.values()}:
+            p = None
     if p is None:
         raise NotFoundError("Bemor topilmadi")
     return p
@@ -234,7 +240,7 @@ async def list_patients(session: AsyncSession, scope: UnitScope, q: PatientListQ
     """Paged patients of the unit's subtree (registered there or seen there); search predicate over
     name/phone/passport; optional exact tag; optional `unitId` narrowing to a sub-unit; sortable whitelist."""
     units = await _scope_units(session, scope, staff, q.unit_id)
-    stmt = repo.base_select(scope.country_id).where(repo.in_units(units))
+    stmt = repo.base_select(scope.registry).where(repo.in_units(units))
     pred = repo.search_predicate(q.search)
     if pred is not None:
         stmt = stmt.where(pred)
@@ -251,14 +257,15 @@ async def search_patients(
     """Quick-pick list (empty query → the scope's most recent visitors). Identity is country-wide — a patient of
     another facility must be found here instead of being registered twice — but the statistics are the scope's."""
     units = await _scope_units(session, scope, staff, unit_id)
-    return await _outs(session, await repo.search(session, scope.country_id, query, limit, units), units)
+    return await _outs(session, await repo.search(session, scope.registry, query, limit, units), units)
 
 
 async def find_duplicates(session: AsyncSession, scope: UnitScope, body: PatientDuplicatesIn) -> list[PatientOut]:
-    """Existing patients of the country sharing phone / passport / PINFL with the draft (client filters itself out)."""
+    """Existing patients of the scope's registry (its company and country) sharing phone / passport / PINFL with the
+    draft (client filters itself out)."""
     phone = norm_phone(body.phone) if body.phone else None
     rows = await repo.find_duplicates(
-        session, scope.country_id, phone=phone or None, passport=_clean(body.passport_number), pinfl=_clean(body.pinfl)
+        session, scope.registry, phone=phone or None, passport=_clean(body.passport_number), pinfl=_clean(body.pinfl)
     )
     return await _outs(session, list(rows), scope.descendant_ids)
 
@@ -267,7 +274,7 @@ async def patient_family(session: AsyncSession, patient_id: uuid.UUID, staff: St
     """Everyone on the patient's number (country-wide — identity is national) plus relatives linked to / from them
     by a relation; the number's owner first. The patient itself is not in the list."""
     p = await get_patient_or_404(session, patient_id, staff)
-    rows: dict[uuid.UUID, Patient] = {o.id: o for o in await repo.on_phone(session, p.country_id, p.phone, p.id)}
+    rows: dict[uuid.UUID, Patient] = {o.id: o for o in await repo.on_phone(session, registry_of(p), p.phone, p.id)}
     for o in await repo.linked_to(session, p):
         rows.setdefault(o.id, o)
     members = sorted(rows.values(), key=lambda o: (o.phone != p.phone, o.relation is not None, o.created_at))
@@ -301,7 +308,7 @@ async def telegram_chat_for(session: AsyncSession, patient: Patient | None) -> s
         return None
     if patient.telegram_chat_id:
         return patient.telegram_chat_id
-    for o in await repo.on_phone(session, patient.country_id, patient.phone, patient.id):
+    for o in await repo.on_phone(session, registry_of(patient), patient.phone, patient.id):
         if o.telegram_chat_id:
             return o.telegram_chat_id
     return None
@@ -346,7 +353,7 @@ def _clamp_discount(v: int | None) -> int:
 
 async def _assert_identity_free(
     session: AsyncSession,
-    country_id: uuid.UUID,
+    reg: Registry,
     *,
     passport: str | None,
     pinfl: str | None,
@@ -355,9 +362,9 @@ async def _assert_identity_free(
 ) -> None:
     """Order: duplicate_passport → duplicate_pinfl. The phone is not an identity key any more — a family may share
     it (`_resolve_family` decides who may join a number and how)."""
-    if passport and await repo.find_by_passport(session, country_id, passport, exclude_id):
+    if passport and await repo.find_by_passport(session, reg, passport, exclude_id):
         raise ConflictError("Bu passport raqami bilan bemor mavjud", code="duplicate_passport")
-    if pinfl and await repo.find_by_pinfl(session, country_id, pinfl, exclude_id):
+    if pinfl and await repo.find_by_pinfl(session, reg, pinfl, exclude_id):
         raise ConflictError("Bu JSHSHIR bilan bemor mavjud", code="duplicate_pinfl")
 
 
@@ -382,7 +389,7 @@ def _same_person(a_name: str, a_birth: date | None, b: Patient) -> bool:
 
 async def _resolve_family(
     session: AsyncSession,
-    country_id: uuid.UUID,
+    reg: Registry,
     *,
     phone: str,
     exclude_id: uuid.UUID | None,
@@ -397,7 +404,7 @@ async def _resolve_family(
     `duplicate_person`); an undocumented newcomer must say who they are to them (409 `phone_relation_required`,
     with the people on the number); a documented one may, but need not. The relation points to `relatedPatientId`
     — one of the people on the number (422 `relation_target` otherwise) — or, by default, the number's owner."""
-    others = await repo.on_phone(session, country_id, phone, exclude_id)
+    others = await repo.on_phone(session, reg, phone, exclude_id)
     if not others:
         if relation or related_id:
             raise ValidationError("Bu raqamda boshqa bemor yo‘q — qarindoshlikni belgilash shart emas", code="relation_target", details={"field": "relation"})
@@ -446,20 +453,23 @@ async def _flush_identity(session: AsyncSession) -> None:
 async def create_patient(
     session: AsyncSession, scope: UnitScope, staff: StaffPrincipal, body: PatientUpsertIn, meta: RequestMeta
 ) -> PatientOut:
-    """Register a patient in the scope's country at a facility (the path unit when it is one, else
-    `registeredUnitId` — 422 `facility_required` otherwise); tags [], stats zero, portal unlinked — audited."""
+    """Register a patient at a facility (the path unit when it is one, else `registeredUnitId` — 422
+    `facility_required` otherwise) in that facility's registry — its company and its country; tags [], stats zero,
+    portal unlinked — audited."""
     facility = await units_service.facility_or_422(session, scope, body.registered_unit_id)
-    country_id = scope.country_id
+    reg = registry_of(facility)
+    country_id = facility.country_id
     phone = _phone(body.phone)
     passport = _clean(body.passport_number)
     pinfl = _pinfl(body.pinfl)
-    await _assert_identity_free(session, country_id, passport=passport, pinfl=pinfl, phone=phone, exclude_id=None)
+    await _assert_identity_free(session, reg, passport=passport, pinfl=pinfl, phone=phone, exclude_id=None)
     relation, related_id = await _resolve_family(
-        session, country_id, phone=phone, exclude_id=None, documented=bool(passport or pinfl),
+        session, reg, phone=phone, exclude_id=None, documented=bool(passport or pinfl),
         full_name=body.full_name, birth_date=body.birth_date, relation=body.relation, related_id=body.related_patient_id,
     )  # fmt: skip
     addr = body.address or PatientAddress()
     p = Patient(
+        company_id=facility.company_id,
         country_id=country_id,
         registered_unit_id=facility.id,
         full_name=body.full_name,
@@ -514,7 +524,7 @@ async def update_patient(
     phone = _phone(body.phone) if "phone" in given and body.phone else p.phone
     passport = _clean(body.passport_number) if "passport_number" in given else p.passport_number
     pinfl = _pinfl(body.pinfl) if "pinfl" in given else p.pinfl
-    await _assert_identity_free(session, p.country_id, passport=passport, pinfl=pinfl, phone=phone, exclude_id=p.id)
+    await _assert_identity_free(session, registry_of(p), passport=passport, pinfl=pinfl, phone=phone, exclude_id=p.id)
 
     # the family on the number: re-decided when the number, the relation or the documents change
     rel_given = bool({"relation", "related_patient_id"} & given)
@@ -528,7 +538,7 @@ async def update_patient(
         name = body.full_name if "full_name" in given and body.full_name else p.full_name
         birth = body.birth_date if "birth_date" in given else p.birth_date
         p.relation, p.related_patient_id = await _resolve_family(
-            session, p.country_id, phone=phone, exclude_id=p.id, documented=documented,
+            session, registry_of(p), phone=phone, exclude_id=p.id, documented=documented,
             full_name=name, birth_date=birth, relation=relation, related_id=related,
         )  # fmt: skip
 

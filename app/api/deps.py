@@ -213,7 +213,8 @@ async def _session_alive(session: AsyncSession, jti: str, actor: str) -> bool:
     return alive_
 
 
-PRINCIPAL_KEY = "principal:{employee_id}"
+#: `c1:` = the snapshot shape since the home unit carries `company_id` (older builds keep their own keys)
+PRINCIPAL_KEY = "principal:c1:{employee_id}"
 PRINCIPAL_TTL = 60  # seconds; staff/role/org-tree writes invalidate explicitly (see invalidate_principal_cache)
 
 

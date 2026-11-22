@@ -689,7 +689,8 @@ async def create_order(session: AsyncSession, scope: UnitScope, staff: StaffPrin
     counter (`next_order_number`), patient snapshots, patient stats, then items."""
     facility = await units_svc.facility_or_422(session, scope, body.unit_id)
     patient = await patients_svc.get_patient_or_404(session, body.patient_id, staff)
-    if patient.country_id != facility.country_id:
+    # a patient is served inside their own registry: the facility's company and country
+    if patient.company_id != facility.company_id or patient.country_id != facility.country_id:
         raise NotFoundError(PATIENT_NOT_FOUND)
     number = (await session.execute(sql_text("SELECT next_order_number(:u)"), {"u": facility.id})).scalar_one()
     now = utcnow()

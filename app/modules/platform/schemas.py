@@ -10,8 +10,9 @@ from app.core.schemas import CamelModel
 
 _DAY = r"^\d{4}-\d{2}-\d{2}$"
 
-#: the level the rows are grouped at; omitted = one level below the narrowest filter (`unit` = facility)
-RegionGroupBy = Literal["country", "region", "district", "unit"]
+#: the level the rows are grouped at; omitted = one level below the narrowest filter (`unit` = facility).
+#: `company` is never the default — it is asked for (the platform's "who works with us" view)
+RegionGroupBy = Literal["company", "country", "region", "district", "unit"]
 
 
 class RegionStatsQuery(CamelModel):
@@ -20,6 +21,8 @@ class RegionStatsQuery(CamelModel):
 
     date_from: str = Field(pattern=_DAY)
     date_to: str = Field(pattern=_DAY)
+    #: one company (its node id) — the facilities of that company only
+    company_id: str | None = None
     country_id: str | None = None
     region_id: str | None = None
     district_id: str | None = None
@@ -46,13 +49,14 @@ class UnitMetrics(CamelModel):
 
 
 class UnitRow(UnitMetrics):
-    #: country / region / district id, or the facility id
+    #: company node id, country / region / district id, or the facility id
     id: str
     kind: RegionGroupBy
     name: str
-    #: the level above (a district's region, a region's country, a facility's region + district)
+    #: the level above (a district's region, a region's country, a facility's region + district; none for a company / country)
     parent_name: str | None = None
-    #: the organisation-tree node of this row (the country / region / district node, or the facility itself) when it exists
+    #: the organisation-tree node of this row (the company, the country / region / district node, or the facility itself)
+    #: when there is exactly one — a territory several companies work in has one node per company
     unit_id: str | None = None
     #: facilities only: the cheque prefix, the kind (ses, clinic …) and whether it is switched on
     code: str | None = None

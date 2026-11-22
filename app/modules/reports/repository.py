@@ -36,7 +36,7 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.types import Date
 
-from app.core.scope import UnitScope
+from app.core.scope import Registry, UnitScope
 from app.core.textutil import digits, fold
 from app.core.timeutil import DEFAULT_TZ
 from app.infrastructure.db.base import alive
@@ -79,18 +79,22 @@ def order_search(search: str | None) -> ColumnElement[bool] | None:
     return or_(*clauses) if clauses else false()
 
 
-def patient_in_units(unit_ids: UnitIds, country_id: uuid.UUID | None = None) -> ColumnElement[bool]:
+def patient_in_units(unit_ids: UnitIds, registry: Registry | None = None) -> ColumnElement[bool]:
     """A patient belongs to a unit when registered there or with a cheque there. Legacy rows registered nowhere and
-    never seen (imports) are nobody's and stay visible across their country, as they did across the company before."""
+    never seen (imports) are nobody's and stay visible across their registry — their company, and their country when
+    the scope lies inside one."""
     has_order = exists().where(Order.patient_id == Patient.id, alive(Order), Order.unit_id.in_(unit_ids))
     conds: list[ColumnElement[bool]] = [Patient.registered_unit_id.in_(unit_ids), has_order]
-    if country_id is not None:
-        conds.append(and_(Patient.registered_unit_id.is_(None), Patient.stats_orders == 0, Patient.country_id == country_id))
+    if registry is not None:
+        own = [Patient.company_id == registry.company_id]
+        if registry.country_id is not None:
+            own.append(Patient.country_id == registry.country_id)
+        conds.append(and_(Patient.registered_unit_id.is_(None), Patient.stats_orders == 0, *own))
     return or_(*conds)
 
 
 async def dashboard_counters(
-    session: AsyncSession, unit_ids: UnitIds, today_start: datetime, today_end: datetime, *, country_id: uuid.UUID | None = None
+    session: AsyncSession, unit_ids: UnitIds, today_start: datetime, today_end: datetime, *, registry: Registry | None = None
 ) -> dict[str, int]:
     """todayOrders / todayRevenue / pendingLab / pendingApproval / patients in 4 small queries
     (smsQueued comes from `messaging.service.count_queued`)."""
@@ -112,7 +116,7 @@ async def dashboard_counters(
         func.coalesce(func.sum(case((OrderItem.status.in_(("pending", "entered")), 1), else_=0)), 0).label("pending_lab"),
         func.coalesce(func.sum(case((OrderItem.status == "submitted", 1), else_=0)), 0).label("pending_approval"),
     ).where(OrderItem.unit_id.in_(unit_ids), alive(OrderItem), OrderItem.status.in_(("pending", "entered", "submitted")))
-    patients = select(func.count()).select_from(Patient).where(alive(Patient), patient_in_units(unit_ids, country_id))
+    patients = select(func.count()).select_from(Patient).where(alive(Patient), patient_in_units(unit_ids, registry))
     today_orders = (await session.execute(o)).scalar_one()
     today_revenue = (await session.execute(p)).scalar_one()
     items = (await session.execute(i)).one()

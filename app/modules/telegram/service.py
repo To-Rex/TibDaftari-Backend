@@ -19,6 +19,7 @@ from app.core.audit import audit
 from app.core.config import settings
 from app.core.crypto import decrypt
 from app.core.exceptions import RateLimitedError
+from app.core.scope import Registry
 from app.core.security import random_digits, sha256_hex
 from app.core.textutil import fmt_money_ru, is_valid_uz_phone, norm_phone, slugify
 from app.core.timeutil import fmt_datetime
@@ -52,7 +53,7 @@ class BotSpec:
     account_id: uuid.UUID
     #: the unit the account sits on (any level); the bot serves that unit's subtree
     unit_id: uuid.UUID
-    #: the patient registry the bot looks phones up in (the unit's country)
+    #: the country of the patient registry the bot looks phones up in (None on a company node — every country of it)
     country_id: uuid.UUID | None
     #: the account's own decrypted token, else the platform bot's; None = the bot cannot run
     token: str | None
@@ -60,6 +61,12 @@ class BotSpec:
     #: `telegramWebhookSecret` present in the unit's effective settings → updates arrive by webhook, not polling
     webhook: bool = False
     default_lang: str = DEFAULT_LANG
+    #: the company of that registry — the unit's (None = the unit is gone: the bot serves nobody)
+    company_id: uuid.UUID | None = None
+
+    @property
+    def registry(self) -> Registry | None:
+        return Registry(self.company_id, self.country_id) if self.company_id is not None else None
 
 
 def account_token(account: MessagingAccount | None) -> str | None:
@@ -84,13 +91,14 @@ def webhook_secret_ok(effective: dict[str, Any] | None, secret: str) -> bool:
 
 
 async def bot_spec(session: AsyncSession, account: MessagingAccount) -> BotSpec:
-    """Resolve an account into the spec its Application runs with (unit → country, effective settings)."""
+    """Resolve an account into the spec its Application runs with (unit → company and country, effective settings)."""
     unit = await units_repo.get_unit_any(session, account.unit_id)
     effective = await units_svc.effective_settings(session, account.unit_id)
     return BotSpec(
         account_id=account.id,
         unit_id=account.unit_id,
         country_id=unit.country_id if unit is not None else None,
+        company_id=unit.company_id if unit is not None else None,
         token=account_token(account),
         bot_username=account.bot_username,
         webhook=bool(effective.get(WEBHOOK_SECRET_KEY)),
@@ -212,12 +220,12 @@ class VerifyResult:
 
 
 async def begin_login(session: AsyncSession, bot: BotSpec, chat_id: str, raw_phone: str | None, lang: str) -> LoginStart:
-    """Phone step: validate → find the patient in the bot's country registry → create an OTP challenge → enqueue
+    """Phone step: validate → find the patient in the bot's registry (its company and country) → create an OTP challenge → enqueue
     the SMS through the patient's home unit (its SMS account and texts; the bot's unit when they have none)."""
     phone = parse_phone(raw_phone)
     if not phone:
         return LoginStart(status="bad_phone")
-    patient = await repo.patient_by_phone(session, bot.country_id, phone)
+    patient = await repo.patient_by_phone(session, bot.registry, phone)
     if not patient:
         return LoginStart(status="not_found")
     if not await _otp_send_allowed(phone, chat_id):
@@ -278,10 +286,10 @@ async def verify_code(session: AsyncSession, bot: BotSpec, chat_id: str, challen
             return VerifyResult(status="over")
         return VerifyResult(status="wrong", attempts_left=left)
     ch.consumed_at = now
-    patient = await repo.patient_by_phone(session, bot.country_id, ch.phone)
+    patient = await repo.patient_by_phone(session, bot.registry, ch.phone)
     if not patient:
         return VerifyResult(status="expired")
-    await repo.unlink_chat(session, bot.country_id, chat_id, now)  # one chat ↔ one patient per country
+    await repo.unlink_chat(session, bot.registry, chat_id, now)  # one chat ↔ one patient per registry
     link = await repo.link_patient(session, bot.account_id, patient, chat_id, lang, now)
     await audit(
         session,
@@ -299,12 +307,12 @@ async def verify_code(session: AsyncSession, bot: BotSpec, chat_id: str, challen
 
 async def logout(session: AsyncSession, bot: BotSpec, chat_id: str, lang: str) -> str | None:
     """Unlink the chat from its patient. Returns the patient's display name, or None when nothing was linked."""
-    patient = await repo.linked_patient(session, bot.country_id, chat_id)
+    patient = await repo.linked_patient(session, bot.registry, chat_id)
     if not patient:
         return None
     name = display_name(patient, lang)
     now = datetime.now(UTC)
-    ids = await repo.unlink_chat(session, bot.country_id, chat_id, now)
+    ids = await repo.unlink_chat(session, bot.registry, chat_id, now)
     await audit(
         session,
         actor_type="patient",

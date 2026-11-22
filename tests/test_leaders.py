@@ -1,4 +1,4 @@
-"""The four read-only leader roles — «Davlat / Viloyat / Tuman / Muassasa rahbari»: they look at everything inside
+"""The read-only leader roles — «Kompaniya / Davlat / Viloyat / Tuman / Muassasa rahbari»: they look at everything inside
 their units (reports, statistics, lists, cards, documents) and change nothing; each is pinned to one level of the
 tree (422 `leader_scope` otherwise). Fixture rows are prefixed `T-`."""
 
@@ -64,7 +64,7 @@ def emp(ctx: dict, *, role: str, unit_id: str, extra: list[str] | None = None, t
 
 def test_the_leader_set_only_looks() -> None:
     assert all(is_read_permission(p) for p in LEADER_PERMISSIONS)
-    assert set(LEADER_ROLES.values()) == {"country", "region", "district", "facility"}
+    assert set(LEADER_ROLES.values()) == {"company", "country", "region", "district", "facility"}
 
 
 def test_leader_session_sees_but_never_writes(ctx: dict) -> None:

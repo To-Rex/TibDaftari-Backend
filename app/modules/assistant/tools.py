@@ -181,8 +181,8 @@ async def whoami(ctx: ToolContext, args: dict[str, Any]) -> Any:
     }
 
 
-@tool("list_units", "Birliklar ro‘yxati", "List organisation units (country / region / district / facility) the user may see, optionally under one parent, filtered by name/code and level. Returns id, name, level, code, path, counts.",
-      params={"parentId": {"type": "string", "description": "limit to the subtree of this unit"}, "search": {"type": "string"}, "level": {"type": "string", "enum": ["country", "region", "district", "facility"]}, "includeInactive": {"type": "boolean"}})
+@tool("list_units", "Birliklar ro‘yxati", "List organisation units (company / country / region / district / facility) the user may see, optionally under one parent, filtered by name/code and level. Returns id, name, level, code, path, counts.",
+      params={"parentId": {"type": "string", "description": "limit to the subtree of this unit"}, "search": {"type": "string"}, "level": {"type": "string", "enum": ["company", "country", "region", "district", "facility"]}, "includeInactive": {"type": "boolean"}})
 async def list_units(ctx: ToolContext, args: dict[str, Any]) -> Any:
     rows = await units_svc.list_tree(ctx.session, ctx.staff, UnitTreeQuery(root_id=_str(args.get("parentId")), include_inactive=bool(args.get("includeInactive", False))))
     q = str(args.get("search") or "").strip().lower()
@@ -516,7 +516,7 @@ class Dataset:
 
 
 DATASETS: dict[str, Dataset] = {
-    "units": Dataset("Birliklar", (), "parentId, search, level (country|region|district|facility), includeInactive", _ds_units),
+    "units": Dataset("Birliklar", (), "parentId, search, level (company|country|region|district|facility), includeInactive", _ds_units),
     "employees": Dataset("Xodimlar", ("admin.employee.read",), "unitId, search, roleId, status (active|inactive)", _ds_employees),
     "orders": Dataset("Cheklar", ORDER_PERMS, "unitId, search, status, payment, dateFrom, dateTo (YYYY-MM-DD), patientId", _ds_orders),
     "patients": Dataset("Bemorlar", ("reception.patient.read",), "unitId, query (name / phone / passport; empty = recent visitors)", _ds_patients),

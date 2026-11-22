@@ -109,7 +109,7 @@ async def revoke_login_sessions(session: AsyncSession, patient_id: uuid.UUID, ke
 
 async def _sms_unit(session: AsyncSession, p: Patient, staff: StaffPrincipal, requested: str | None) -> uuid.UUID | None:
     """The facility whose (inherited) SMS account sends the text: the employee's working facility when it is an
-    alive facility of the patient's country inside their scope; else the patient's registered facility, else the
+    alive facility of the patient's registry (company and country) inside their scope; else the patient's registered facility, else the
     facility of their latest cheque. None = nobody can send."""
     if requested:
         try:
@@ -118,7 +118,7 @@ async def _sms_unit(session: AsyncSession, p: Patient, staff: StaffPrincipal, re
             uid = None
         if uid and staff.can_see(uid):
             unit = await units_repo.get_unit(session, uid)
-            if unit is not None and unit.level == "facility" and unit.country_id == p.country_id:
+            if unit is not None and unit.level == "facility" and unit.company_id == p.company_id and unit.country_id == p.country_id:
                 return uid
     return await messaging.patient_home_unit(session, p)
 

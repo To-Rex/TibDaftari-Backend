@@ -1,7 +1,8 @@
-"""The organisation tree: Davlat → Viloyat → Tuman/Shahar → Muassasa(lar).
+"""The organisation tree: Kompaniya → Davlat → Viloyat → Tuman/Shahar → Muassasa(lar).
 
-`org_units` is ONE table for every level. Geo columns are filled down to the level (a region node has
-`region_id`, a facility has all three). The DB validates nesting (trigger `org_units_validate`) and keeps the
+`org_units` is ONE table for every level. A company is the root: it has no parent and no territory, and every
+node under it carries its id in `company_id` (the DB trigger copies it from the parent). Geo columns are filled
+down to the level (a country node has `country_id`, a region node `region_id` too, a facility all three). The DB validates nesting (trigger `org_units_validate`) and keeps the
 closure table (`org_unit_closure`) up to date; the app only inserts/updates rows and reads the closure.
 """
 
@@ -17,11 +18,15 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.infrastructure.db.base import AuditMixin, Base, PKMixin, SoftDeleteMixin
 
-UNIT_LEVELS: tuple[str, ...] = ("country", "region", "district", "facility")
+UNIT_LEVELS: tuple[str, ...] = ("company", "country", "region", "district", "facility")
+#: the root of the tree: one company, any number of countries under it
+ROOT_LEVEL = "company"
 FACILITY_KINDS: tuple[str, ...] = ("ses", "clinic", "laboratory", "polyclinic", "hospital", "pharmacy", "other")
 #: the level a child of each level has
-CHILD_LEVEL: dict[str, str | None] = {"country": "region", "region": "district", "district": "facility", "facility": None}
-PARENT_LEVEL: dict[str, str | None] = {"country": None, "region": "country", "district": "region", "facility": "district"}
+CHILD_LEVEL: dict[str, str | None] = {"company": "country", "country": "region", "region": "district", "district": "facility", "facility": None}
+PARENT_LEVEL: dict[str, str | None] = {"company": None, "country": "company", "region": "country", "district": "region", "facility": "district"}
+#: depth of each level in the tree (0 = the company)
+LEVEL_DEPTH: dict[str, int] = {level: i for i, level in enumerate(UNIT_LEVELS)}
 
 
 class OrgUnit(PKMixin, AuditMixin, SoftDeleteMixin, Base):
@@ -29,7 +34,11 @@ class OrgUnit(PKMixin, AuditMixin, SoftDeleteMixin, Base):
 
     level: Mapped[str] = mapped_column(String(10), nullable=False)
     parent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("org_units.id"))
-    country_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("countries.id"), nullable=False)
+    #: the company the node belongs to (a company node: itself). NOT NULL in the database — the validation trigger
+    #: fills it from the parent, so a row may be inserted without it
+    company_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("org_units.id"), nullable=True)
+    #: NULL for a company node only (a company spans countries)
+    country_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("countries.id"))
     region_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("regions.id"))
     district_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("districts.id"))
     kind: Mapped[str | None] = mapped_column(String(20))  # facility only: ses | clinic | laboratory | …
@@ -40,7 +49,7 @@ class OrgUnit(PKMixin, AuditMixin, SoftDeleteMixin, Base):
     phone: Mapped[str | None] = mapped_column(String(40))
     email: Mapped[str | None] = mapped_column(String(200))
     address: Mapped[str | None] = mapped_column(Text)
-    timezone: Mapped[str | None] = mapped_column(String(64))  # NULL → the country's (filled by the DB trigger)
+    timezone: Mapped[str | None] = mapped_column(String(64))  # NULL → the country's (filled by the DB trigger; a company: Asia/Tashkent)
     logo_file_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -50,6 +59,10 @@ class OrgUnit(PKMixin, AuditMixin, SoftDeleteMixin, Base):
     @property
     def is_facility(self) -> bool:
         return self.level == "facility"
+
+    @property
+    def is_company(self) -> bool:
+        return self.level == "company"
 
 
 class OrgUnitClosure(Base):

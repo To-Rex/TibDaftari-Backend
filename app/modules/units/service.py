@@ -17,11 +17,12 @@ from app.api.deps import RequestMeta, StaffPrincipal, invalidate_principal_cache
 from app.core.audit import audit
 from app.core.crypto import decrypt, encrypt
 from app.core.exceptions import ConflictError, ExternalServiceError, ForbiddenError, NotFoundError, ValidationError
-from app.core.scope import UnitScope, invalidate_scope_cache, load_scope
+from app.core.ids import uuid7
+from app.core.scope import UNIT_CARD_KEY, UnitScope, invalidate_scope_cache, load_scope
 from app.core.security import mask_secret
 from app.core.textutil import is_valid_uz_phone, norm_phone
 from app.core.timeutil import utcnow
-from app.infrastructure.db.models import CHILD_LEVEL, MessagingAccount, OrgUnit, SmsTemplate
+from app.infrastructure.db.models import CHILD_LEVEL, ROOT_LEVEL, MessagingAccount, OrgUnit, SmsTemplate
 from app.infrastructure.redis import cache
 from app.modules.messaging import eskiz, sms
 from app.modules.messaging.eskiz import EskizAuthError
@@ -66,7 +67,7 @@ PLATFORM_MANAGE = "platform.unit.manage"
 
 
 def _dto_key(unit_id: uuid.UUID | str) -> str:
-    return f"unit:{unit_id}:dto"
+    return UNIT_CARD_KEY.format(unit_id=unit_id)
 
 
 async def invalidate_tree_caches(unit_id: uuid.UUID | str | None = None) -> None:
@@ -228,10 +229,12 @@ def unit_out(
         level=unit.level,  # type: ignore[arg-type]
         kind=unit.kind,  # type: ignore[arg-type]
         parent_id=str(unit.parent_id) if unit.parent_id else None,
-        country_id=str(unit.country_id),
+        company_id=str(unit.company_id) if unit.company_id else None,
+        company_name=names.get(str(unit.company_id)) if unit.company_id else None,
+        country_id=str(unit.country_id) if unit.country_id else None,
         region_id=str(unit.region_id) if unit.region_id else None,
         district_id=str(unit.district_id) if unit.district_id else None,
-        country_name=names.get(str(unit.country_id)),
+        country_name=names.get(str(unit.country_id)) if unit.country_id else None,
         region_name=names.get(str(unit.region_id)) if unit.region_id else None,
         district_name=names.get(str(unit.district_id)) if unit.district_id else None,
         name=unit.name,
@@ -297,12 +300,13 @@ async def list_tree(session: AsyncSession, staff: StaffPrincipal, q: UnitTreeQue
     visible = visible_ids_for(staff)
     if visible is not None:
         visible = list(dict.fromkeys([*visible, *(await repo.ancestors_of(session, staff.unit_ids))]))
+    company_id = _uuid_or_422(q.company_id, "Kompaniya")
     country_id = _uuid_or_422(q.country_id, "Davlat")
     root_id = _uuid_or_422(q.root_id, "Birlik")
     if root_id is not None:
         subtree = set(await repo.subtree_ids(session, root_id))
         visible = [u for u in (visible if visible is not None else subtree) if u in subtree]
-    units = await repo.list_units(session, visible, country_id=country_id, include_inactive=q.include_inactive)
+    units = await repo.list_units(session, visible, company_id=company_id, country_id=country_id, include_inactive=q.include_inactive)
     if not units:
         return []
     ids = [u.id for u in units]
@@ -346,7 +350,8 @@ def _snapshot(u: OrgUnit) -> dict[str, Any]:
         "timezone": u.timezone,
         "isActive": u.is_active,
         "sortOrder": u.sort_order,
-        "countryId": str(u.country_id),
+        "companyId": str(u.company_id) if u.company_id else None,
+        "countryId": str(u.country_id) if u.country_id else None,
         "regionId": str(u.region_id) if u.region_id else None,
         "districtId": str(u.district_id) if u.district_id else None,
         "settings": u.settings,
@@ -354,8 +359,10 @@ def _snapshot(u: OrgUnit) -> dict[str, Any]:
 
 
 async def create_unit(session: AsyncSession, body: UnitCreateIn, staff: StaffPrincipal, meta: RequestMeta) -> OrgUnitOut:
-    """A child of `parentId` (level = the parent's next level) or, without a parent, a country node (platform only).
-    Geo nesting is validated here and again by the DB trigger; facility codes are unique (409 "Bu kod band")."""
+    """A child of `parentId` (level = the parent's next level) or, without a parent, a company (platform only; its
+    name is unique among companies — 409 `company_exists`). A country node hangs under a company (`countryId`, one
+    node per country in a company). Geo nesting is validated here and again by the DB trigger; codes are unique
+    inside the company (409 "Bu kod band")."""
     parent: OrgUnit | None = None
     if body.parent_id:
         parent = await get_unit_or_404(session, body.parent_id)
@@ -367,26 +374,42 @@ async def create_unit(session: AsyncSession, body: UnitCreateIn, staff: StaffPri
             raise ValidationError("Muassasa ostida birlik yaratib bo‘lmaydi", code="leaf")
     else:
         staff.require(PLATFORM_MANAGE)
-        level = "country"
+        level = ROOT_LEVEL
 
-    country_id = parent.country_id if parent else _uuid_or_422(body.country_id, "Davlat")
-    if country_id is None or await repo.get_country(session, country_id) is None:
-        raise ValidationError("Davlat topilmadi")
+    # a company is its own company (the id is made here so the row can say so); everything else lives in its parent's
+    unit_id = uuid7()
+    company_id = parent.company_id if parent else unit_id
+    country_id = parent.country_id if parent else None
     region_id = parent.region_id if parent else None
     district_id = parent.district_id if parent else None
+    if level == ROOT_LEVEL:
+        if await repo.company_name_taken(session, body.name):
+            raise ConflictError("Bu nomdagi kompaniya allaqachon mavjud", code="company_exists")
+    elif level == "country":
+        country_id = _uuid_or_422(body.country_id, "Davlat")
+        country = await repo.get_country(session, country_id) if country_id else None
+        if country is None:
+            raise ValidationError("Davlat topilmadi" if body.country_id else "Davlat tanlanmagan", code="country_required")
+        if await repo.geo_node_exists(session, company_id, "country", country.id):
+            raise ConflictError("Bu davlat uchun birlik allaqachon mavjud", code="node_exists")
+        if not country.is_enabled:
+            country.is_enabled = True  # the system now works in this country
+            await cache.delete("ref:countries")  # … and the public country list says so at once
+    elif country_id is None or await repo.get_country(session, country_id) is None:
+        raise ValidationError("Davlat topilmadi")
     if level == "region":
         region_id = _uuid_or_422(body.region_id, "Viloyat")
         region = await repo.get_region(session, region_id) if region_id else None
         if region is None or region.country_id != country_id:
             raise ValidationError("Viloyat tanlangan davlatga tegishli emas" if region else "Viloyat topilmadi")
-        if await repo.geo_node_exists(session, "region", region.id):
+        if await repo.geo_node_exists(session, company_id, "region", region.id):
             raise ConflictError("Bu viloyat uchun birlik allaqachon mavjud", code="node_exists")
     elif level == "district":
         district_id = _uuid_or_422(body.district_id, "Tuman")
         district = await repo.get_district(session, district_id) if district_id else None
         if district is None or district.region_id != region_id:
             raise ValidationError("Tuman tanlangan viloyatga tegishli emas" if district else "Tuman topilmadi")
-        if await repo.geo_node_exists(session, "district", district.id):
+        if await repo.geo_node_exists(session, company_id, "district", district.id):
             raise ConflictError("Bu tuman uchun birlik allaqachon mavjud", code="node_exists")
     kind = body.kind if level == "facility" else None
     if level == "facility" and not kind:
@@ -394,11 +417,13 @@ async def create_unit(session: AsyncSession, body: UnitCreateIn, staff: StaffPri
     code = (body.code or "").strip().upper() or None
     if level == "facility" and not code:
         raise ValidationError("Muassasa kodi kiritilmagan", code="code_required")
-    if code and await repo.code_taken(session, code):
+    if code and await repo.code_taken(session, code, parent.company_id if parent else None):
         raise ConflictError("Bu kod band")
     unit = OrgUnit(
+        id=unit_id,
         level=level,
         parent_id=parent.id if parent else None,
+        company_id=company_id,
         country_id=country_id,
         region_id=region_id,
         district_id=district_id,
@@ -439,10 +464,16 @@ async def update_unit(session: AsyncSession, unit_id: uuid.UUID, body: UnitUpdat
     data = body.model_dump(exclude_unset=True)
     if data.get("code") is not None:
         code = str(data["code"]).strip().upper()
-        if code != (unit.code or "") and await repo.code_taken(session, code, unit.id):
-            raise ConflictError("Bu kod band")
+        if code != (unit.code or "") and code:
+            taken = await repo.code_taken(session, code, unit.company_id, unit.id)
+            if not taken and unit.level == ROOT_LEVEL:
+                taken = await repo.code_taken(session, code, None, unit.id)  # a company's code: among the companies too
+            if taken:
+                raise ConflictError("Bu kod band")
         unit.code = code or None
     if data.get("name"):
+        if unit.level == ROOT_LEVEL and data["name"].strip().lower() != unit.name.strip().lower() and await repo.company_name_taken(session, data["name"], unit.id):
+            raise ConflictError("Bu nomdagi kompaniya allaqachon mavjud", code="company_exists")
         unit.name = data["name"]
     if data.get("kind") and unit.level == "facility":
         unit.kind = data["kind"]

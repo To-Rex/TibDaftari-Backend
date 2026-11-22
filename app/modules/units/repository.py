@@ -39,13 +39,17 @@ async def units_by_ids(session: AsyncSession, ids: Iterable[uuid.UUID | None]) -
     return {u.id: u for u in rows}
 
 
-async def list_units(session: AsyncSession, ids: Sequence[uuid.UUID] | None = None, *, country_id: uuid.UUID | None = None, include_inactive: bool = True) -> list[OrgUnit]:
+async def list_units(
+    session: AsyncSession, ids: Sequence[uuid.UUID] | None = None, *, company_id: uuid.UUID | None = None, country_id: uuid.UUID | None = None, include_inactive: bool = True
+) -> list[OrgUnit]:
     """Alive units — all of them, or only `ids` — in tree order (sort_order, name)."""
     stmt = select(OrgUnit).where(alive(OrgUnit))
     if ids is not None:
         if not ids:
             return []
         stmt = stmt.where(OrgUnit.id.in_(ids))
+    if company_id is not None:
+        stmt = stmt.where(OrgUnit.company_id == company_id)
     if country_id is not None:
         stmt = stmt.where(OrgUnit.country_id == country_id)
     if not include_inactive:
@@ -60,7 +64,7 @@ async def children(session: AsyncSession, parent_id: uuid.UUID) -> list[OrgUnit]
 
 
 async def depths(session: AsyncSession, ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, int]:
-    """unit → depth in the tree (0 = country node)."""
+    """unit → depth in the tree (0 = the company, 1 = a country node … 4 = a facility)."""
     if not ids:
         return {}
     stmt = select(OrgUnitClosure.descendant_id, func.max(OrgUnitClosure.depth)).where(OrgUnitClosure.descendant_id.in_(ids)).group_by(OrgUnitClosure.descendant_id)
@@ -68,7 +72,7 @@ async def depths(session: AsyncSession, ids: Sequence[uuid.UUID]) -> dict[uuid.U
 
 
 async def paths(session: AsyncSession, ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, str]:
-    """unit → "Country › Region › District › Facility" (names of the ancestors incl. itself, root first)."""
+    """unit → "Company › Country › Region › District › Facility" (names of the ancestors incl. itself, root first)."""
     if not ids:
         return {}
     anc = OrgUnit.__table__.alias("anc")
@@ -90,10 +94,10 @@ async def unit_path(session: AsyncSession, unit_id: uuid.UUID) -> str:
 
 
 async def counts(session: AsyncSession, ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, dict[str, int]]:
-    """unit → {regions, districts, facilities, employees} counted over its subtree (alive rows only)."""
+    """unit → {countries, regions, districts, facilities, employees} counted over its subtree (alive rows only)."""
     if not ids:
         return {}
-    out: dict[uuid.UUID, dict[str, int]] = {i: {"regions": 0, "districts": 0, "facilities": 0, "employees": 0} for i in ids}
+    out: dict[uuid.UUID, dict[str, int]] = {i: {"countries": 0, "regions": 0, "districts": 0, "facilities": 0, "employees": 0} for i in ids}
     desc = OrgUnit.__table__.alias("d")
     stmt = (
         select(OrgUnitClosure.ancestor_id, desc.c.level, func.count())
@@ -102,7 +106,7 @@ async def counts(session: AsyncSession, ids: Sequence[uuid.UUID]) -> dict[uuid.U
         .group_by(OrgUnitClosure.ancestor_id, desc.c.level)
     )
     for aid, level, n in (await session.execute(stmt)).all():
-        key = {"region": "regions", "district": "districts", "facility": "facilities"}.get(level)
+        key = {"country": "countries", "region": "regions", "district": "districts", "facility": "facilities"}.get(level)
         if key:
             out[aid][key] = int(n)
     emp = (
@@ -117,8 +121,15 @@ async def counts(session: AsyncSession, ids: Sequence[uuid.UUID]) -> dict[uuid.U
 
 
 async def geo_names(session: AsyncSession, rows: Sequence[OrgUnit]) -> dict[str, str]:
-    """`{id: name}` for every country/region/district referenced by `rows` (three small IN queries)."""
+    """`{id: name}` for every company / country / region / district referenced by `rows` (four small IN queries)."""
     out: dict[str, str] = {}
+    companies = {u.company_id for u in rows if u.company_id is not None}
+    loaded = {u.id: u.name for u in rows if u.level == "company"}
+    missing = companies - set(loaded)
+    if missing:
+        for row_id, name in (await session.execute(select(OrgUnit.id, OrgUnit.name).where(OrgUnit.id.in_(missing)))).all():
+            loaded[row_id] = name
+    out.update({str(k): v for k, v in loaded.items() if k in companies})
     for model, attr in ((Country, "country_id"), (Region, "region_id"), (District, "district_id")):
         ids = {getattr(u, attr) for u in rows if getattr(u, attr) is not None}
         if not ids:
@@ -128,19 +139,47 @@ async def geo_names(session: AsyncSession, rows: Sequence[OrgUnit]) -> dict[str,
     return out
 
 
-async def code_taken(session: AsyncSession, code: str, exclude_id: uuid.UUID | None = None) -> bool:
-    """Facility codes (cheque prefixes) are unique among alive units, case-insensitive."""
+async def code_taken(session: AsyncSession, code: str, company_id: uuid.UUID | None, exclude_id: uuid.UUID | None = None) -> bool:
+    """Codes (cheque prefixes) are unique among the alive units of ONE company, case-insensitive; `company_id` None =
+    among the companies themselves (the code of a company)."""
     stmt = select(OrgUnit.id).where(func.lower(OrgUnit.code) == code.lower(), alive(OrgUnit))
+    stmt = stmt.where(OrgUnit.company_id == company_id) if company_id is not None else stmt.where(OrgUnit.level == "company")
     if exclude_id is not None:
         stmt = stmt.where(OrgUnit.id != exclude_id)
     return (await session.execute(stmt.limit(1))).scalar_one_or_none() is not None
 
 
-async def geo_node_exists(session: AsyncSession, level: str, geo_id: uuid.UUID) -> bool:
-    """Is there already an alive node of `level` for this region / district (one node per territory)?"""
-    column = OrgUnit.region_id if level == "region" else OrgUnit.district_id
-    stmt = select(OrgUnit.id).where(OrgUnit.level == level, column == geo_id, alive(OrgUnit)).limit(1)
-    return (await session.execute(stmt)).scalar_one_or_none() is not None
+async def company_name_taken(session: AsyncSession, name: str, exclude_id: uuid.UUID | None = None) -> bool:
+    """Company names are unique among alive companies, case-insensitive."""
+    stmt = select(OrgUnit.id).where(OrgUnit.level == "company", func.lower(OrgUnit.name) == name.strip().lower(), alive(OrgUnit))
+    if exclude_id is not None:
+        stmt = stmt.where(OrgUnit.id != exclude_id)
+    return (await session.execute(stmt.limit(1))).scalar_one_or_none() is not None
+
+
+_GEO_COLUMN = {"country": OrgUnit.country_id, "region": OrgUnit.region_id, "district": OrgUnit.district_id}
+
+
+async def geo_node(session: AsyncSession, company_id: uuid.UUID, level: str, geo_id: uuid.UUID) -> OrgUnit | None:
+    """The alive node of `level` for this country / region / district inside the company (one node per territory
+    and company)."""
+    stmt = select(OrgUnit).where(OrgUnit.company_id == company_id, OrgUnit.level == level, _GEO_COLUMN[level] == geo_id, alive(OrgUnit)).limit(1)
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def geo_node_exists(session: AsyncSession, company_id: uuid.UUID, level: str, geo_id: uuid.UUID) -> bool:
+    """Is there already an alive node of `level` for this country / region / district in the company?"""
+    return await geo_node(session, company_id, level, geo_id) is not None
+
+
+async def list_companies(session: AsyncSession, ids: Sequence[uuid.UUID] | None = None) -> list[OrgUnit]:
+    """Alive companies (all of them, or only `ids`), by sort order and name."""
+    stmt = select(OrgUnit).where(OrgUnit.level == "company", alive(OrgUnit))
+    if ids is not None:
+        if not ids:
+            return []
+        stmt = stmt.where(OrgUnit.id.in_(ids))
+    return list((await session.execute(stmt.order_by(OrgUnit.sort_order.asc(), OrgUnit.name.asc(), OrgUnit.id.asc()))).scalars().all())
 
 
 async def get_country(session: AsyncSession, country_id: uuid.UUID) -> Country | None:

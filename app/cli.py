@@ -4,8 +4,11 @@ Commands
 --------
 * ``seed-reference``       upsert countries (``seed/reference/countries.json``) and regions / districts
                            (Uzbekistan's from ``uz-regions.json``, the neighbours' from ``countries.json``)
-* ``create-country-root``  create the country node of the organisation tree when it is missing
-                           (``--country UZ --name "O‘zbekiston Respublikasi"``) and switch the country on
+* ``create-company``       create a company — the root of an organisation tree — when no company has that name
+                           (``--name "TibDaftari"``)
+* ``create-country-root``  create the country node of a company when it is missing
+                           (``--country UZ --name "O‘zbekiston Respublikasi" [--company "TibDaftari"]``) and switch
+                           the country on; without ``--company`` the only company is used (made when there is none)
 * ``create-superadmin``    platform superadmin employee: no unit, the system ``superadmin`` role
 * ``set-password``         reset a staff password by login
 * ``ensure-partitions``    create upcoming monthly ``audit_log`` partitions (SQL function ``ensure_audit_partitions``)
@@ -28,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit
 from app.core.config import settings
+from app.core.ids import uuid7
 from app.core.permissions import SUPERADMIN_ROLE_KEY, SYSTEM_ROLES
 from app.core.security import hash_password
 from app.core.textutil import fold
@@ -139,17 +143,59 @@ async def _country_by_code(session: AsyncSession, code: str) -> Country:
     return country
 
 
-async def create_country_root(*, country_code: str, name: str, short_name: str | None = None, code: str | None = None) -> tuple[str, bool]:
-    """Create the country node (`org_units.level = 'country'`) of a country when it is missing and switch the country
-    on (`countries.is_enabled`). Returns (unit id, created)."""
+DEFAULT_COMPANY_NAME = "TibDaftari"
+
+
+async def _company(session: AsyncSession, name: str | None, *, create: bool) -> tuple[OrgUnit, bool]:
+    """The company called `name` (case-insensitive) — or, without a name, the only company there is. A missing one
+    is made when `create` (the default name: TibDaftari). Returns (company, created)."""
+    stmt = select(OrgUnit).where(OrgUnit.level == "company", alive(OrgUnit))
+    if name:
+        stmt = stmt.where(func.lower(OrgUnit.name) == name.strip().lower())
+    found = list((await session.execute(stmt.order_by(OrgUnit.created_at, OrgUnit.id))).scalars().all())
+    if len(found) == 1:
+        return found[0], False
+    if len(found) > 1:
+        raise CliError("Several companies exist — name one with --company")
+    if not create:
+        raise CliError(f"Company {name!r} not found (create it with create-company)")
+    unit_id = uuid7()
+    company = OrgUnit(id=unit_id, company_id=unit_id, level="company", parent_id=None, country_id=None, name=(name or DEFAULT_COMPANY_NAME).strip(), is_active=True, sort_order=0, settings={})
+    session.add(company)
+    await session.flush()
+    await audit(session, actor_type="system", actor_id=None, unit_id=company.id, country_id=None, action="create", entity="unit", entity_id=company.id, after={"level": "company", "name": company.name})
+    return company, True
+
+
+async def create_company(*, name: str) -> tuple[str, bool]:
+    """Create a company (`org_units.level = 'company'`, the root of a tree) unless one with this name exists.
+    Returns (unit id, created)."""
+    async with session_scope() as session:
+        company, created = await _company(session, name, create=True)
+        unit_id = str(company.id)
+    if created:
+        from app.modules.units.service import invalidate_tree_caches
+
+        await invalidate_tree_caches(unit_id)
+    return unit_id, created
+
+
+async def create_country_root(*, country_code: str, name: str, short_name: str | None = None, code: str | None = None, company: str | None = None) -> tuple[str, bool]:
+    """Create the country node (`org_units.level = 'country'`) of a country under a company when it is missing and
+    switch the country on (`countries.is_enabled`). `company` = the company's name; without it the only company is
+    used, and one is made when the tree is still empty. Returns (unit id, created)."""
     async with session_scope() as session:
         country = await _country_by_code(session, country_code)
-        existing = (await session.execute(select(OrgUnit).where(OrgUnit.level == "country", OrgUnit.country_id == country.id, alive(OrgUnit)))).scalar_one_or_none()
+        root, _ = await _company(session, company, create=company is None)
+        existing = (
+            await session.execute(select(OrgUnit).where(OrgUnit.level == "country", OrgUnit.company_id == root.id, OrgUnit.country_id == country.id, alive(OrgUnit)))
+        ).scalar_one_or_none()
         if existing is not None:
             return str(existing.id), False
         unit = OrgUnit(
             level="country",
-            parent_id=None,
+            parent_id=root.id,
+            company_id=root.id,
             country_id=country.id,
             name=name.strip(),
             short_name=(short_name or "").strip() or None,
@@ -225,7 +271,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("seed-reference", help="upsert countries + regions / districts from seed/reference")
 
-    root = sub.add_parser("create-country-root", help="create the country node of the organisation tree (when missing) and enable the country")
+    comp = sub.add_parser("create-company", help="create a company — the root of an organisation tree (when no company has that name)")
+    comp.add_argument("--name", required=True, help="company name, e.g. \"TibDaftari\"")
+
+    root = sub.add_parser("create-country-root", help="create the country node of a company (when missing) and enable the country")
+    root.add_argument("--company", default=None, help="company name (default: the only company; one is created when the tree is empty)")
     root.add_argument("--country", required=True, help="ISO 3166-1 alpha-2 code, e.g. UZ")
     root.add_argument("--name", required=True, help="node name, e.g. \"O‘zbekiston Respublikasi\"")
     root.add_argument("--short-name", default=None, help="short name used in message texts")
@@ -251,8 +301,11 @@ async def _run(args: argparse.Namespace) -> None:
             async with session_scope() as session:
                 countries, regions, districts = await seed_reference(session)
             print(f"reference: {countries} countries, {regions} regions, {districts} districts upserted")
+        elif args.command == "create-company":
+            unit_id, created = await create_company(name=args.name)
+            print(f"company {'created' if created else 'already exists'}: {args.name} ({unit_id})")
         elif args.command == "create-country-root":
-            unit_id, created = await create_country_root(country_code=args.country, name=args.name, short_name=args.short_name, code=args.code)
+            unit_id, created = await create_country_root(country_code=args.country, name=args.name, short_name=args.short_name, code=args.code, company=args.company)
             print(f"country node {'created' if created else 'already exists'}: {args.country.upper()} ({unit_id})")
         elif args.command == "create-superadmin":
             employee_id = await create_superadmin(login=args.login, password=args.password, full_name=args.name)

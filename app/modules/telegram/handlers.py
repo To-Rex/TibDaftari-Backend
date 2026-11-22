@@ -1,7 +1,7 @@
 """python-telegram-bot handlers — the NavbatApp conversation, one Application per bot account.
 
 Flow: /start → language (inline) → already linked? welcome back + menu : ask phone (contact button or text)
-→ patient lookup in the bot's country registry → OTP SMS → code (3 attempts) → link → menu.
+→ patient lookup in the bot's registry (company + country) → OTP SMS → code (3 attempts) → link → menu.
 Menu: 🧾 cheques · 💰 payments · 📄 results (PDFs) · 🚪 logout · 🌐 language. Commands: /lang /logout /cancel.
 
 python-telegram-bot is imported lazily inside `build_application()` so the API boots even when the
@@ -106,7 +106,7 @@ def build_application(bot: BotSpec) -> Application:
 
     async def _linked(update: Update) -> Any:
         async with session_scope() as s:
-            return await repo.linked_patient(s, bot.country_id, _chat_id(update))
+            return await repo.linked_patient(s, bot.registry, _chat_id(update))
 
     async def _reply(update: Update, text: str, reply_markup: Any = None) -> None:
         if update.effective_chat:
@@ -150,7 +150,7 @@ def build_application(bot: BotSpec) -> Application:
     async def lang_chosen(update: Update, context: Ctx) -> int:
         lang = await _apply_lang_choice(update, context)
         async with session_scope() as s:
-            patient = await repo.linked_patient(s, bot.country_id, _chat_id(update))
+            patient = await repo.linked_patient(s, bot.registry, _chat_id(update))
             org = await service.patient_org_name(s, patient) if patient else ""
         if patient:
             await _reply(update, service.with_org(t(lang, "welcome_back", name=service.display_name(patient, lang)), org), main_keyboard(lang))

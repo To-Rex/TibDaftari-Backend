@@ -39,6 +39,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:  # pragma: no cover
         log.warning("redis unavailable (%s) — running degraded (no rate limit / cache)", exc)
 
+    # a new build may read the organisation tree differently (new columns, new levels): never serve a tree, scope or
+    # principal snapshot cached by the previous one
+    try:
+        from app.modules.units.service import invalidate_tree_caches
+
+        await invalidate_tree_caches()
+    except Exception as exc:  # pragma: no cover — degraded Redis: the snapshots expire by themselves in minutes
+        log.warning("could not drop the tree caches at start (%s)", exc)
+
     tasks: list[asyncio.Task] = []
     if settings.workers_enabled:
         from app.workers.runner import start_workers

@@ -1,6 +1,6 @@
 """Platform rules — the territory activity view: who may see what, grouping level, folding, cache.
 
-Superadmins (`platform.unit.manage`) see every country; any other staff member may ask for the subtree of a unit
+Superadmins (`platform.unit.manage`) see every company and country; any other staff member may ask for the subtree of a unit
 inside their scope (`unitId`) — a region administrator sees their region folded by district or facility.
 """
 
@@ -34,13 +34,15 @@ MAX_RANGE_DAYS = 366 * 3
 METRICS = ("orders", "revenue", "patients_new", "results_ready", "sms_sent")
 PLATFORM_MANAGE = "platform.unit.manage"
 
+#: the territory ladder the default grouping walks (`company` stands outside it: it is only ever asked for)
 _LEVELS: tuple[RegionGroupBy, ...] = ("country", "region", "district", "unit")
-_UNIT_DEPTH = {"country": 0, "region": 1, "district": 2, "facility": 3}
+_UNIT_DEPTH = {"company": 0, "country": 0, "region": 1, "district": 2, "facility": 3}
 
 
 def default_group_by(country_id: uuid.UUID | None, region_id: uuid.UUID | None, district_id: uuid.UUID | None, unit_level: str | None = None) -> RegionGroupBy:
-    """One level below the narrowest filter: nothing / a country → regions, a region → districts, a district →
-    facilities; a root unit counts with its own level (a region node → districts, a district node → facilities)."""
+    """One level below the narrowest filter: nothing / a company / a country → regions, a region → districts, a
+    district → facilities; a root unit counts with its own level (a company or a country node → regions, a region
+    node → districts, a district node → facilities)."""
     depth = 2 if district_id else 1 if region_id else 0
     if unit_level:
         depth = max(depth, _UNIT_DEPTH.get(unit_level, 0))
@@ -60,6 +62,7 @@ def _parse_uuid(value: str | None, label: str) -> uuid.UUID | None:
 class ParsedQuery:
     date_from: date
     date_to: date
+    company_id: uuid.UUID | None
     country_id: uuid.UUID | None
     region_id: uuid.UUID | None
     district_id: uuid.UUID | None
@@ -84,6 +87,7 @@ def parse_query(q: RegionStatsQuery) -> ParsedQuery:
     return ParsedQuery(
         date_from=d_from,
         date_to=d_to,
+        company_id=_parse_uuid(q.company_id, "Kompaniya"),
         country_id=_parse_uuid(q.country_id, "Davlat"),
         region_id=_parse_uuid(q.region_id, "Viloyat"),
         district_id=_parse_uuid(q.district_id, "Tuman"),
@@ -130,10 +134,12 @@ def fold_rows(
     return rows, total
 
 
-async def _build(session: AsyncSession, parsed: ParsedQuery, group_by: RegionGroupBy) -> RegionStatsOut:
+async def _build(session: AsyncSession, parsed: ParsedQuery, group_by: RegionGroupBy, company_id: uuid.UUID | None = None) -> RegionStatsOut:
+    """`company_id` = the company the rows belong to when it is known (the filter, or the root unit's company) —
+    it picks the right tree node for a territory row."""
     start, end = day_range(parsed.date_from, parsed.date_to)
     assert start is not None and end is not None
-    u = repo.scoped_facilities(group_by, parsed.country_id, parsed.region_id, parsed.district_id, parsed.unit_id)
+    u = repo.scoped_facilities(group_by, parsed.country_id, parsed.region_id, parsed.district_id, parsed.unit_id, company_id=parsed.company_id)
     structure = await repo.structure(session, u)
     metrics = {
         "orders": await repo.orders(session, u, start, end),
@@ -143,7 +149,7 @@ async def _build(session: AsyncSession, parsed: ParsedQuery, group_by: RegionGro
         "sms_sent": await repo.sms_sent(session, u, start, end),
     }
     keys = {k for k in (set(structure) | {k for m in metrics.values() for k in m}) if k is not None}
-    rows, total = fold_rows(group_by, structure, metrics, await repo.names(session, group_by, keys))
+    rows, total = fold_rows(group_by, structure, metrics, await repo.names(session, group_by, keys, company_id))
     trend_map = await repo.trend(session, u, start, end)
     trend: list[RegionTrendPoint] = []
     d = parsed.date_from
@@ -159,6 +165,7 @@ async def region_stats(session: AsyncSession, q: RegionStatsQuery, staff: StaffP
     inside their own scope. Cached in Redis for 60 s per full parameter set."""
     parsed = parse_query(q)
     unit_level: str | None = None
+    company_id = parsed.company_id
     if parsed.unit_id is not None:
         unit = await units_repo.get_unit(session, parsed.unit_id)
         if unit is None:
@@ -166,13 +173,14 @@ async def region_stats(session: AsyncSession, q: RegionStatsQuery, staff: StaffP
         if not staff.has(PLATFORM_MANAGE):
             staff.require_unit(unit.id)
         unit_level = unit.level
+        company_id = company_id or unit.company_id
     else:
         staff.require(PLATFORM_MANAGE)
     group_by = parsed.resolve_group_by(unit_level)
-    key = f"platform:regions:{group_by}:{parsed.country_id}:{parsed.region_id}:{parsed.district_id}:{parsed.unit_id}:{parsed.date_from}:{parsed.date_to}"
+    key = f"platform:regions:{group_by}:{parsed.company_id}:{parsed.country_id}:{parsed.region_id}:{parsed.district_id}:{parsed.unit_id}:{parsed.date_from}:{parsed.date_to}"
     hit = await cache.get_json(key)
     if hit is not None:
         return RegionStatsOut.model_validate(hit)
-    out = await _build(session, parsed, group_by)
+    out = await _build(session, parsed, group_by, company_id)
     await cache.set_json(key, dump(out), CACHE_TTL_SECONDS)
     return out

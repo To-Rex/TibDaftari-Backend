@@ -79,6 +79,7 @@ COPY_PERMISSIONS = ("admin.catalog.write", "admin.schema.write", "admin.template
 _LOGIN_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,39}$")
 LOGIN_INVALID = "Login 3–40 belgi: lotin harflari, raqamlar va . _ - (harf yoki raqam bilan boshlanadi)"
 MSG_FACILITY_PARENT = "Muassasa ostida birlik yaratib bo‘lmaydi"
+MSG_COUNTRY_PARENT = "Kompaniya ostida muassasa ochish uchun avval davlatni tanlang"
 MSG_REGION_REQUIRED = "Viloyat tanlanmagan"
 MSG_DISTRICT_REQUIRED = "Tuman / shahar tanlanmagan"
 MSG_SAMPLE_NOT_FOUND = "Namuna muassasa topilmadi"
@@ -92,6 +93,15 @@ def require_quick_start_right(staff: StaffPrincipal, parent: OrgUnit) -> None:
     staff.require_unit(parent.id)
     if not (staff.has("admin.unit.manage", PLATFORM_MANAGE) and staff.has("admin.employee.write")):
         raise ForbiddenError("Ruxsat yo‘q")
+
+
+def _require_territory_parent(parent: OrgUnit) -> None:
+    """A facility opens under a country, a region or a district node. A company holds countries — the caller picks
+    one of them first (422 `country_required`); a facility holds nothing (422 `leaf`)."""
+    if parent.level == "facility":
+        raise ValidationError(MSG_FACILITY_PARENT, code="leaf")
+    if parent.level == "company":
+        raise ValidationError(MSG_COUNTRY_PARENT, code="country_required")
 
 
 def _require_copy_right(staff: StaffPrincipal) -> None:
@@ -294,8 +304,7 @@ async def preview(
     session: AsyncSession, parent: OrgUnit, region_id: str | None, district_id: str | None, staff: StaffPrincipal
 ) -> QuickStartPreviewOut:
     require_quick_start_right(staff, parent)
-    if parent.level == "facility":
-        raise ValidationError(MSG_FACILITY_PARENT, code="leaf")
+    _require_territory_parent(parent)
     region, district = await _existing_chain(session, parent, region_id, district_id)
     deepest = district or region or parent
     ancestors = await scope_ancestor_ids(session, deepest.id)
@@ -573,8 +582,7 @@ async def quick_start(
     session: AsyncSession, parent: OrgUnit, body: QuickStartIn, staff: StaffPrincipal, meta: RequestMeta
 ) -> QuickStartOut:
     require_quick_start_right(staff, parent)
-    if parent.level == "facility":
-        raise ValidationError(MSG_FACILITY_PARENT, code="leaf")
+    _require_territory_parent(parent)
     if body.sample is not None:
         _require_copy_right(staff)
     sample: OrgUnit | None = None

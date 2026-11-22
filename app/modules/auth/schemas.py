@@ -19,11 +19,14 @@ class SessionUnitOut(CamelModel):
     """The employee's home unit as the UI needs it on first paint (the full card comes from `GET /units/{id}`)."""
 
     id: str
-    level: Literal["country", "region", "district", "facility"]
+    level: Literal["company", "country", "region", "district", "facility"]
     name: str
     code: str | None = None
-    country_id: str
-    #: "O‘zbekiston Respublikasi › Xorazm viloyati › Bog‘ot tumani › Bog‘ot tumani SES"
+    #: the company the unit belongs to (a company node: itself)
+    company_id: str | None = None
+    #: None for a company node (it spans countries)
+    country_id: str | None = None
+    #: "TibDaftari › O‘zbekiston Respublikasi › Xorazm viloyati › Bog‘ot tumani › Bog‘ot tumani SES"
     path: str
 
 

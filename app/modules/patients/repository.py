@@ -1,4 +1,4 @@
-"""Patients SQL: country-scoped selects, unit membership predicate, search predicate (fold_text + trigram
+"""Patients SQL: registry-scoped selects (one company, one country of it or all of them), unit membership predicate, search predicate (fold_text + trigram
 indexes), identity lookups, geo reference lists. No rules, no HTTP."""
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy import ColumnElement, Select, String, and_, exists, false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.scope import Registry
 from app.core.textutil import digits, fold
 from app.infrastructure.db.base import alive
 from app.infrastructure.db.models import Country, District, Order, Patient, Region
@@ -23,9 +24,16 @@ SORTABLE: dict[str, Any] = {
 }
 
 
-def base_select(country_id: uuid.UUID) -> Select:
-    """Alive patients of one country (the identity scope)."""
-    return select(Patient).where(Patient.country_id == country_id, alive(Patient))
+def in_registry(reg: Registry) -> ColumnElement[bool]:
+    """The patient belongs to the registry: its company, and its country when the registry names one."""
+    if reg.country_id is None:
+        return Patient.company_id == reg.company_id
+    return and_(Patient.company_id == reg.company_id, Patient.country_id == reg.country_id)
+
+
+def base_select(reg: Registry) -> Select:
+    """Alive patients of one registry (the identity scope: a company and a country of it)."""
+    return select(Patient).where(in_registry(reg), alive(Patient))
 
 
 def in_units(unit_ids: Sequence[uuid.UUID]) -> ColumnElement[bool]:
@@ -83,39 +91,39 @@ async def get_by_id(session: AsyncSession, patient_id: uuid.UUID, unit_ids: Sequ
 
 
 async def find_by_passport(
-    session: AsyncSession, country_id: uuid.UUID, passport: str, exclude_id: uuid.UUID | None = None
+    session: AsyncSession, reg: Registry, passport: str, exclude_id: uuid.UUID | None = None
 ) -> Patient | None:
-    """Case-insensitive passport match inside the country (optionally excluding one patient)."""
-    stmt = base_select(country_id).where(func.upper(Patient.passport_number) == passport.upper())
+    """Case-insensitive passport match inside the registry (optionally excluding one patient)."""
+    stmt = base_select(reg).where(func.upper(Patient.passport_number) == passport.upper())
     if exclude_id:
         stmt = stmt.where(Patient.id != exclude_id)
     return (await session.execute(stmt.limit(1))).scalar_one_or_none()
 
 
 async def find_by_pinfl(
-    session: AsyncSession, country_id: uuid.UUID, pinfl: str, exclude_id: uuid.UUID | None = None
+    session: AsyncSession, reg: Registry, pinfl: str, exclude_id: uuid.UUID | None = None
 ) -> Patient | None:
-    """Exact PINFL match inside the country (optionally excluding one patient)."""
-    stmt = base_select(country_id).where(Patient.pinfl == pinfl)
+    """Exact PINFL match inside the registry (optionally excluding one patient)."""
+    stmt = base_select(reg).where(Patient.pinfl == pinfl)
     if exclude_id:
         stmt = stmt.where(Patient.id != exclude_id)
     return (await session.execute(stmt.limit(1))).scalar_one_or_none()
 
 
 async def find_by_phone(
-    session: AsyncSession, country_id: uuid.UUID, phone: str, exclude_id: uuid.UUID | None = None
+    session: AsyncSession, reg: Registry, phone: str, exclude_id: uuid.UUID | None = None
 ) -> Patient | None:
-    """Exact normalised phone match inside the country (optionally excluding one patient)."""
-    stmt = base_select(country_id).where(Patient.phone == phone)
+    """Exact normalised phone match inside the registry (optionally excluding one patient)."""
+    stmt = base_select(reg).where(Patient.phone == phone)
     if exclude_id:
         stmt = stmt.where(Patient.id != exclude_id)
     return (await session.execute(stmt.order_by(Patient.created_at).limit(1))).scalar_one_or_none()
 
 
-async def on_phone(session: AsyncSession, country_id: uuid.UUID, phone: str, exclude_id: uuid.UUID | None = None) -> list[Patient]:
-    """Every alive patient of the country on this number, the number's owner first (no relation, oldest), then by
+async def on_phone(session: AsyncSession, reg: Registry, phone: str, exclude_id: uuid.UUID | None = None) -> list[Patient]:
+    """Every alive patient of the registry on this number, the number's owner first (no relation, oldest), then by
     registration."""
-    stmt = base_select(country_id).where(Patient.phone == phone)
+    stmt = base_select(reg).where(Patient.phone == phone)
     if exclude_id:
         stmt = stmt.where(Patient.id != exclude_id)
     stmt = stmt.order_by(Patient.relation.is_not(None), Patient.created_at, Patient.id).limit(100)
@@ -140,25 +148,34 @@ async def names_by_ids(session: AsyncSession, ids: Iterable[uuid.UUID | None]) -
     return {r[0]: r[1] for r in rows}
 
 
-async def phone_counts(session: AsyncSession, pairs: Iterable[tuple[uuid.UUID, str]]) -> dict[tuple[uuid.UUID, str], int]:
-    """How many alive patients use each (country, phone)."""
-    wanted = set(pairs)
+PhoneKey = tuple[uuid.UUID, uuid.UUID, str]
+
+
+def phone_key(p: Patient) -> PhoneKey:
+    """(company, country, phone) — the number as its registry sees it."""
+    return (p.company_id, p.country_id, p.phone)
+
+
+async def phone_counts(session: AsyncSession, keys: Iterable[PhoneKey]) -> dict[PhoneKey, int]:
+    """How many alive patients use each (company, country, phone)."""
+    wanted = set(keys)
     if not wanted:
         return {}
-    countries = {c for c, _ in wanted}
-    phones = {ph for _, ph in wanted}
+    companies = {k[0] for k in wanted}
+    countries = {k[1] for k in wanted}
+    phones = {k[2] for k in wanted}
     stmt = (
-        select(Patient.country_id, Patient.phone, func.count())
-        .where(Patient.country_id.in_(countries), Patient.phone.in_(phones), alive(Patient))
-        .group_by(Patient.country_id, Patient.phone)
+        select(Patient.company_id, Patient.country_id, Patient.phone, func.count())
+        .where(Patient.company_id.in_(companies), Patient.country_id.in_(countries), Patient.phone.in_(phones), alive(Patient))
+        .group_by(Patient.company_id, Patient.country_id, Patient.phone)
     )
-    return {(r[0], r[1]): int(r[2]) for r in await session.execute(stmt)}
+    return {(r[0], r[1], r[2]): int(r[3]) for r in await session.execute(stmt)}
 
 
 async def find_duplicates(
-    session: AsyncSession, country_id: uuid.UUID, *, phone: str | None, passport: str | None, pinfl: str | None
+    session: AsyncSession, reg: Registry, *, phone: str | None, passport: str | None, pinfl: str | None
 ) -> list[Patient]:
-    """Same country; phone exact OR passport case-insensitive OR pinfl exact (any identity key given)."""
+    """Same registry; phone exact OR passport case-insensitive OR pinfl exact (any identity key given)."""
     clauses: list[ColumnElement[bool]] = []
     if phone:
         clauses.append(Patient.phone == phone)
@@ -168,19 +185,19 @@ async def find_duplicates(
         clauses.append(Patient.pinfl == pinfl)
     if not clauses:
         return []
-    stmt = base_select(country_id).where(or_(*clauses)).order_by(Patient.created_at.desc()).limit(50)
+    stmt = base_select(reg).where(or_(*clauses)).order_by(Patient.created_at.desc()).limit(50)
     return list((await session.execute(stmt)).scalars().all())
 
 
 async def search(
-    session: AsyncSession, country_id: uuid.UUID, query: str, limit: int, unit_ids: Sequence[uuid.UUID] | None = None
+    session: AsyncSession, reg: Registry, query: str, limit: int, unit_ids: Sequence[uuid.UUID] | None = None
 ) -> list[Patient]:
     """Quick-pick search: rank by last visit (nulls last), then newest.
 
-    With a unit scope: a typed query still searches the whole country (a patient of another facility must be
+    With a unit scope: a typed query still searches the whole registry (a patient of another facility must be
     found, not registered twice) but lists the scope's own patients first; the empty query — "recent visitors" —
     only ever lists the scope's own patients."""
-    stmt = base_select(country_id)
+    stmt = base_select(reg)
     pred = search_predicate(query)
     order = [Patient.stats_last_visit_at.desc().nulls_last(), Patient.created_at.desc()]
     if pred is not None:

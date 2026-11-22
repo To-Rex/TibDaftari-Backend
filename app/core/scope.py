@@ -24,7 +24,28 @@ from app.infrastructure.db.snapshot import row_restore, row_snapshot
 from app.infrastructure.redis import cache
 
 SCOPE_TTL = 300
-SCOPE_KEY = "unit:{unit_id}:scope"
+#: `:c1` = the snapshot shape since units carry `company_id` — a build from before the company level keeps its own key
+SCOPE_KEY = "unit:{unit_id}:scope:c1"
+#: the cached unit card (`units.service.unit_dto`) — same versioning
+UNIT_CARD_KEY = "unit:{unit_id}:dto:c1"
+
+
+@dataclass(frozen=True, slots=True)
+class Registry:
+    """The patient registry a request works in: ONE company, and one country of it — or every country of the
+    company (`country_id` None) when the unit is the company itself. Companies never share a patient row."""
+
+    company_id: uuid.UUID
+    country_id: uuid.UUID | None = None
+
+    def within(self, country_id: uuid.UUID | None) -> Registry:
+        """The same company narrowed to one country (a company-wide registry gets the country of a facility)."""
+        return Registry(self.company_id, country_id) if country_id is not None else self
+
+
+def registry_of(row: Any) -> Registry:
+    """The registry of a unit or of a patient row (both carry `company_id` and `country_id`)."""
+    return Registry(row.company_id, row.country_id)
 
 
 @dataclass(slots=True)
@@ -46,8 +67,22 @@ class UnitScope:
         return self.unit.id
 
     @property
-    def country_id(self) -> uuid.UUID:
+    def company_id(self) -> uuid.UUID:
+        return self.unit.company_id
+
+    @property
+    def country_id(self) -> uuid.UUID | None:
+        """The country of the unit — None for a company (it spans countries)."""
         return self.unit.country_id
+
+    @property
+    def registry(self) -> Registry:
+        """The patient registry the unit works in (its company; its country unless it is the company itself)."""
+        return Registry(self.unit.company_id, self.unit.country_id)
+
+    @property
+    def is_company(self) -> bool:
+        return self.unit.level == "company"
 
     @property
     def is_facility(self) -> bool:

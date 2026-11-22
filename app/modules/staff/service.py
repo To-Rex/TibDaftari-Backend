@@ -30,7 +30,7 @@ from app.core.permissions import (
     normalize_key,
 )
 from app.core.schemas import Page
-from app.core.scope import UnitScope, ancestor_ids, ids_of, narrow_to
+from app.core.scope import UNIT_CARD_KEY, UnitScope, ancestor_ids, ids_of, narrow_to
 from app.core.security import hash_password
 from app.core.textutil import slugify
 from app.core.timeutil import utcnow
@@ -65,12 +65,12 @@ async def _invalidate_roles_cache() -> None:
 
 
 async def _invalidate_unit_cards(session: AsyncSession, unit_id: uuid.UUID | None) -> None:
-    """The unit cards (`unit:{id}:dto`) count employees over their subtree — drop them along the home unit's path."""
+    """The unit cards (`unit:{id}:dto:c1`) count employees over their subtree — drop them along the home unit's path."""
     if unit_id is None:
         return
     path = await ancestor_ids(session, unit_id)
     if path:
-        await cache.delete(*[f"unit:{u}:dto" for u in path])
+        await cache.delete(*[UNIT_CARD_KEY.format(unit_id=u) for u in path])
 
 
 # ----------------------------------------------------------------------------- mapping
@@ -214,12 +214,12 @@ def _is_installer_role(role: Role) -> bool:
     return role.scope_unit_id is None and role.key == INSTALLER_ROLE_KEY
 
 
-INSTALLER_SCOPE_ERROR = "O‘rnatuvchi davlat yoki viloyat tuguniga biriktiriladi; qo‘shimcha birliklar — shu davlatning viloyatlari"
+INSTALLER_SCOPE_ERROR = "O‘rnatuvchi kompaniya, davlat yoki viloyat tuguniga biriktiriladi; qo‘shimcha birliklar — shu kompaniya va davlatning viloyatlari"
 
 
 def _check_installer_scope(role: Role, unit_id: uuid.UUID | None, extra: Sequence[uuid.UUID], units: dict[uuid.UUID, OrgUnit]) -> None:
-    """An installer is homed at a country or a region and may get other regions of the SAME country as extra units —
-    never a facility, never another country (422 `installer_scope`)."""
+    """An installer is homed at a company, a country or a region and may get other regions of the SAME company and
+    country as extra units — never a facility, never another company or country (422 `installer_scope`)."""
     if not _is_installer_role(role):
         return
     home = units.get(unit_id) if unit_id else None
@@ -227,11 +227,11 @@ def _check_installer_scope(role: Role, unit_id: uuid.UUID | None, extra: Sequenc
         raise ValidationError(INSTALLER_SCOPE_ERROR, code="installer_scope", details={"field": "unitId"})
     for u in extra:
         row = units.get(u)
-        if row is None or row.level not in INSTALLER_EXTRA_LEVELS or row.country_id != home.country_id:
+        if row is None or row.level not in INSTALLER_EXTRA_LEVELS or row.company_id != home.company_id or (home.country_id is not None and row.country_id != home.country_id):
             raise ValidationError(INSTALLER_SCOPE_ERROR, code="installer_scope", details={"field": "unitIds"})
 
 
-LEVEL_UZ = {"country": "davlat", "region": "viloyat", "district": "tuman", "facility": "muassasa"}
+LEVEL_UZ = {"company": "kompaniya", "country": "davlat", "region": "viloyat", "district": "tuman", "facility": "muassasa"}
 
 
 def _leader_level(role: Role) -> str | None:
@@ -239,25 +239,37 @@ def _leader_level(role: Role) -> str | None:
     return leader_level(role.key) if role.scope_unit_id is None else None
 
 
+def _same_territory(home: OrgUnit, other: OrgUnit) -> bool:
+    """May `other` (a node of the leader's own level) stand next to `home` as an extra unit? Companies: any other
+    company. Countries: the same company. Regions, districts, facilities: the same company and country."""
+    if home.level == "company":
+        return True
+    if other.company_id != home.company_id:
+        return False
+    return home.level == "country" or other.country_id == home.country_id
+
+
 def _check_leader_scope(role: Role, unit_id: uuid.UUID | None, extra: Sequence[uuid.UUID], units: dict[uuid.UUID, OrgUnit]) -> None:
-    """A leader is homed on a node of the role's own level — «Viloyat rahbari» on a region, «Muassasa rahbari» on a
-    facility … — and may get more nodes of the SAME level in the same country as extra units (422 `leader_scope`)."""
+    """A leader is homed on a node of the role's own level — «Kompaniya rahbari» on a company, «Viloyat rahbari» on
+    a region, «Muassasa rahbari» on a facility … — and may get more nodes of the SAME level as extra units: of the same
+    company and country below the company level, other companies for a company leader (422 `leader_scope`)."""
     level = _leader_level(role)
     if level is None:
         return
     name = LEVEL_UZ[level]
-    msg = f"«{role.name}» {name} tuguniga biriktiriladi; qo‘shimcha birliklar — shu davlatning boshqa {name} tugunlari"
+    where = "boshqa kompaniyalar" if level == "company" else f"shu kompaniya va davlatning boshqa {name} tugunlari" if level != "country" else "shu kompaniyaning boshqa davlat tugunlari"
+    msg = f"«{role.name}» {name} tuguniga biriktiriladi; qo‘shimcha birliklar — {where}"
     home = units.get(unit_id) if unit_id else None
     if home is None or home.level != level:
         raise ValidationError(msg, code="leader_scope", details={"field": "unitId", "level": level})
     for u in extra:
         row = units.get(u)
-        if row is None or row.level != level or row.country_id != home.country_id:
+        if row is None or row.level != level or not _same_territory(home, row):
             raise ValidationError(msg, code="leader_scope", details={"field": "unitIds", "level": level})
 
 
 def _check_role_scope(role: Role, unit_id: uuid.UUID | None, extra: Sequence[uuid.UUID], units: dict[uuid.UUID, OrgUnit]) -> None:
-    """The shape rules of the system roles that have one: installer (country / region), leaders (their level)."""
+    """The shape rules of the system roles that have one: installer (company / country / region), leaders (their level)."""
     _check_installer_scope(role, unit_id, extra, units)
     _check_leader_scope(role, unit_id, extra, units)
 

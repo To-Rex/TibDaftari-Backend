@@ -1,5 +1,10 @@
 # V2 port — from companies/branches to the organisation tree
 
+> **2026-11-22:** the company came back as the ROOT LEVEL of this tree (`level = 'company'` above the country nodes,
+> `org_units.company_id`, `patients.company_id`) — see `docs/DOMAIN_RULES.md` («The company») and
+> `db/v2/39_company_level.sql`. Everything below describes the port as it was made on 2026-11-09 and still holds
+> inside one company.
+
 TemoDB v2 has **no company and no branch**. One table, `org_units`, holds the whole state hierarchy:
 
 ```

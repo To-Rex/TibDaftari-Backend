@@ -2,8 +2,10 @@
 
 Every test module builds its own tree with `make_tree()` — a `T-…` region / district pair in the geo reference
 (so nothing clashes with the seeded territories), the matching region / district nodes under the seeded
-O‘zbekiston country node and ONE facility (`code` = `T` + 5 random letters) — and homes its employees there with
-`make_employee()`. `tests/conftest.py` soft-deletes it all at the end of the session.
+O‘zbekiston country node (which hangs under the seeded company) and ONE facility (`code` = `T` + 5 random letters)
+— and homes its employees there with `make_employee()`. A second company comes from `make_company()` (a `T-…`
+company with its own O‘zbekiston node; `make_tree(s, country=…)` grows a tree in it). `tests/conftest.py`
+soft-deletes it all at the end of the session.
 
 Event loops: fixture rows are written in a plain `asyncio.run()` before the `TestClient` starts (`run_async` — it
 disposes the engine and the in-process Redis afterwards, both are bound to the loop they were made in); DB reads
@@ -37,6 +39,8 @@ API = "/api/v1"
 COUNTRY_ID = uuid.UUID("01a0b069-7749-7d10-87b0-703892974a40")
 #: the seeded country node (db/v2/22_seed_org.sql)
 COUNTRY_UNIT_ID = uuid.UUID("01a1be00-0000-7000-8000-000000000001")
+#: the company everything seeded lives in (db/v2/39_company_level.sql)
+COMPANY_UNIT_ID = uuid.UUID("01a1be00-0000-7000-8000-0000000000c0")
 #: seeded region nodes (Xorazm viloyati / Toshkent shahri)
 XORAZM_UNIT_ID = uuid.UUID("01a1be00-0000-7000-8000-000000000002")
 TASHKENT_UNIT_ID = uuid.UUID("01a1be00-0000-7000-8000-000000000003")
@@ -64,8 +68,25 @@ def phone(prefix: str = "9989") -> str:
 # ----------------------------------------------------------------------------- the tree
 
 
-async def make_tree(session: AsyncSession, tag: str | None = None) -> SimpleNamespace:
+async def make_company(session: AsyncSession, tag: str | None = None) -> SimpleNamespace:
+    """A second company — `T-<tag> kompaniya` — with its own O‘zbekiston country node (`T-<tag> O‘zbekiston`)."""
+    tg = (tag or rand_tag()).upper()
+    cid = uuid.uuid4()
+    company = OrgUnit(id=cid, company_id=cid, level="company", parent_id=None, country_id=None, name=f"T-{tg} kompaniya", code=f"TC{tg}", settings={})
+    session.add(company)
+    await session.flush()
+    country = OrgUnit(level="country", parent_id=company.id, country_id=COUNTRY_ID, name=f"T-{tg} O‘zbekiston", code=f"TU{tg}", settings={})
+    session.add(country)
+    await session.flush()
+    for u in (company, country):
+        await session.refresh(u)
+    await invalidate_tree_caches()
+    return SimpleNamespace(tag=tg, company=company, country=country)
+
+
+async def make_tree(session: AsyncSession, tag: str | None = None, *, country: OrgUnit | None = None) -> SimpleNamespace:
     """Country node → `T-<tag>` region node → `T-<tag>` district node → one `ses` facility (`code` = `T<tag>`).
+    The country node is the seeded one (the seeded company's) unless `country` — a node of another company — is given.
 
     Creates the region / district in the geo reference too (`T-<tag> viloyati` / `T-<tag> tumani`), so the partial
     unique indexes (one alive node per region / district) never clash with the seeded tree or another module's."""
@@ -76,8 +97,9 @@ async def make_tree(session: AsyncSession, tag: str | None = None) -> SimpleName
     district = District(region_id=region.id, name=f"T-{tg} tumani", sort_order=1, kind="district")
     session.add(district)
     await session.flush()
-    country = await session.get(OrgUnit, COUNTRY_UNIT_ID)
+    country = country or await session.get(OrgUnit, COUNTRY_UNIT_ID)
     assert country is not None, "the seeded country node is missing — load db/v2/22_seed_org.sql"
+    company = await session.get(OrgUnit, country.company_id)
     region_unit = OrgUnit(level="region", parent_id=country.id, country_id=COUNTRY_ID, region_id=region.id, name=f"T-{tg} viloyati", short_name=f"T-{tg}", code=f"TR{tg}", sort_order=990, settings={})
     session.add(region_unit)
     await session.flush()
@@ -88,7 +110,7 @@ async def make_tree(session: AsyncSession, tag: str | None = None) -> SimpleName
     for u in (region_unit, district_unit):
         await session.refresh(u)  # timezone is filled by the DB trigger
     await invalidate_tree_caches()
-    return SimpleNamespace(tag=tg, country=country, region=region_unit, district=district_unit, facility=facility, geo_region=region, geo_district=district)
+    return SimpleNamespace(tag=tg, company=company, country=country, region=region_unit, district=district_unit, facility=facility, geo_region=region, geo_district=district)
 
 
 async def make_facility(session: AsyncSession, district_unit: OrgUnit, *, tag: str | None = None, kind: str = "ses", name: str | None = None, **fields: Any) -> OrgUnit:

@@ -1,8 +1,8 @@
 """Platform SQL: activity of every facility folded up the organisation tree. No rules, no HTTP.
 
 Everything is keyed by the facility: a cheque, payment, result document or outbox row carries `unit_id`, a patient
-`registered_unit_id`. `org_units` carries the geo columns down to the facility, so a territory row is a plain
-GROUP BY on the facility's `country_id` / `region_id` / `district_id` (or its own `id`). Deleted facilities keep
+`registered_unit_id`. `org_units` carries the company and the geo columns down to the facility, so a row is a plain
+GROUP BY on the facility's `company_id` / `country_id` / `region_id` / `district_id` (or its own `id`). Deleted facilities keep
 counting — their cheques still happened — but only alive ones are counted as `units`."""
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Date, Select, Subquery, and_, cast, func, select
+from sqlalchemy import Date, Select, Subquery, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.timeutil import DEFAULT_TZ
@@ -31,12 +31,15 @@ from app.infrastructure.db.models import (
 
 _TZ = DEFAULT_TZ.key
 
-KEY_COLUMNS = {"country": OrgUnit.country_id, "region": OrgUnit.region_id, "district": OrgUnit.district_id, "unit": OrgUnit.id}
+KEY_COLUMNS = {"company": OrgUnit.company_id, "country": OrgUnit.country_id, "region": OrgUnit.region_id, "district": OrgUnit.district_id, "unit": OrgUnit.id}
 
 
-def scoped_facilities(group_by: str, country_id: uuid.UUID | None, region_id: uuid.UUID | None, district_id: uuid.UUID | None, root_id: uuid.UUID | None = None) -> Subquery:
-    """Every facility (deleted ones too — their cheques still count) inside the territory and, with `root_id`,
-    under that unit of the tree, with the grouping key of `group_by` and its local timezone."""
+def scoped_facilities(
+    group_by: str, country_id: uuid.UUID | None, region_id: uuid.UUID | None, district_id: uuid.UUID | None, root_id: uuid.UUID | None = None, *, company_id: uuid.UUID | None = None
+) -> Subquery:
+    """Every facility (deleted ones too — their cheques still count) inside the territory, of one company when
+    `company_id` is given and, with `root_id`, under that unit of the tree, with the grouping key of `group_by`
+    and its local timezone."""
     stmt = select(
         OrgUnit.id.label("unit_id"),
         OrgUnit.deleted_at.label("deleted_at"),
@@ -45,6 +48,8 @@ def scoped_facilities(group_by: str, country_id: uuid.UUID | None, region_id: uu
     ).where(OrgUnit.level == "facility")
     if root_id:
         stmt = stmt.join(OrgUnitClosure, OrgUnitClosure.descendant_id == OrgUnit.id).where(OrgUnitClosure.ancestor_id == root_id)
+    if company_id:
+        stmt = stmt.where(OrgUnit.company_id == company_id)
     if country_id:
         stmt = stmt.where(OrgUnit.country_id == country_id)
     if region_id:
@@ -151,39 +156,38 @@ async def trend(session: AsyncSession, u: Subquery, start: datetime, end: dateti
     return out
 
 
-async def names(session: AsyncSession, group_by: str, ids: set[uuid.UUID]) -> dict[uuid.UUID, dict[str, Any]]:
+async def names(session: AsyncSession, group_by: str, ids: set[uuid.UUID], company_id: uuid.UUID | None = None) -> dict[uuid.UUID, dict[str, Any]]:
     """id → {name, parent_name, unit_id, code?, facility_kind?, is_active?} for the rows of a level. `unit_id` is
-    the alive organisation-tree node of the territory (there is at most one per country / region / district)."""
+    the alive organisation-tree node of the row: the company itself, the facility itself, or the node of the
+    territory — of `company_id` when the company is known, else the only one there is (a territory several
+    companies work in has a node per company; such a row gets none)."""
     if not ids:
         return {}
     out: dict[uuid.UUID, dict[str, Any]] = {}
-    node = OrgUnit.__table__.alias("node")
-    if group_by == "country":
-        stmt = (
-            select(Country.id, Country.name, node.c.id.label("node_id"))
-            .outerjoin(node, and_(node.c.country_id == Country.id, node.c.level == "country", node.c.deleted_at.is_(None)))
-            .where(Country.id.in_(ids))
-        )
+    if group_by == "company":
+        for row in (await session.execute(select(OrgUnit.id, OrgUnit.name, OrgUnit.code, OrgUnit.is_active).where(OrgUnit.id.in_(ids)))).all():
+            out[row.id] = {"name": row.name, "parent_name": None, "unit_id": row.id, "code": row.code, "is_active": row.is_active}
+    elif group_by in ("country", "region", "district"):
+        if group_by == "country":
+            stmt = select(Country.id, Country.name).where(Country.id.in_(ids))
+        elif group_by == "region":
+            stmt = select(Region.id, Region.name, Country.name.label("parent")).join(Country, Country.id == Region.country_id).where(Region.id.in_(ids))
+        else:
+            stmt = select(District.id, District.name, Region.name.label("parent")).join(Region, Region.id == District.region_id).where(District.id.in_(ids))
         for row in (await session.execute(stmt)).all():
-            out[row.id] = {"name": row.name, "parent_name": None, "unit_id": row.node_id}
-    elif group_by == "region":
-        stmt = (
-            select(Region.id, Region.name, Country.name.label("parent"), node.c.id.label("node_id"))
-            .join(Country, Country.id == Region.country_id)
-            .outerjoin(node, and_(node.c.region_id == Region.id, node.c.level == "region", node.c.deleted_at.is_(None)))
-            .where(Region.id.in_(ids))
-        )
-        for row in (await session.execute(stmt)).all():
-            out[row.id] = {"name": row.name, "parent_name": row.parent, "unit_id": row.node_id}
-    elif group_by == "district":
-        stmt = (
-            select(District.id, District.name, Region.name.label("parent"), node.c.id.label("node_id"))
-            .join(Region, Region.id == District.region_id)
-            .outerjoin(node, and_(node.c.district_id == District.id, node.c.level == "district", node.c.deleted_at.is_(None)))
-            .where(District.id.in_(ids))
-        )
-        for row in (await session.execute(stmt)).all():
-            out[row.id] = {"name": row.name, "parent_name": row.parent, "unit_id": row.node_id}
+            out[row.id] = {"name": row.name, "parent_name": getattr(row, "parent", None), "unit_id": None}
+        if not out:
+            return out
+        geo = {"country": OrgUnit.country_id, "region": OrgUnit.region_id, "district": OrgUnit.district_id}[group_by]
+        nodes = select(geo, OrgUnit.id).where(OrgUnit.level == group_by, geo.in_(ids), alive(OrgUnit))
+        if company_id is not None:
+            nodes = nodes.where(OrgUnit.company_id == company_id)
+        found: dict[uuid.UUID, list[uuid.UUID]] = {}
+        for geo_id, node_id in (await session.execute(nodes)).all():
+            found.setdefault(geo_id, []).append(node_id)
+        for geo_id, node_ids in found.items():
+            if geo_id in out and len(node_ids) == 1:
+                out[geo_id]["unit_id"] = node_ids[0]
     else:
         stmt = (
             select(OrgUnit.id, OrgUnit.name, OrgUnit.code, OrgUnit.kind, OrgUnit.is_active, Region.name.label("region"), District.name.label("district"))

@@ -1,7 +1,7 @@
 """Organisation-unit DTOs — mirror of Clinic-Web `src/domain/org.ts` (OrgUnit, its SMS / Telegram / settings cards).
 
-One object for every level of the tree: country node, region, district, facility. A facility is where cheques are
-written; the others group facilities and carry inherited settings."""
+One object for every level of the tree: company, country node, region, district, facility. A facility is where
+cheques are written; the others group facilities and carry inherited settings. A company is the root."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.schemas import CamelModel
 
-UnitLevel = Literal["country", "region", "district", "facility"]
+UnitLevel = Literal["company", "country", "region", "district", "facility"]
 FacilityKind = Literal["ses", "clinic", "laboratory", "polyclinic", "hospital", "pharmacy", "other"]
 SmsProvider = Literal["xabarchi", "eskiz", "none"]
 SmsProviderIn = Literal["xabarchi", "eskiz"]
@@ -37,6 +37,8 @@ def document_free_view_days(unit_settings: Mapping[str, Any] | None) -> int:
 
 
 class UnitCounts(CamelModel):
+    #: country nodes under the unit (a company's countries)
+    countries: int = 0
     regions: int = 0
     districts: int = 0
     facilities: int = 0
@@ -125,7 +127,11 @@ class OrgUnitOut(CamelModel):
     level: UnitLevel
     kind: FacilityKind | None = None
     parent_id: str | None = None
-    country_id: str
+    #: the company the unit belongs to (a company node: itself)
+    company_id: str | None = None
+    company_name: str | None = None
+    #: None for a company node (it spans countries)
+    country_id: str | None = None
     region_id: str | None = None
     district_id: str | None = None
     country_name: str | None = None
@@ -142,9 +148,9 @@ class OrgUnitOut(CamelModel):
     logo_url: str | None = None
     is_active: bool
     sort_order: int = 0
-    #: 0 = country node
+    #: 0 = the company, 1 = a country node … 4 = a facility
     depth: int = 0
-    #: "O‘zbekiston Respublikasi › Xorazm viloyati › Bog‘ot tumani › Bog‘ot tumani SES"
+    #: "TibDaftari › O‘zbekiston Respublikasi › Xorazm viloyati › Bog‘ot tumani › Bog‘ot tumani SES"
     path: str
     settings: UnitSettingsOut
     sms: UnitSmsOut | None = None
@@ -155,9 +161,10 @@ class OrgUnitOut(CamelModel):
 
 
 class UnitCreateIn(CamelModel):
-    """A child of `parentId` (its level follows from the parent). Without a parent a country node is created
-    (`countryId` required; platform permission). Region nodes need `regionId`, district nodes `districtId`;
-    a facility inherits the district's geo and needs `kind` + `code`."""
+    """A child of `parentId` (its level follows from the parent). Without a parent a COMPANY is created (platform
+    permission; the name is unique among companies). A country node hangs under a company and needs `countryId`
+    (one node per country in a company); region nodes need `regionId`, district nodes `districtId`; a facility
+    inherits the district's geo and needs `kind` + `code` (unique inside the company)."""
 
     parent_id: str | None = None
     country_id: str | None = None
@@ -197,8 +204,9 @@ class UnitUpdateIn(CamelModel):
 
 class UnitTreeQuery(CamelModel):
     """`GET /units/tree`: every unit the caller may see (their scope + the path above it); superadmin: everything,
-    optionally one country or one subtree."""
+    optionally one company, one country or one subtree."""
 
+    company_id: str | None = None
     country_id: str | None = None
     root_id: str | None = None
     include_inactive: bool = True
