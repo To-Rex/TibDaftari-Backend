@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.exceptions import AppError, ConflictError
+from app.modules.assistant import schedule as sch
 from app.modules.assistant import tools as tl
 from app.modules.assistant.describe import LABELS
 from app.modules.assistant.tools import ToolContext
@@ -98,9 +99,13 @@ async def _read_item(ctx: ToolContext, eid: str) -> dict[str, Any]:
     return _wire(await orders_svc.get_item_dto(ctx.session, tl._uuid(eid, "itemId"), ctx.staff))
 
 
+async def _read_schedule(ctx: ToolContext, eid: str) -> dict[str, Any]:
+    return _wire(await sch.get_schedule(ctx.session, eid, ctx.staff))
+
+
 READERS: dict[str, Callable[[ToolContext, str], Awaitable[dict[str, Any]]]] = {
     "unit": _read_unit, "employee": _read_employee, "patient": _read_patient, "service": _read_service, "category": _read_category,
-    "role": _read_role, "template": _read_template, "schema": _read_schema, "item": _read_item,
+    "role": _read_role, "template": _read_template, "schema": _read_schema, "item": _read_item, "schedule": _read_schedule,
 }
 
 
@@ -162,6 +167,9 @@ restores("update_schema", "schema", "schemaId", ("name", "description", "fields"
 restores("set_template_status", "template", "templateId", ("status",), "Andoza avvalgi holatiga qaytariladi")
 restores("save_result_values", "item", "itemId", ("values", "labNote"), "Natija qiymatlari avvalgi holiga qaytariladi")
 
+restores("update_schedule", "schedule", "scheduleId", ("title", "prompt", "kind", "time", "weekdays", "monthDay", "runDate", "isActive"), "Topshiriq avvalgi holiga qaytariladi")
+
+removes("create_schedule", "delete_schedule", "scheduleId", "Yaratilgan rejali topshiriq o‘chiriladi")
 removes("create_category", "delete_category", "categoryId", "Yaratilgan kategoriya o‘chiriladi")
 removes("create_service_type", "delete_service_type", "serviceTypeId", "Yaratilgan xizmat o‘chiriladi")
 removes("create_role", "delete_role", "roleId", "Yaratilgan rol o‘chiriladi")

@@ -214,6 +214,12 @@ def test_a_working_day_through_the_tools(ctx: dict) -> None:
         assert started["facility"]["name"] == f"T-{tag} Shifoxona" and started["employees"][0]["login"].startswith("kassa-")
         await call("delete_service_type", ANY, serviceTypeId=extra["id"])
         await call("delete_category", ANY, categoryId=cat["id"])
+        # ---- the employee's own scheduled tasks
+        task = await call("create_schedule", title=f"T-{tag} kunlik hisobot", prompt="Kechagi kun bo‘yicha tushum hisobotini tayyorla", kind="daily", time="08:00")
+        assert task["when"] == "Har kuni 08:00" and task["isActive"] and task["nextRunAt"]
+        assert [x["id"] for x in (await call("list_schedules"))["items"]] == [task["id"]]
+        assert (await call("update_schedule", scheduleId=task["id"], isActive=False))["nextRunAt"] is None
+        assert (await call("delete_schedule", scheduleId=task["id"]))["deleted"] and (await call("list_schedules"))["items"] == []
         preview = await call("reset_preview", unitId=new["id"])
         assert next(p["key"] for p in preview["parts"]) == "orders"
         assert await tl.REGISTRY["reset_unit"].confirm_word(d.ctx, {"unitId": new["id"]}) == f"L{tag}"
@@ -308,6 +314,15 @@ def test_every_way_back_works(ctx: dict) -> None:
         _, lines = await back("pay_order", orderId=order["id"], amount=bundle["order"]["total"], method="cash")
         assert lines and all(p.get("refundedAt") for p in (await get("get_order", orderId=order["id"]))["payments"])
         await call("pay_order", orderId=order["id"], amount=bundle["order"]["total"], method="card")
+
+        # ---- the employee's own scheduled tasks
+        task = await call("create_schedule", title=f"T-{tag} reja", prompt="Kechagi kun hisobotini tayyorla", kind="daily", time="08:00")
+        await back("update_schedule", scheduleId=task["id"], kind="weekly", weekdays=[1, 5], time="09:30", title="Boshqa nom")
+        kept = (await get("list_schedules"))["items"]
+        assert [(x["title"], x["when"], x["weekdays"]) for x in kept] == [(f"T-{tag} reja", "Har kuni 08:00", [])]
+        wrong, _ = await back("create_schedule", title=f"T-{tag} xato reja", prompt="Sinov topshirig‘i", kind="monthly", monthDay=31, time="10:00")
+        assert [x["id"] for x in (await get("list_schedules"))["items"]] == [task["id"]] and wrong["when"] == "Har oyning 31-kuni 10:00"
+        await call("delete_schedule", scheduleId=task["id"])
 
         # ---- the laboratory and the approval
         item = next(i["id"] for i in bundle["items"] if i["serviceName"] == f"Qaytish xizmat {tag}")

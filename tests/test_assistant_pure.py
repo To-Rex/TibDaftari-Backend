@@ -25,7 +25,9 @@ def test_a_leader_gets_the_read_tools_only() -> None:
 
     mine = tools.tools_for(principal(list(LEADER_PERMISSIONS)))
     assert {t.name for t in mine} >= {"whoami", "list_units", "dashboard", "breakdown", "list_orders", "search_patients", "list_employees", "export_data", "export_chart"}
-    assert all(t.kind == "read" for t in mine)
+    # nothing that changes the clinic's data — the only writes a leader holds are their OWN scheduled tasks
+    assert all(t.kind == "read" or t.group == "schedule" for t in mine)
+    assert {t.name for t in mine if t.kind == "write"} == {"create_schedule", "update_schedule", "delete_schedule"}
     assert not ({"update_unit", "create_employee", "create_patient", "send_sms", "set_template_status"} & {t.name for t in mine})
 
 
@@ -70,7 +72,7 @@ def test_tools_follow_the_keys_of_the_role() -> None:
     assert not ({"approve_result", "revoke_result", "create_order", "pay_order", "list_patients", "update_unit"} & lab)
     leader = {t.name for t in tools.tools_for(principal(["assistant.use", "reports.operations.read", "reports.finance.read", "admin.unit.read", "admin.employee.read", "admin.catalog.read", "admin.template.read"]))}
     assert {"dashboard", "patients_report", "results_report", "sms_report", "services_report", "territory_stats", "get_template", "list_schemas"} <= leader
-    assert all(tools.REGISTRY[n].kind == "read" for n in leader)
+    assert all(tools.REGISTRY[n].kind == "read" or tools.REGISTRY[n].group == "schedule" for n in leader)
 
 
 def test_definitions_are_json_schema_objects() -> None:

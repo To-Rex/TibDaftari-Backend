@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import date
 from typing import Any
 
 from app.core.exceptions import AppError
+from app.modules.assistant import schedule as sch
 from app.modules.assistant.tools import MASK, SECRET_KEYS, Tool, ToolContext, redact
 from app.modules.catalog import service as catalog_svc
 from app.modules.orders import service as orders_svc
@@ -35,7 +37,11 @@ LABELS: dict[str, str] = {
     "birthDate": "Tug‘ilgan sana", "gender": "Jinsi", "passportNumber": "Pasport", "pinfl": "JSHSHIR", "discountPercent": "Chegirma (%)", "tags": "Belgilar", "relation": "Qarindoshlik",
     "language": "Til", "scope": "Qamrov", "description": "Tavsif", "fields": "Maydonlar", "facility": "Muassasa", "staff": "Xodimlar", "sendSms": "SMS yuborish", "dryRun": "Faqat matnni ko‘rish",
     "documentFreeViewDays": "Kodsiz ko‘rish (kun)", "locale": "Til", "timezone": "Vaqt mintaqasi", "workflow": "Ish tartibi", "paper": "Qog‘oz", "order": "Tartib", "workplace": "Ish joyi",
+    "scheduleId": "Rejali topshiriq", "title": "Nomi", "prompt": "Topshiriq", "time": "Vaqt", "weekdays": "Hafta kunlari", "monthDay": "Oyning kuni", "runDate": "Sana", "when": "Qachon",
 }
+#: the parts of a task's rule — on the card they are one row, «Qachon: Har kuni 08:00»
+RULE_KEYS = ("kind", "time", "weekdays", "monthDay", "runDate")
+SCHEDULE_TOOLS = ("create_schedule", "update_schedule")
 BOOL = {True: "ha", False: "yo‘q"}
 
 Resolver = Callable[[ToolContext, str], Awaitable[str]]
@@ -100,6 +106,35 @@ async def _document(ctx: ToolContext, value: str) -> str:
     return " · ".join(str(x) for x in (getattr(d, "number", None), getattr(d, "patient_name", None)) if x) or value
 
 
+async def _schedule(ctx: ToolContext, value: str) -> str:
+    row = await sch.own_or_404(ctx.session, value, ctx.staff)
+    return f"{row.title} · {sch.when_text(row.kind, row.at_time, row.weekdays, row.month_day, row.run_date)}"
+
+
+async def _when(ctx: ToolContext, args: dict[str, Any]) -> str | None:
+    """A task's rule in words, as it will be after the write: the given parts over the ones the task already has."""
+    rule: dict[str, Any] = {}
+    if args.get("scheduleId"):
+        try:
+            row = await sch.own_or_404(ctx.session, args["scheduleId"], ctx.staff)
+            rule = {"kind": row.kind, "time": row.at_time, "weekdays": list(row.weekdays or []), "monthDay": row.month_day, "runDate": row.run_date}
+        except AppError:
+            rule = {}
+    rule.update({k: args[k] for k in RULE_KEYS if k in args})
+    if not rule.get("kind") or not rule.get("time"):
+        return None
+    day = rule.get("runDate")
+    if isinstance(day, str):
+        try:
+            day = date.fromisoformat(day[:10])
+        except ValueError:
+            day = None
+    try:
+        return sch.when_text(str(rule["kind"]), str(rule["time"]), [int(d) for d in rule.get("weekdays") or []], rule.get("monthDay"), day)
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
 def _geo(kind: str) -> Resolver:
     async def find(ctx: ToolContext, value: str) -> str:
         if kind == "countries":
@@ -121,6 +156,7 @@ RESOLVERS: dict[str, Resolver] = {
     "employeeId": _employee, "roleId": _role, "categoryId": _category, "categoryIds": _category, "serviceTypeId": _service, "serviceTypeIds": _service,
     "templateId": _template, "defaultTemplateId": _template, "schemaId": _schema, "patientId": _patient, "relatedPatientId": _patient, "orderId": _order,
     "itemId": _item, "itemIds": _item, "documentId": _document, "countryId": _geo("countries"), "regionId": _geo("regions"), "districtId": _geo("districts"),
+    "scheduleId": _schedule,
 }
 
 
@@ -151,8 +187,15 @@ async def describe(ctx: ToolContext, t: Tool, args: dict[str, Any]) -> list[dict
     targets = [k for k in ("unitId", "facilityId", "parentId") if k in props]
     if targets and not any(args.get(k) for k in targets):
         rows.append({"label": LABELS[targets[0]], "value": await _name(ctx, _unit, ctx.unit_id)})
+    when = await _when(ctx, args) if t.name in SCHEDULE_TOOLS and any(k in args for k in RULE_KEYS) else None
     for key, value in args.items():
         if value is None or value == "" or len(rows) >= MAX_ROWS:
+            continue
+        if when is not None and key in RULE_KEYS:
+            # the rule is read as one sentence, not as five fields
+            if when:
+                rows.append({"label": LABELS["when"], "value": when})
+                when = ""
             continue
         if key in SECRET_KEYS:
             rows.append({"label": LABELS.get(key, key), "value": MASK})

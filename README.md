@@ -157,7 +157,12 @@ tanlovi; Telegram natijalari raqamga ulangan chatga boradi. Migratsiya: `v2_0008
   va hamma uchun ishlaydi; birlik xohlasa o‘z hisobini qo‘yadi yoki o‘chiradi, pastga meros bo‘ladi (`PUT /units/{id}/assistant`):
   Claude (rasmiy Anthropic SDK), OpenAI, DeepSeek, Deploy yoki istalgan OpenAI-compatible manzil. «Excel qilib ber»
   deyilsa model ma’lumotni serverda filtrlab/saralab fayl (xlsx / csv / json / pdf / docx / md / txt) yasaydi; «hisobot
-  yoz» → Word / PDF hujjat, «diagramma» → PNG / SVG rasm — xodim chatdan yuklab oladi. Qoidalar:
+  yoz» → Word / PDF hujjat, «diagramma» → PNG / SVG rasm — xodim chatdan yuklab oladi. Bir javobda taklif qilingan
+  bir nechta o‘zgartirish bitta tasdiq bilan bajariladi (`POST /assistant/actions/batch`, har biri o‘z savepoint’ida) va
+  birga orqaga qaytariladi. **Rejali topshiriqlar** (`/assistant/schedules`, migratsiya `v2_0010`): xodim takroriy ishni
+  bir marta aytadi («har kuni ertalab 8 da kechagi hisobotni yubor») — fon ishchisi uni belgilangan vaqtda egasining o‘sha
+  paytdagi huquqlari bilan, faqat o‘qish vositalari orqali bajaradi; javob topshiriqning o‘z suhbatiga va bildirishnomaga
+  tushadi (`WORKERS_ENABLED` yoqilgan bo‘lishi kerak — `GET /health/ready` → `workers`). Qoidalar:
   `docs/DOMAIN_RULES.md` §3.
 * Endpoint xaritasi moduli bo‘yicha: [`ARCHITECTURE.md`](ARCHITECTURE.md#endpoint-map-prefix-apiv1).
 

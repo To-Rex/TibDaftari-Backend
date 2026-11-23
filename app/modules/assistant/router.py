@@ -9,13 +9,19 @@ from fastapi import APIRouter, Query, Response
 
 from app.api.deps import DbSession, Meta, Staff
 from app.core.exceptions import ForbiddenError
-from app.modules.assistant import service
+from app.modules.assistant import schedule, schedule_runner, service
 from app.modules.assistant.schemas import (
     AssistantAccountIn,
     AssistantAccountOut,
     AssistantStatusOut,
     AssistantTestOut,
+    BatchIn,
+    BatchUndoIn,
     ConfirmIn,
+    ScheduleIn,
+    ScheduleListOut,
+    ScheduleOut,
+    ScheduleUpdateIn,
     SendIn,
     SendOut,
     StopOut,
@@ -83,6 +89,45 @@ async def undo_action(action_id: uuid.UUID, staff: Staff, session: DbSession, me
 @router.post("/assistant/actions/{action_id}/cancel", response_model=SendOut, summary="Decline a write the model proposed")
 async def cancel_action(action_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta) -> SendOut:
     return await service.cancel_action(session, action_id, staff, meta)
+
+
+@router.post("/assistant/actions/batch", response_model=SendOut, summary="One answer to a turn that proposed several writes: run the chosen ones (each in its own savepoint), decline the rest")
+async def resolve_batch(body: BatchIn, staff: Staff, session: DbSession, meta: Meta) -> SendOut:
+    return await service.resolve_batch(session, staff, meta, body.confirm, body.cancel)
+
+
+@router.post("/assistant/actions/batch-undo", response_model=SendOut, summary="Take several confirmed writes of one conversation back at once — newest first, each under the rules of a single undo")
+async def undo_batch(body: BatchUndoIn, staff: Staff, session: DbSession, meta: Meta) -> SendOut:
+    return await service.undo_batch(session, staff, meta, body.ids)
+
+
+# ------------------------------------------------------------------ scheduled tasks (the caller's own)
+
+
+@router.get("/assistant/schedules", response_model=ScheduleListOut, summary="The caller's scheduled tasks: what each asks, when it runs, how the last run went")
+async def list_schedules(staff: Staff, session: DbSession) -> ScheduleListOut:
+    return await schedule.list_schedules(session, staff)
+
+
+@router.post("/assistant/schedules", response_model=ScheduleOut, status_code=201, summary="Leave a task for the assistant to repeat (daily / on week days / monthly / once) in a unit of the caller's territory")
+async def create_schedule(body: ScheduleIn, staff: Staff, session: DbSession, meta: Meta, unit_id: str | None = Query(default=None, alias="unitId")) -> ScheduleOut:
+    default_unit = uuid.UUID(unit_id) if unit_id and not body.unit_id else None
+    return await schedule.create_schedule(session, staff, body, default_unit, meta)
+
+
+@router.patch("/assistant/schedules/{schedule_id}", response_model=ScheduleOut, summary="Change a scheduled task; `isActive` pauses / resumes it (resuming clears why the system switched it off)")
+async def update_schedule(schedule_id: uuid.UUID, body: ScheduleUpdateIn, staff: Staff, session: DbSession, meta: Meta) -> ScheduleOut:
+    return await schedule.update_schedule(session, schedule_id, staff, body.model_dump(by_alias=True, exclude_unset=True, mode="json"), meta)
+
+
+@router.delete("/assistant/schedules/{schedule_id}", status_code=204, summary="Delete a scheduled task (its conversation stays)")
+async def delete_schedule(schedule_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta) -> None:
+    await schedule.delete_schedule(session, schedule_id, staff, meta)
+
+
+@router.post("/assistant/schedules/{schedule_id}/run", response_model=ScheduleOut, summary="Run a scheduled task right now, exactly as the schedule would (read-only tools); the answer lands in its conversation")
+async def run_schedule(schedule_id: uuid.UUID, staff: Staff, session: DbSession) -> ScheduleOut:
+    return await schedule_runner.run_now(session, schedule_id, staff)
 
 
 @router.get("/assistant/files/{file_id}", summary="Download a file the assistant built for the caller (Excel / CSV / JSON)", response_class=Response)

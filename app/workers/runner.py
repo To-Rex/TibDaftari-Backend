@@ -9,6 +9,8 @@ from app.core.config import settings
 from app.infrastructure.redis.lock import try_lease
 
 log = logging.getLogger("workers")
+#: how often due scheduled tasks of the assistant are looked for
+SCHEDULE_POLL_SECONDS = 30
 
 
 async def _loop(name: str, fn, interval: float) -> None:
@@ -26,12 +28,16 @@ async def _loop(name: str, fn, interval: float) -> None:
 
 
 async def start_workers() -> list[asyncio.Task]:
+    from app.modules.assistant.schedule_runner import run_due_once
     from app.modules.messaging.dispatcher import dispatch_outbox_once
     from app.modules.messaging.maintenance import maintenance_once
 
     tasks = [
         asyncio.create_task(_loop("outbox", dispatch_outbox_once, settings.outbox_poll_seconds), name="worker:outbox"),
         asyncio.create_task(_loop("maintenance", maintenance_once, 300), name="worker:maintenance"),
+        # the assistant's scheduled tasks: a task is claimed (row lock) before it runs, so a tick that outlives the
+        # lease cannot run one twice
+        asyncio.create_task(_loop("assistant-schedules", run_due_once, SCHEDULE_POLL_SECONDS), name="worker:assistant-schedules"),
     ]
     log.info("workers started: %s", [t.get_name() for t in tasks])
     return tasks

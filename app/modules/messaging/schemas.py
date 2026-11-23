@@ -13,7 +13,7 @@ from app.core.schemas import CamelModel, PageQuery
 MessageChannel = Literal["sms", "telegram", "portal"]
 MessageStatus = Literal["scheduled", "queued", "sent", "delivered", "failed", "cancelled"]
 MessageKind = Literal["payment_receipt", "result_ready", "reminder", "broadcast", "otp", "portal_access"]
-NotificationKind = Literal["info", "success", "warning"]
+NotificationKind = Literal["info", "success", "warning", "error"]
 
 
 class OutboxQuery(PageQuery):

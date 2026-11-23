@@ -30,7 +30,9 @@ REAL_DISTRICT_ID = "01a00cdd-5828-7d57-8b4f-56625ae76290"
 _FIXTURE_UNITS = "SELECT id FROM org_units WHERE created_at >= :started AND (name LIKE 'T-%' OR code LIKE 'T%')"
 
 _CLEANUP_SQL = [
-    # the assistant's rows of the fixture tree (threads cascade to messages / actions)
+    # the assistant's rows of the fixture tree (threads cascade to messages / actions); scheduled tasks first — nothing of
+    # a finished run may stay due for the next one
+    f"DELETE FROM assistant_schedules WHERE unit_id IN ({_FIXTURE_UNITS}) OR employee_id IN (SELECT id FROM employees WHERE unit_id IN ({_FIXTURE_UNITS}) OR ((login LIKE 't-%' OR login LIKE 'T-%') AND created_at >= :started))",
     f"DELETE FROM assistant_threads WHERE unit_id IN ({_FIXTURE_UNITS}) OR employee_id IN (SELECT id FROM employees WHERE unit_id IN ({_FIXTURE_UNITS}) OR ((login LIKE 't-%' OR login LIKE 'T-%') AND created_at >= :started))",
     f"DELETE FROM assistant_accounts WHERE unit_id IN ({_FIXTURE_UNITS}) OR (unit_id IS NULL AND created_at >= :started)",
     # people and roles of the fixture tree (+ anything named like a fixture row during this run)
@@ -46,6 +48,8 @@ _CLEANUP_SQL = [
     f"UPDATE messaging_accounts SET deleted_at = now(), is_active = false WHERE deleted_at IS NULL AND unit_id IN ({_FIXTURE_UNITS})",
     f"UPDATE sms_templates SET deleted_at = now(), is_active = false WHERE deleted_at IS NULL AND unit_id IN ({_FIXTURE_UNITS})",
     f"UPDATE notifications SET deleted_at = now() WHERE deleted_at IS NULL AND (unit_id IN ({_FIXTURE_UNITS}) OR (title LIKE 'T-%' AND created_at >= :started))",
+    # notices addressed to a fixture employee (a scheduled task's "done" / "failed")
+    f"UPDATE notifications SET deleted_at = now() WHERE deleted_at IS NULL AND employee_id IN (SELECT id FROM employees WHERE unit_id IN ({_FIXTURE_UNITS}) OR ((login LIKE 't-%' OR login LIKE 'T-%') AND created_at >= :started))",
     # the units themselves: soft-deleted and moved onto a real territory (root first — the DB trigger checks that a
     # child's territory matches its parent's) so the fixture geo rows below can go
     f"UPDATE org_units SET deleted_at = now(), is_active = false, region_id = :region, district_id = NULL WHERE level = 'region' AND id IN ({_FIXTURE_UNITS})",

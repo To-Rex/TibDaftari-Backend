@@ -6,6 +6,7 @@ from fastapi import APIRouter
 from sqlalchemy import text
 
 from app.api.deps import DbSession
+from app.core.config import settings
 from app.infrastructure.redis.client import get_redis
 
 router = APIRouter()
@@ -24,4 +25,5 @@ async def ready(session: DbSession) -> dict[str, str]:
         await get_redis().ping()
     except Exception:
         redis = "down"
-    return {"status": "ok", "db": "ok", "redis": redis}
+    # the background workers (SMS outbox, maintenance, the assistant's scheduled tasks) run inside this process when enabled
+    return {"status": "ok", "db": "ok", "redis": redis, "workers": "on" if settings.workers_enabled else "off"}

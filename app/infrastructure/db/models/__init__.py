@@ -5,6 +5,7 @@ from app.infrastructure.db.models.assistant import (
     AssistantAction,
     AssistantFile,
     AssistantMessage,
+    AssistantSchedule,
     AssistantThread,
 )
 from app.infrastructure.db.models.catalog import (
@@ -57,6 +58,7 @@ __all__ = [
     "AssistantAction",
     "AssistantFile",
     "AssistantMessage",
+    "AssistantSchedule",
     "AssistantThread",
     "AttributeSchema",
     "AuditLog",

@@ -9,8 +9,9 @@ Nothing secret reaches the model: DTO keys that look like secrets are stripped a
 (`_clean` / `redact`), the arguments are checked against the tool's own schema (no smuggled fields), and what the
 platform keeps secret by design — provider keys, bot tokens, portal passwords, superadmin rights — has no tool.
 
-This module holds the registry and the core tools; `tools_admin` (units, staff, catalogue, templates) and
-`tools_work` (reception, laboratory, results, reports, messages) register the rest at the bottom."""
+This module holds the registry and the core tools; `tools_admin` (units, staff, catalogue, templates),
+`tools_work` (reception, laboratory, results, reports, messages) and `tools_schedule` (the employee's own scheduled
+tasks) register the rest at the bottom."""
 
 from __future__ import annotations
 
@@ -812,4 +813,4 @@ for _group, _names in _GROUPS.items():
         REGISTRY[_name] = replace(REGISTRY[_name], group=_group)
 
 # the rest of the tools register themselves on import (they need the registry above)
-from app.modules.assistant import tools_admin, tools_work  # noqa: E402, F401
+from app.modules.assistant import tools_admin, tools_schedule, tools_work  # noqa: E402, F401

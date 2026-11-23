@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import uuid
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import Field
@@ -106,6 +107,10 @@ class ThreadOut(CamelModel):
     unit_id: str | None = None
     last_message_at: datetime | None = None
     created_at: datetime
+    #: the scheduled task whose runs land in this conversation
+    schedule_id: str | None = None
+    #: a scheduled run left an answer the owner has not opened yet
+    unread: bool = False
 
 
 class ThreadCreateIn(CamelModel):
@@ -206,7 +211,11 @@ class MessageOut(CamelModel):
     tool_calls: list[ToolCallOut] = Field(default_factory=list)
     tool_name: str | None = None
     is_error: bool = False
+    #: the first write this turn proposed (kept for clients that know one write per turn)
     action: ActionOut | None = None
+    #: every write this turn proposed, in the order the model asked for them — more than one = a batch the employee
+    #: answers with one yes (`POST /assistant/actions/batch`)
+    actions: list[ActionOut] = Field(default_factory=list)
     #: files the tools of this turn produced (also on the tool calls themselves)
     files: list[FileOut] = Field(default_factory=list)
     #: the assistant asked the employee to choose
@@ -215,6 +224,8 @@ class MessageOut(CamelModel):
     stopped: bool = False
     #: this message reports that the action with this id was taken back
     undo_of: str | None = None
+    #: a user turn written by a scheduled task (the task's prompt), not typed by the employee
+    scheduled: bool = False
     created_at: datetime
 
 
@@ -236,3 +247,97 @@ class SendOut(CamelModel):
     messages: list[MessageOut]
     pending: ActionOut | None = None
     thread: ThreadOut
+
+
+# ----------------------------------------------------------------------------- several writes, one answer
+
+
+class BatchIn(CamelModel):
+    """The employee's answer to a turn that proposed several writes: the ones to run; every other pending write of
+    that turn is declined. An empty `confirm` declines them all."""
+
+    confirm: list[uuid.UUID] = Field(default_factory=list, max_length=60)
+    cancel: list[uuid.UUID] = Field(default_factory=list, max_length=60)
+
+
+class BatchUndoIn(CamelModel):
+    """Take several done writes of one conversation back at once (newest first)."""
+
+    ids: list[uuid.UUID] = Field(min_length=1, max_length=60)
+
+
+# ----------------------------------------------------------------------------- scheduled tasks («Rejali topshiriqlar»)
+
+ScheduleKind = Literal["daily", "weekly", "monthly", "once"]
+TIME_PATTERN = r"^([01]\d|2[0-3]):[0-5]\d$"
+
+
+class ScheduleIn(CamelModel):
+    """A task the assistant repeats for its owner: what to do (`prompt`) and when."""
+
+    title: str = Field(min_length=1, max_length=200)
+    #: the request the assistant gets at every run — complete on its own ("Kechagi kun bo‘yicha tushum hisobotini tayyorla")
+    prompt: str = Field(min_length=3, max_length=4000)
+    kind: ScheduleKind
+    #: HH:MM in the unit's time zone
+    time: str = Field(pattern=TIME_PATTERN)
+    #: weekly: 1 = Monday … 7 = Sunday
+    weekdays: list[int] = Field(default_factory=list, max_length=7)
+    #: monthly: 1…31 (a shorter month runs on its last day)
+    month_day: int | None = Field(default=None, ge=1, le=31)
+    #: once: the day (YYYY-MM-DD)
+    run_date: date | None = None
+    #: the unit every run works in (default: the caller's working unit)
+    unit_id: str | None = None
+    is_active: bool = True
+
+
+class ScheduleUpdateIn(CamelModel):
+    """Only the given fields change; `isActive` pauses / resumes."""
+
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    prompt: str | None = Field(default=None, min_length=3, max_length=4000)
+    kind: ScheduleKind | None = None
+    time: str | None = Field(default=None, pattern=TIME_PATTERN)
+    weekdays: list[int] | None = Field(default=None, max_length=7)
+    month_day: int | None = Field(default=None, ge=1, le=31)
+    run_date: date | None = None
+    unit_id: str | None = None
+    is_active: bool | None = None
+
+
+class ScheduleOut(CamelModel):
+    id: str
+    title: str
+    prompt: str
+    kind: ScheduleKind
+    time: str
+    weekdays: list[int] = Field(default_factory=list)
+    month_day: int | None = None
+    run_date: date | None = None
+    timezone: str
+    #: the rule in words: «Har kuni 08:00», «Dushanba, juma 09:30», «Har oyning 1-kuni 10:00»
+    when: str
+    unit_id: str
+    unit_name: str | None = None
+    #: the conversation the runs land in (none before the first run)
+    thread_id: str | None = None
+    is_active: bool
+    #: why the system switched it off (errors in a row, lost rights) — the owner switches it back on
+    paused_reason: str | None = None
+    #: a one-time task that has run
+    finished: bool = False
+    next_run_at: datetime | None = None
+    last_run_at: datetime | None = None
+    last_status: Literal["ok", "failed"] | None = None
+    last_error: str | None = None
+    run_count: int = 0
+    created_at: datetime
+
+
+class ScheduleListOut(CamelModel):
+    items: list[ScheduleOut]
+    #: how many tasks one employee may keep
+    limit: int
+    #: the background worker that runs due tasks is on at this server (off = tasks only run when asked "now")
+    running: bool = True
