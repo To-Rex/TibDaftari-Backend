@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.modules.assistant.router import router as assistant_router
 from app.modules.auth.router import router as auth_router
@@ -18,9 +18,12 @@ from app.modules.reports.router import router as reports_router
 from app.modules.staff.router import router as staff_router
 from app.modules.telegram.router import router as telegram_router
 from app.modules.templates.router import router as templates_router
+from app.modules.training import gate as training_gate
+from app.modules.training.router import router as training_router
 from app.modules.units.router import router as units_router
 
-api_router = APIRouter()
+# every route passes the training gate: an employee who is still learning writes only what the sandbox takes
+api_router = APIRouter(dependencies=[Depends(training_gate.guard)])
 api_router.include_router(health_router, tags=["health"])
 api_router.include_router(auth_router, prefix="/auth", tags=["auth"])
 api_router.include_router(units_router, tags=["units"])
@@ -36,3 +39,4 @@ api_router.include_router(portal_router, prefix="/portal", tags=["portal"])
 api_router.include_router(files_router, tags=["files"])
 api_router.include_router(telegram_router, tags=["telegram"])
 api_router.include_router(assistant_router, tags=["assistant"])
+api_router.include_router(training_router, tags=["training"])

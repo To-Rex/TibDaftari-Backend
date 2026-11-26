@@ -38,6 +38,7 @@ from app.infrastructure.redis.client import get_redis
 from app.modules.auth.schemas import PatientOtpRequestOut, PatientSessionOut, SessionUnitOut, StaffSessionOut
 from app.modules.messaging import service as messaging
 from app.modules.patients.portal_login import login_owner, norm_login, revoke_login_sessions
+from app.modules.training import service as training_svc
 from app.modules.units import service as units
 
 log = logging.getLogger("auth")
@@ -96,6 +97,7 @@ async def staff_session_out(session: AsyncSession, p: StaffPrincipal, token: str
         role_id=str(p.role.id) if p.role else None,
         full_name=p.employee.full_name,
         permissions=p.permissions,
+        training=await training_svc.session_flag(p),
         access_token=token,
         expires_at=exp,
     )

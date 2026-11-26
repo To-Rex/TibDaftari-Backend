@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from app.core.crypto import decrypt
@@ -311,7 +312,8 @@ def test_a_batch_goes_out_in_one_request_and_the_sync_reads_its_states(ctx: dict
 def test_the_sms_report_counts_by_territory_day_kind_and_provider(ctx: dict) -> None:
     c: TestClient = ctx["client"]
     h = ctx["h"]
-    today = datetime.now(UTC).date().isoformat()
+    # the report's days are the facility's own (Asia/Tashkent) — between midnight and 05:00 there the UTC date is still yesterday
+    today = datetime.now(ZoneInfo("Asia/Tashkent")).date().isoformat()
     r = c.get(f"{API}/units/{ctx['region']}/reports/sms?dateFrom={today}&dateTo={today}", headers=h)
     assert r.status_code == 200, r.text
     d = r.json()

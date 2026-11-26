@@ -169,6 +169,8 @@ def test_sms_settings_need_key_and_accept_settings_permission(ctx: dict) -> None
     region = ctx["a"]["region"]
     r = c.post(f"{API}/units/{region}/employees", json={"fullName": "T-fix Settings", "login": f"t-fix-settings-{SFX}", "roleId": ctx["admin_role"], "overrides": {"allow": [], "deny": ["admin.unit.write"]}}, headers=h(ctx, "admin"))
     assert r.status_code == 201, r.text
+    # an experienced colleague: let through the newcomers' training (until then the admin panel is read-only for them)
+    assert c.post(f"{API}/employees/{r.json()['id']}/training/skip", headers=h(ctx, "admin")).status_code == 200
     hh = bearer(staff_token(c, f"t-fix-settings-{SFX}"))
     assert "admin.unit.write" not in c.get(f"{API}/auth/staff/me", headers=hh).json()["permissions"]
     # the SMS account and the settings fields are allowed with admin.settings.write; identity fields are not

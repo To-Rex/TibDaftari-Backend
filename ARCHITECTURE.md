@@ -99,6 +99,49 @@ TelegramChatPref) · `catalog` (Category, ServiceType, ServiceUnitSetting, Attri
 TemplateUnit, TemplateAsset, StoredFile) · `order` (Order, OrderItem, Payment, ResultDocument) · `messaging`
 (MessagingAccount, SmsTemplate, OutboxMessage, Notification, AuditLog).
 
+## The mandatory training of a new employee («o‘quv rejimi», `app/modules/training`)
+
+Someone who signs in for the first time practises before they touch real data — and the server, not the page, sees
+to it:
+
+* **State** — `employee_training` (real data): `active` (practising), `passed` (did every task), `skipped` (a manager
+  let them through), `exempt` (worked here before the training existed, a superadmin, an installer — they set
+  clinics up and are not held back from it —, a role with nothing to practise). The row is made at the first request (`service.load_or_init`); `service.is_active` answers the hot
+  question from Redis (`training:st:{id}`, dropped on every change). Migration `v2_0011` marks everyone with any
+  trace of work `exempt`. Patients never train.
+* **The sandbox** — schema `training` holds twins of the operational tables (`sandbox.SANDBOX_TABLES`: patients,
+  orders, order_items, payments, result_documents, order_counters, outbox_messages, notifications, audit_log) with
+  their indexes, triggers, intra-sandbox foreign keys, own sequences and the views over them. It is **not** in the
+  migrations: `sandbox.ensure()` builds it at start from the live definitions of the real tables and rebuilds it
+  when their fingerprint changes, so no later migration has to remember it. Reference data (the tree, staff, roles,
+  the catalogue, templates, settings) is read from `public` — a trainee practises on the real catalogue.
+* **Routing** — `get_session` asks `gate.trainee_of(request)` before the first query; a trainee's whole request runs
+  on the second pool (`training_engine`, `search_path = training, public`) with the realm ContextVar set
+  (`infrastructure/db/realm.py`). No query names a schema, so the ORM and raw SQL land in the sandbox by themselves.
+  `/auth/*` always works with the real data (sessions are real bookkeeping). Cache keys of a trainee live under
+  `trn:`; invalidations drop both copies.
+* **Three lines of defence** — (1) the router-wide `gate.guard`: a trainee may only make the writes listed in
+  `tasks.ALLOWED_WRITES` (daily operations, all of which land in sandbox tables); anything else is 403
+  `training_mode`. (2) the search path. (3) the database itself: every sandbox connection does `SET ROLE
+  tibdaftari_trainee`, a role that may read `public` and write only `training` — a write to a real table fails with
+  "permission denied" whatever the code does. (Without CREATEROLE the role is skipped and logged; `/health/ready`
+  says `training: ready | ready-norole | unavailable | off`.) If the sandbox cannot be built a trainee gets 503
+  `training_unavailable` — never the real data.
+* **Tasks** (`tasks.TASKS`) — by permission: reception (add a patient, open a cheque, add a service, take a
+  payment), laboratory (enter a result, send it for approval), doctor (approve). A task is ticked after the commit
+  of the request that proves it (`gate.after_commit`). What a laboratory worker or a doctor needs to practise on is
+  put into the facility's sandbox by `samples.ensure` through the very services the real requests use. A task that
+  cannot be done in the facility (no service, no result form, no template) is reported `available: false` and does
+  not hold the training back; the tasks follow the role when it changes (`service._reconcile`).
+* **Side effects** — a practice SMS / Telegram message is stored as delivered and never leaves (`messaging._enqueue`;
+  the outbox worker reads `public` only); result and receipt PDFs are rendered with «O‘QUV NAMUNASI» across the page
+  and are not stored (`stored_files` is real); a practice document's public link resolves nowhere.
+* **The end** — `POST /training/complete` (409 `training_incomplete` until `canComplete`), or a manager's
+  `POST /employees/{id}/training/skip`; `…/reset` sends anyone (back). The employee's sandbox rows are removed
+  (`samples.purge` — every table named with the schema; `samples.sweep` at start clears leftovers). Every staff
+  answer carries `X-Training: 1|0`, so an open page follows the change at once.
+* `TRAINING_ENABLED=false` switches all of it off.
+
 ## Rules every module follows
 1. **Scope isolation.** Every query on an operational table filters `unit_id` by the request's `UnitScope`
    (`scope.descendant_ids`), catalogue tables by `owner_unit_id` against the scope's lineage / ancestors.
@@ -170,5 +213,7 @@ platform:  GET /platform/regions  (activity by country / region / district / fac
 portal:    GET /portal/overview  GET /portal/orders/{id}  GET /portal/documents/{id}  GET /portal/documents/{id}/pdf
 files:     GET /files/{id}  (public assets & PDFs by unguessable id; PDFs also via /d/{token})
 telegram:  POST /telegram/webhook/{accountId}/{secret} (optional; polling is default)
+training:  GET /training/status?unitId=  POST /training/complete?unitId=  (the caller's own training)
+           POST /employees/{id}/training/skip | reset  (a manager: let through / send back — admin.employee.write)
 health:    GET /health  GET /health/ready
 ```

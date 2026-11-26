@@ -48,6 +48,8 @@ class StaffSessionOut(CamelModel):
     role_id: str | None = None
     full_name: str
     permissions: list[str]
+    #: still learning: everything this session does happens in the training sandbox, not in the real data
+    training: bool = False
     access_token: str
     expires_at: datetime
 

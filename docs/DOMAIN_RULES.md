@@ -70,6 +70,10 @@ verbatim in the UI.
 | 403 | otp_required | Hujjatni ochish uchun SMS kod kerak |
 | 403 | login_session_only | Parolni login bilan kirganda o‘zgartirish mumkin |
 | 403 | payment_locked | To‘lovga 1 kundan ko‘p vaqt o‘tgan — uni faqat administrator yoki rahbar o‘zgartira oladi |
+| 403 | training_mode | O‘quv rejimida bu amalni bajarib bo‘lmaydi. Avval o‘quv topshiriqlarini yakunlang.  (an employee in training: any write outside `training.tasks.ALLOWED_WRITES`) |
+| 409 | training_incomplete | Avval barcha o‘quv topshiriqlarini bajaring  (`POST /training/complete` too early) |
+| 422 | no_tasks | Bu xodimning rolida mashq qilinadigan topshiriq yo‘q  (`…/training/reset` for a superadmin / a role with nothing to practise) |
+| 503 | training_unavailable | O‘quv muhiti hozircha tayyor emas. Birozdan so‘ng qayta urinib ko‘ring.  (the sandbox is not built: a trainee is never let through to the real data) |
 | 404 | not_found | Birlik topilmadi · Muassasa topilmadi · Xodim topilmadi · Rol topilmadi · Bemor topilmadi · Bu raqam bilan bemor topilmadi. Klinikaga murojaat qiling. · Namuna muassasa topilmadi · Kategoriya topilmadi · Xizmat topilmadi · Sxema topilmadi · Shablon topilmadi · Rasm topilmadi · Chek topilmadi · Tahlil topilmadi · To‘lov topilmadi · Hujjat topilmadi · Fayl topilmadi |
 | 409 | conflict | Bu login band · Bu kod band  (a unit code or a service code already used) |
 | 409 | login_taken | Bu login band  (patient portal login) |
@@ -814,3 +818,42 @@ if status != cancelled: status = completed if (active and all approved) else ope
   facility that sent it (`resolve_messaging_account(unit, 'telegram')`).
 * Webhook (optional, polling is the default): `POST /telegram/webhook/{accountId}/{secret}` — accepted only when
   `telegramWebhookSecret` in the account unit's effective settings matches.
+
+## 13. Mandatory training of a new employee («o‘quv rejimi», 2026-11-27)
+* **Who.** An employee's training state is made at their first request: `active` when their role's permissions
+  cover at least one task, else `exempt` (`note` = `superadmin` / `installer` / `no_tasks`; an installer — the
+  system role «O‘rnatuvchi» — is never trained although the role holds every desk permission). Everyone with any trace of earlier
+  work (a sign-in, a session, an audit line, a cheque, a result) was marked `exempt` by the migration (`note`
+  `existing`). Patients are never trained. `TRAINING_ENABLED=false` → nobody is.
+* **Tasks by permission** (in this order): `patient_create` (reception.patient.write · `POST /units/{id}/patients`),
+  `order_create` and `order_add_item` (reception.order.create · `POST /units/{id}/orders`, `POST /orders/{id}/items`),
+  `payment_take` (reception.payment.create · `POST /orders/{id}/pay`), `result_enter` (lab.result.write ·
+  `PUT /items/{id}/values`), `result_submit` (lab.result.submit · `POST /items/{id}/submit`), `result_approve`
+  (confirm.result.approve · `POST /items|orders/{id}/approve`). A task is done when that request SUCCEEDS in the
+  sandbox (ticked after the commit; a 4xx proves nothing; once done it stays done). The list follows the role:
+  when the role changes, tasks the new role does not cover go, new ones are added undone, and a role with none
+  ends the training (`exempt`).
+* **While `active`** every request of the employee except `/auth/*` reads and writes the sandbox schema: they see
+  no real patient, cheque, payment, document, message, notification or audit line, and nobody working for real
+  sees theirs. Reference data is the real one (read-only for them): any write not in the allowed list → 403
+  `training_mode` — the whole admin panel, the catalogue, staff, settings, SMS accounts, the assistant. Cheque
+  numbers come from the sandbox's own counters. A message is stored as delivered and not sent. PDFs carry
+  «O‘QUV NAMUNASI» and are not stored; public links (`/d/…`, `/v/…`) of a practice document → 404.
+* **Practice samples** (`GET /training/status?unitId=` puts them into the facility the employee works in, else
+  the home facility, else the first facility under their units): two sample patients for reception; for
+  `result_enter` / `result_submit` a paid cheque with one analysis that has a published result form; for
+  `result_approve` the same filled in and submitted (only a service whose template resolves). Nothing is made
+  when something suitable already waits there. No facility / no service / no priced service / no form / no
+  template → the task comes back `available: false` and does not hold the training back.
+* **Finish.** `POST /training/complete`: every task done or unavailable (`canComplete`) → `passed`, the
+  employee's sandbox rows are removed, audit `training.complete` (real); otherwise 409 `training_incomplete`.
+  From the next request the same token works with the real data.
+* **A manager** (`admin.employee.write`, the employee inside their scope, never themselves → 403 `self_edit`,
+  protected accounts as for editing; not while in training themselves → 403 `training_mode`):
+  `POST /employees/{id}/training/skip` — `active` → `skipped` (`completedBy`), sandbox rows removed, audit
+  `training.skip`; anything else is a no-op. `POST /employees/{id}/training/reset` — anyone with tasks → `active`
+  with every task undone, audit `training.reset`; a superadmin or a role without tasks → 422 `no_tasks`.
+  `EmployeeOut.training` = `{state, done, total, startedAt, completedAt, completedByName}`; `pending` = no row yet
+  (has not signed in since the training exists).
+* **The session** carries `training` (`StaffSessionOut`), and every answer to a staff request the header
+  `X-Training: 1|0` (the state after the request for `/training/*`).

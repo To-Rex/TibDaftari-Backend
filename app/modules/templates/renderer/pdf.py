@@ -31,6 +31,7 @@ PX_TO_PT = 0.75
 # receipt papers: 80 / 58 mm wide strips (the print service trims the blank tail on thermal printers)
 PAPER_PX: dict[str, tuple[float, float]] = {"A4": (794, 1123), "A5": (559, 794), "Letter": (816, 1056), "Receipt80": (302, 800), "Receipt58": (219, 800)}
 ABN = "#c2413f"
+WATERMARK_COLOR = (200, 30, 45)
 def _header_groups(cols: list[dict[str, Any]]) -> list[tuple[str | None, int, int]]:
     """Consecutive columns sharing `group` → (group, first index, count); ungrouped columns are singletons."""
     out: list[tuple[str | None, int, int]] = []
@@ -142,10 +143,11 @@ def _style(raw: Any) -> dict[str, Any]:
 class _Renderer:
     """One PDF page for one document (stateful: fonts registered lazily per family/style)."""
 
-    def __init__(self, doc: dict[str, Any], ctx: dict[str, Any], loader: AssetLoader | None) -> None:
+    def __init__(self, doc: dict[str, Any], ctx: dict[str, Any], loader: AssetLoader | None, watermark: str | None = None) -> None:
         self.doc = doc
         self.ctx = ctx
         self.loader = loader
+        self.watermark = watermark
         self.page_w, self.page_h = paper_size(doc)
         pdf = FPDF(unit=PX_TO_PT, format=(self.page_w, self.page_h))
         pdf.set_auto_page_break(False)
@@ -383,7 +385,27 @@ class _Renderer:
                     self.element(clone, row)
                 except Exception:  # one broken element must not kill the document
                     log.exception("template element %s (%s) failed to render", clone.get("id"), clone.get("type"))
+        if self.watermark:
+            self._watermark(self.watermark)
         return bytes(self.pdf.output())
+
+    def _watermark(self, label: str) -> None:
+        """`label` across the whole page, slanted and see-through, over everything else: a paper printed in training
+        can never pass for a real one, whatever the template looks like (a narrow receipt gets it too, smaller)."""
+        pdf = self.pdf
+        size = max(12.0, min(self.page_w / 11.0, 64.0))
+        self._font_add("sans", "B")
+        with pdf.local_context(fill_opacity=0.16):
+            pdf.set_font("sans", "B", size * PX_TO_PT)
+            pdf.set_char_spacing(0)
+            pdf.set_text_color(*WATERMARK_COLOR)
+            width = self.sw(label)
+            step = size * 4.2
+            cx, y = self.page_w / 2, step * 0.55
+            while y < self.page_h + step * 0.3:
+                with pdf.rotation(24, cx, y):
+                    pdf.text(cx - width / 2, y + size * 0.35, label)
+                y += step
 
     def _grow_shifts(self, els: list[dict[str, Any]]) -> dict[int, float]:
         """Tables with `grow` take the height of their rows: every element whose top is at or below such a
@@ -847,6 +869,7 @@ class _Renderer:
             cx += cw
 
 
-def render(doc: dict[str, Any], context: dict[str, Any], asset_loader: AssetLoader | None = None) -> bytes:
-    """Render a TemplateDoc dict with a RenderContext dict to PDF bytes (single page)."""
-    return _Renderer(doc, context, asset_loader).render()
+def render(doc: dict[str, Any], context: dict[str, Any], asset_loader: AssetLoader | None = None, watermark: str | None = None) -> bytes:
+    """Render a TemplateDoc dict with a RenderContext dict to PDF bytes (single page). `watermark`: a word stamped
+    across the page (a document made in training)."""
+    return _Renderer(doc, context, asset_loader, watermark).render()

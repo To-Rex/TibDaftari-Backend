@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import Field
 
 from app.core.schemas import CamelModel, PageQuery
+from app.modules.training.schemas import EmployeeTrainingOut
 from app.modules.units.schemas import UnitLevel
 
 EmployeeStatus = Literal["active", "inactive"]
@@ -42,6 +43,8 @@ class EmployeeOut(CamelModel):
     #: the true value only for superadmin callers; everyone else always sees false
     is_super_admin: bool = False
     last_login_at: datetime | None = None
+    #: where the employee stands with the mandatory training (absent on lists that do not load it)
+    training: EmployeeTrainingOut | None = None
     created_at: datetime
     updated_at: datetime
 

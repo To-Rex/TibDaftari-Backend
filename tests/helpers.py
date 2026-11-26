@@ -27,7 +27,7 @@ from typing import Any
 from app.core.config import settings
 from app.core.security import hash_password
 from app.infrastructure.db.base import alive
-from app.infrastructure.db.models import District, Employee, EmployeeUnit, OrgUnit, Region, Role
+from app.infrastructure.db.models import District, Employee, EmployeeTraining, EmployeeUnit, OrgUnit, Region, Role
 from app.infrastructure.db.session import dispose_engine, session_scope
 from app.infrastructure.redis.client import close_redis
 from fastapi.testclient import TestClient
@@ -171,10 +171,14 @@ async def make_employee(
     extra_units: Iterable[OrgUnit | uuid.UUID] = (),
     full_name: str | None = None,
     role: Role | None = None,
+    trainee: bool = False,
     **fields: Any,
 ) -> Employee:
     """An employee homed at `unit` with the system role `role_key` (or an explicit `role`). A superadmin has no
-    unit. The clear-text password is kept on the row as `.password` for the login helpers."""
+    unit. The clear-text password is kept on the row as `.password` for the login helpers.
+
+    Like everyone who worked here before the training existed, they are let past it (`exempt`) and work with the
+    real data; `trainee=True` leaves them as a newcomer whose first request starts the training."""
     role = role or await system_role(session, "superadmin" if super_admin else role_key)
     login = login or f"t-{role_key}-{uuid.uuid4().hex[:8]}"
     emp = Employee(
@@ -190,6 +194,8 @@ async def make_employee(
     await session.flush()
     for extra in extra_units:
         session.add(EmployeeUnit(employee_id=emp.id, unit_id=extra.id if isinstance(extra, OrgUnit) else extra))
+    if not trainee:
+        session.add(EmployeeTraining(employee_id=emp.id, status="exempt", note="test"))
     await session.flush()
     emp.password = password  # type: ignore[attr-defined]
     return emp

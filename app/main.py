@@ -48,6 +48,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:  # pragma: no cover — degraded Redis: the snapshots expire by themselves in minutes
         log.warning("could not drop the tree caches at start (%s)", exc)
 
+    # the training sandbox follows the real tables: built on the first start, rebuilt when a migration changed them.
+    # A failure here stops nobody but the trainees (they get 503 until it is there; it is tried again on demand).
+    if settings.training_enabled:
+        try:
+            from app.infrastructure.db.session import engine
+            from app.modules.training import sandbox
+
+            await sandbox.ensure(engine)
+            log.info("training sandbox: %s", sandbox.state())
+        except Exception:
+            log.exception("training sandbox could not be built at start")
+        else:
+            try:  # what people who are no longer practising left behind
+                from app.infrastructure.db.session import session_scope
+                from app.modules.training import samples
+
+                async with session_scope(training=True) as sandbox_session:
+                    cleared = await samples.sweep(sandbox_session)
+                if cleared:
+                    log.info("training sandbox: cleared the leftovers of %s employee(s)", cleared)
+            except Exception:
+                log.exception("training sandbox: leftovers not cleared")
+
     tasks: list[asyncio.Task] = []
     if settings.workers_enabled:
         from app.workers.runner import start_workers
@@ -105,6 +128,9 @@ def create_app() -> FastAPI:
                 return JSONResponse({"error": {"code": "rate_limited", "message": "Juda ko‘p so‘rov. Biroz kuting."}}, status_code=429, headers={"Retry-After": "60"})
         response = await call_next(request)
         response.headers["X-Request-ID"] = rid
+        in_training = getattr(request.state, "training", None)
+        if in_training is not None:  # a staff request: is this employee in the training (their data is the sandbox)
+            response.headers["X-Training"] = "1" if in_training else "0"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -124,7 +150,7 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["X-Request-ID", "Content-Disposition", "Server-Timing", "X-Invalid-Recipients"],
+        expose_headers=["X-Request-ID", "Content-Disposition", "Server-Timing", "X-Invalid-Recipients", "X-Training"],
         max_age=7200,  # browsers cap preflight caching at 2h (Chrome); fewer OPTIONS round trips
     )
     app.include_router(api_router, prefix="/api/v1")

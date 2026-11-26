@@ -1,4 +1,8 @@
-"""Tiny JSON cache helpers with per-company namespaces (invalidate on write). Fail-open."""
+"""Tiny JSON cache helpers with per-company namespaces (invalidate on write). Fail-open.
+
+Requests of an employee in training read the sandbox (`app.infrastructure.db.realm`), so what they compute must never
+be served to real requests, nor the other way round: their keys live under `trn:`. Invalidations drop BOTH copies —
+a real write (a price, a role, the tree) must reach the trainees' view of the reference data too."""
 
 from __future__ import annotations
 
@@ -9,12 +13,19 @@ from typing import Any
 
 import orjson
 
+from app.infrastructure.db import realm
 from app.infrastructure.redis.client import get_redis
+
+TRAINING_PREFIX = "trn:"
+
+
+def _k(key: str) -> str:
+    return TRAINING_PREFIX + key if realm.is_training() else key
 
 
 async def get_json(key: str) -> Any | None:
     try:
-        raw = await get_redis().get(key)
+        raw = await get_redis().get(_k(key))
     except Exception:  # pragma: no cover
         return None
     return orjson.loads(raw) if raw else None
@@ -22,7 +33,7 @@ async def get_json(key: str) -> Any | None:
 
 async def set_json(key: str, value: Any, ttl_seconds: int) -> None:
     try:
-        await get_redis().set(key, orjson.dumps(value, default=str), ex=ttl_seconds)
+        await get_redis().set(_k(key), orjson.dumps(value, default=str), ex=ttl_seconds)
     except Exception:  # pragma: no cover
         pass
 
@@ -59,7 +70,7 @@ def _defer(fn: Callable[[], Awaitable[None]]) -> None:
 
 async def _delete_now(keys: tuple[str, ...]) -> None:
     try:
-        await get_redis().delete(*keys)
+        await get_redis().delete(*keys, *(TRAINING_PREFIX + k for k in keys))
     except Exception:  # pragma: no cover
         pass
 
@@ -67,8 +78,9 @@ async def _delete_now(keys: tuple[str, ...]) -> None:
 async def _delete_prefix_now(prefix: str) -> None:
     try:
         r = get_redis()
-        async for key in r.scan_iter(match=f"{prefix}*", count=200):
-            await r.delete(key)
+        for p in (prefix, TRAINING_PREFIX + prefix):
+            async for key in r.scan_iter(match=f"{p}*", count=200):
+                await r.delete(key)
     except Exception:  # pragma: no cover
         pass
 

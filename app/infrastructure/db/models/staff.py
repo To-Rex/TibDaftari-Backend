@@ -57,6 +57,28 @@ class Employee(PKMixin, AuditMixin, SoftDeleteMixin, Base):
     )
 
 
+class EmployeeTraining(Base):
+    """Where an employee stands with the mandatory training («o‘quv rejimi», see `app.modules.training`).
+
+    `active` — still learning: every request of theirs works in the sandbox schema, never in the real data;
+    `passed` — did every task and pressed «finish»; `skipped` — let through by a manager (`completed_by`);
+    `exempt` — never needed it (worked before the training existed, a superadmin, a role with nothing to practise).
+    A row appears on the employee's first request; `tasks` is the list they got then: task key → when it was done."""
+
+    __tablename__ = "employee_training"
+
+    employee_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("employees.id", ondelete="CASCADE"), primary_key=True)
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="active")  # active | passed | skipped | exempt
+    tasks: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("employees.id"))
+    #: why exempt / who it concerns: existing | superadmin | no_tasks
+    note: Mapped[str | None] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
 class EmployeeUnit(Base):
     """Extra scope units of an employee (besides the home unit)."""
 

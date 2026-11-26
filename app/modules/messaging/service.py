@@ -28,6 +28,7 @@ from app.core.schemas import Page
 from app.core.scope import UnitScope, ids_of, narrow_to
 from app.core.textutil import digits, fmt_money_ru, is_valid_uz_phone, norm_phone
 from app.core.timeutil import to_iso
+from app.infrastructure.db import realm
 from app.infrastructure.db.base import alive
 from app.infrastructure.db.models import Notification, OutboxMessage, Patient
 from app.modules.messaging import repository as repo
@@ -193,6 +194,13 @@ def build_message(
 
 async def _enqueue(session: AsyncSession, account: SmsAccount | None, **kwargs: Any) -> OutboxMessage:
     msg = build_message(account_id=account.account_id if account else None, **kwargs)
+    if realm.is_training() and msg.status == "queued":
+        # a trainee's message is practice: it is never handed to a provider (the worker does not even see the
+        # sandbox) — it is shown as delivered so the screen reads as it will in real work
+        msg.status = "delivered"
+        msg.sent_at = datetime.now(UTC)
+        msg.next_attempt_at = None
+        msg.payload = {**(msg.payload or {}), "training": True}
     session.add(msg)
     await session.flush()
     return msg

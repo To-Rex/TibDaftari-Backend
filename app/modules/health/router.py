@@ -25,5 +25,11 @@ async def ready(session: DbSession) -> dict[str, str]:
         await get_redis().ping()
     except Exception:
         redis = "down"
+    from app.modules.training import sandbox
+
     # the background workers (SMS outbox, maintenance, the assistant's scheduled tasks) run inside this process when enabled
-    return {"status": "ok", "db": "ok", "redis": redis, "workers": "on" if settings.workers_enabled else "off"}
+    return {
+        "status": "ok", "db": "ok", "redis": redis, "workers": "on" if settings.workers_enabled else "off",
+        # the sandbox new employees practise in (see app/modules/training)
+        "training": sandbox.state() if settings.training_enabled else "off",
+    }  # fmt: skip

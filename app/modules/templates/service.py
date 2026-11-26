@@ -45,6 +45,7 @@ from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError, Va
 from app.core.scope import UnitScope, ancestor_ids, descendant_ids, facility_ids_under, load_scope
 from app.core.textutil import matches
 from app.core.timeutil import today_local, utcnow
+from app.infrastructure.db import realm
 from app.infrastructure.db.models import (
     AttributeSchema,
     Category,
@@ -811,6 +812,15 @@ async def _asset_map(session: AsyncSession, doc: dict[str, Any]) -> dict[str, di
     }
 
 
+
+#: stamped across every paper made in training — it must never pass for a real result or receipt
+TRAINING_WATERMARK = "O‘QUV NAMUNASI"
+
+
+def _training_mark() -> str | None:
+    return TRAINING_WATERMARK if realm.is_training() else None
+
+
 async def _loader_for(session: AsyncSession, assets: dict[str, dict[str, Any]]) -> Callable[[str], tuple[bytes, str] | None]:
     """Pre-load stored bytes for every asset (async) and hand the renderer a sync lookup."""
     blobs: dict[str, tuple[bytes, str]] = {}
@@ -827,7 +837,7 @@ async def preview_pdf(session: AsyncSession, template_id: uuid.UUID, staff: Staf
     ctx = await _sample_context(session, template)
     use_doc = doc if doc is not None else (template.doc or empty_doc())
     loader = await _loader_for(session, await _asset_map(session, use_doc))
-    return await asyncio.to_thread(render, use_doc, ctx, loader)
+    return await asyncio.to_thread(render, use_doc, ctx, loader, _training_mark())
 
 
 # ----------------------------------------------------------------------------- documents (used by orders / portal / telegram)
@@ -953,11 +963,11 @@ async def render_doc_pdf(session: AsyncSession, doc: dict[str, Any], ctx: dict[s
     """Render a template doc with a ready context (referenced assets resolved) — receipts, ad-hoc previews."""
     use_doc = doc or empty_doc()
     loader = await _loader_for(session, await _asset_map(session, use_doc))
-    return await asyncio.to_thread(render, use_doc, ctx, loader)
+    return await asyncio.to_thread(render, use_doc, ctx, loader, _training_mark())
 
 
 async def render_snapshot_pdf(session: AsyncSession, snapshot: dict[str, Any]) -> bytes:
     """Render a frozen snapshot to PDF bytes (assets loaded from stored_files; data: URIs inline)."""
     loader = await _loader_for(session, snapshot.get("assets") or {})
     # CPU-bound (fpdf2, fonts, images): keep it off the event loop; the loader is a sync dict lookup.
-    return await asyncio.to_thread(render, snapshot.get("doc") or empty_doc(), snapshot.get("context") or {}, loader)
+    return await asyncio.to_thread(render, snapshot.get("doc") or empty_doc(), snapshot.get("context") or {}, loader, _training_mark())

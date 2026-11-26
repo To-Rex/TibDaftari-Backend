@@ -42,7 +42,7 @@ from app.infrastructure.db.models.org import (
     OrgUnitClosure,
 )
 from app.infrastructure.db.models.patient import Patient, TelegramChatPref, TelegramLink
-from app.infrastructure.db.models.staff import Employee, EmployeeUnit, OtpChallenge, Role, Session
+from app.infrastructure.db.models.staff import Employee, EmployeeTraining, EmployeeUnit, OtpChallenge, Role, Session
 
 __all__ = [
     "CHILD_LEVEL",
@@ -66,6 +66,7 @@ __all__ = [
     "Country",
     "District",
     "Employee",
+    "EmployeeTraining",
     "EmployeeUnit",
     "MessagingAccount",
     "Notification",

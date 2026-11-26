@@ -9,3 +9,6 @@ ignore = ["S101", "S105", "S106", "B008", "RUF012", "E501", "RUF001", "RUF002", 
 [lint.per-file-ignores]
 "tests/*" = ["S", "ASYNC"]
 "migrations/*" = ["I", "N"]
+# the sandbox is built and cleared with SQL whose identifiers are constants of the code (schema and table names) — no input reaches it
+"app/modules/training/sandbox.py" = ["S608"]
+"app/modules/training/samples.py" = ["S608"]

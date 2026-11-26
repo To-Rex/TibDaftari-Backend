@@ -49,6 +49,7 @@ from app.core.scope import UnitScope, ids_of
 from app.core.security import random_digits, sha256_hex
 from app.core.textutil import is_valid_uz_phone, norm_phone, slugify
 from app.core.timeutil import utcnow
+from app.infrastructure.db import realm
 from app.infrastructure.db.models import (
     Order,
     OrderItem,
@@ -1472,6 +1473,10 @@ async def _issue_document(
     )
     session.add(doc)
     await session.flush()
+    if realm.is_training():
+        # a practice document: its PDF is drawn when asked for and never kept, and the template's usage counter
+        # does not move (stored files and templates are real data)
+        return doc, facility, patient
     try:
         # SAVEPOINT: a DB-side failure while storing the PDF rolls back only this step,
         # so the approval itself still commits (the PDF is rendered lazily later).
@@ -1779,6 +1784,8 @@ async def ensure_document_pdf(session: AsyncSession, document: ResultDocument) -
         if loaded:
             return loaded[0]
     pdf = await templates_svc.render_snapshot_pdf(session, document.snapshot or {})
+    if realm.is_training():
+        return pdf  # a practice document is drawn every time, never stored
     stored = await files_svc.store_bytes(
         session,
         unit_id=document.unit_id,

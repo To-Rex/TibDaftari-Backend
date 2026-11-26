@@ -56,6 +56,8 @@ def test_restricted_employee_sees_only_own_categories(env: dict[str, Any]) -> No
     r = c.post(f"{API}/units/{fac}/employees", headers=h, json={"fullName": "T-catres laborant", "login": login, "password": "123456", "roleId": lab_role["id"], "categoryIds": [env["cat_a"]]})
     assert r.status_code == 201, r.text
     assert r.json()["categoryIds"] == [env["cat_a"]] and r.json()["unitId"] == fac
+    # an experienced colleague: let through the newcomers' training (they would see the practice sandbox otherwise)
+    assert c.post(f"{API}/employees/{r.json()['id']}/training/skip", headers=h).status_code == 200
     hl = bearer(staff_session(c, login)["accessToken"])
 
     # worklist without a filter → only category A

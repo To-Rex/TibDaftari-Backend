@@ -72,6 +72,11 @@ class Settings(BaseSettings):
     # The platform Telegram bot (a `messaging_accounts` row with channel=telegram and no stored token uses it)
     telegram_bot_token: str = ""
 
+    # ---- training of new employees («o‘quv rejimi») ------------------------
+    # A new employee works in a sandbox until the tasks of their role are done (app/modules/training). The switch
+    # turns the whole thing off: nobody is in training, everyone works with the real data.
+    training_enabled: bool = True
+
     # ---- background workers ------------------------------------------------
     workers_enabled: bool = True
     telegram_enabled: bool = True

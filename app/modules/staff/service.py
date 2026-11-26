@@ -119,7 +119,13 @@ async def employees_out(session: AsyncSession, rows: Sequence[Employee], staff: 
     units = await units_repo.units_by_ids(session, [e.unit_id for e in rows])
     extra = await repo.extra_unit_ids(session, [e.id for e in rows])
     reveal = bool(staff and staff.is_super_admin)
-    return [employee_out(e, units, extra_unit_ids=extra.get(e.id), reveal_super_admin=reveal) for e in rows]
+    from app.modules.training import service as training_svc  # the training module builds on this one
+
+    training = await training_svc.employee_training_map(session, rows)
+    out = [employee_out(e, units, extra_unit_ids=extra.get(e.id), reveal_super_admin=reveal) for e in rows]
+    for dto, e in zip(out, rows, strict=True):
+        dto.training = training.get(e.id)
+    return out
 
 
 async def employee_dto(session: AsyncSession, emp: Employee, staff: StaffPrincipal | None = None) -> EmployeeOut:
