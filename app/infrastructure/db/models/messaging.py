@@ -96,7 +96,7 @@ class Notification(PKMixin, AuditMixin, SoftDeleteMixin, Base):
     #: what a notice written by the system is about (`training.passed` …) with its values: the interface says it in
     #: the reader's language; `title` / `body` stay the Uzbek text (and all there is for a notice without a code)
     code: Mapped[str | None] = mapped_column(String(40))
-    params: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    params: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
 
     __table_args__ = (Index("ix_notifications_unit_created", "unit_id", "created_at"),)
 

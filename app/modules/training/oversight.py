@@ -80,7 +80,8 @@ def _conditions(cutoff: datetime | None) -> dict[str, Any]:
     pending = and_(T.employee_id.is_(None), ~installer, has_tasks)
     return {
         "active": active,
-        "stalled": and_(active, T.started_at <= cutoff) if cutoff is not None else false(),
+        # (a repeat the employee chose for themselves is never overdue: nobody is waiting for it)
+        "stalled": and_(active, T.previous.is_(None), T.started_at <= cutoff) if cutoff is not None else false(),
         "ready": and_(active, text(f"NOT EXISTS ({_UNDONE})")),
         "pending": pending,
         "passed": T.status == "passed",
@@ -236,9 +237,10 @@ async def announce_passed(employee_id: uuid.UUID) -> int:
 
 
 async def remind_once() -> int:
-    """One look for people who have been in the training `TRAINING_STALL_DAYS` or longer and were not mentioned in
-    the last `TRAINING_REMIND_EVERY_DAYS`: their managers and the superadmins get a notice — one per employee, or one
-    for all of them when there are many. Returns how many employees were mentioned."""
+    """One look for people who have been in a MANDATORY training `TRAINING_STALL_DAYS` or longer and were not
+    mentioned in the last `TRAINING_REMIND_EVERY_DAYS`: their managers and the superadmins get a notice — one per
+    employee, or one for all of them when there are many. (A repeat someone started for themselves concerns nobody
+    else.) Returns how many employees were mentioned."""
     from app.modules.messaging import service as messaging_svc
 
     days = settings.training_stall_days
@@ -253,7 +255,7 @@ async def remind_once() -> int:
                 await session.execute(
                     select(T)
                     .join(Employee, Employee.id == T.employee_id)
-                    .where(T.status == "active", T.started_at <= cutoff, or_(T.reminded_at.is_(None), T.reminded_at <= again))
+                    .where(T.status == "active", T.previous.is_(None), T.started_at <= cutoff, or_(T.reminded_at.is_(None), T.reminded_at <= again))
                     .where(alive(Employee), Employee.status == "active", Employee.is_super_admin.is_(False))
                     .order_by(T.started_at)
                     .limit(REMIND_BATCH)

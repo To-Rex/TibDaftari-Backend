@@ -131,8 +131,9 @@ def _about(notices: list[dict[str, Any]], env: dict[str, Any], who: str) -> list
 
 
 def test_a_colleagues_view_is_built_from_their_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    coming = training_svc.colleague_out(None, coming=["patient_create", "order_create"])
+    coming = training_svc.colleague_out(None, plan=["patient_create", "order_create"])
     assert coming.state == "pending" and coming.total == 2 and coming.done == 0 and not coming.can_complete
+    assert coming.plan == ["patient_create", "order_create"] and coming.attempt == 1 and not coming.voluntary
     assert [(t.key, t.done, t.available) for t in coming.tasks] == [("patient_create", False, True), ("order_create", False, True)]
     assert training_svc.colleague_out(None).state == "exempt"  # nothing to practise: the first sign-in starts nothing
 

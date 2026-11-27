@@ -154,6 +154,14 @@ to it:
   under a lock before anyone is told, repeated every `TRAINING_REMIND_EVERY_DAYS`, many people for one reader are
   one notice). Such a notice carries `code` + `params` (`notifications.code/params`): the interface says it in
   the reader's language, `title` / `body` stay the Uzbek wording.
+* **Again** (migration `v2_0013`) — a round of the training is the whole plan of the role («as on the first day»)
+  or only chosen tasks (`employee_training.chosen`; `service.choose`). A manager sends anyone back with
+  `POST /employees/{id}/training/reset {tasks?}` — mandatory, like the first time. An employee may repeat by their
+  own wish: `POST /training/restart {tasks?}` keeps the row as it was in `previous`, so `POST /training/leave` (or
+  a manager's skip) gives it back untouched; such a repeat is nobody else's business — never «overdue», no
+  reminders, no notice when finished. Inside a mandatory training `restart` only starts the same tasks over.
+  A plan that begins in the middle of the desk work is given a cheque to begin with (`samples._desk`).
+  `attempt` counts the rounds, `started_by` says who began this one.
 * `TRAINING_ENABLED=false` switches all of it off.
 
 ## Rules every module follows
@@ -228,7 +236,8 @@ portal:    GET /portal/overview  GET /portal/orders/{id}  GET /portal/documents/
 files:     GET /files/{id}  (public assets & PDFs by unguessable id; PDFs also via /d/{token})
 telegram:  POST /telegram/webhook/{accountId}/{secret} (optional; polling is default)
 training:  GET /training/status?unitId=  POST /training/complete?unitId=  (the caller's own training)
+           POST /training/restart?unitId= {tasks?}  POST /training/leave  (again by one's own wish — and out of it)
            GET /training/overview?state=&unitId=&search=  (everyone it concerns in the caller's scope — admin.employee.read)
-           POST /employees/{id}/training/skip | reset  (a manager: let through / send back — admin.employee.write)
+           POST /employees/{id}/training/skip | reset {tasks?}  (a manager: let through / send back — admin.employee.write)
 health:    GET /health  GET /health/ready
 ```

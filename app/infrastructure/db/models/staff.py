@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, SmallInteger, String, Text, text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, SmallInteger, String, Text, text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -80,6 +80,16 @@ class EmployeeTraining(Base):
     unavailable: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
     #: when the managers were last told this person has not finished (see `training.oversight`)
     reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: the task keys of a partial plan («only how to add a patient»); None = every task of the role
+    chosen: Mapped[list[str] | None] = mapped_column(JSONB(none_as_null=True))
+    #: a repeat the employee started THEMSELVES: the row as it was before, to give back when they leave it.
+    #: None = the training is mandatory — only finishing, or a manager, ends it. (`none_as_null`: None is a real
+    #: SQL NULL — the overview and the reminder ask the database «is it mandatory» with `previous IS NULL`.)
+    previous: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    #: which time this is (1 = the first training)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))
+    #: who put the employee (back) into the training — themselves or a manager; None = it began at the first sign-in
+    started_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("employees.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 

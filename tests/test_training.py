@@ -164,6 +164,8 @@ def test_task_and_whitelist_rules_cover_real_routes_only() -> None:
             ("POST", "/payments/{payment_id}/refund"),
             ("POST", "/templates/{template_id}/preview.pdf"),
             ("POST", "/training/complete"),
+            ("POST", "/training/leave"),
+            ("POST", "/training/restart"),
             ("POST", "/units/{unit_id}/messages/send"),
             ("POST", "/units/{unit_id}/orders"),
             ("POST", "/units/{unit_id}/patients"),

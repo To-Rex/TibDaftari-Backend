@@ -25,6 +25,12 @@ PAID_SERVICE = "paid_service"
 #: … and the samples the service puts into the sandbox: an analysis waiting for its result / a result waiting for approval
 LAB_ITEM = "lab_item"
 SUBMITTED_ITEM = "submitted_item"
+#: samples for a plan that starts in the middle of the desk work («only how to take a payment»): a cheque to add a
+#: service to / one with something to pay. Never a condition of a task — only something to begin with.
+OPEN_ORDER = "open_order"
+UNPAID_ORDER = "unpaid_order"
+#: how the practice rows the service itself puts there are told apart (on the screen, and from the trainee's own work)
+SAMPLE_NOTE = "O‘quv namunasi"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +67,8 @@ ALLOWED_WRITES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("POST", _p(r"/auth/logout")),
     ("POST", _p(r"/notifications/read")),
     ("POST", _p(r"/training/complete")),
+    ("POST", _p(r"/training/restart")),
+    ("POST", _p(r"/training/leave")),
     ("POST", _p(rf"/units/{_ID}/patients/duplicates")),
     ("PUT", _p(rf"/patients/{_ID}")),
     ("PUT", _p(rf"/patients/{_ID}/portal-access")),

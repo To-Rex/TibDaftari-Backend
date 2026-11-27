@@ -21,7 +21,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.api.deps import RequestMeta, StaffPrincipal
 from app.core.audit import audit
 from app.core.config import settings
-from app.core.exceptions import ForbiddenError, StateError, ValidationError
+from app.core.exceptions import AppError, ForbiddenError, StateError, ValidationError
 from app.core.permissions import INSTALLER_ROLE_KEY, PLATFORM_PERMISSIONS, resolve_permissions
 from app.core.scope import facility_ids_under
 from app.infrastructure.db import realm
@@ -31,7 +31,7 @@ from app.infrastructure.db.session import SessionLocal, session_scope
 from app.infrastructure.redis.client import get_redis
 from app.modules.training import samples, targets
 from app.modules.training.schemas import EmployeeTrainingOut, TrainingOut, TrainingTargetOut, TrainingTaskOut
-from app.modules.training.tasks import TASK_BY_KEY, TASKS, tasks_for
+from app.modules.training.tasks import OPEN_ORDER, TASK_BY_KEY, TASKS, UNPAID_ORDER, tasks_for
 
 log = logging.getLogger("app.training")
 
@@ -41,6 +41,13 @@ RECEPTION_TASKS = frozenset({"patient_create", "order_create"})
 INCOMPLETE = "Avval barcha o‘quv topshiriqlarini bajaring"
 SELF_ERROR = "O‘z o‘quvingizni o‘zingiz o‘zgartira olmaysiz"
 NOTHING_TO_LEARN = "Bu xodimning rolida mashq qilinadigan topshiriq yo‘q"
+NOTHING_FOR_ME = "Sizning rolingizda mashq qilinadigan topshiriq yo‘q"
+UNKNOWN_TASK = "Bunday o‘quv topshirig‘i yo‘q"
+NOT_IN_ROLE = "Tanlangan topshiriq bu rolga tegishli emas"
+MANDATORY = "Bu o‘quv majburiy: undan faqat topshiriqlarni bajarib yoki rahbar ruxsati bilan chiqiladi"
+NOT_READY = "O‘quv muhiti hozircha tayyor emas. Birozdan so‘ng qayta urinib ko‘ring."
+#: tasks whose natural beginning is an earlier desk task: when that one is not in the plan, a sample stands in
+_DESK_BEFORE_PAY = frozenset({"order_create", "order_add_item"})
 
 
 def _now() -> datetime:
@@ -72,6 +79,80 @@ async def _tasks_of(session: AsyncSession, emp: Employee) -> dict[str, Any]:
     if _is_installer(role):
         return {}
     return {t.key: None for t in tasks_for(_permissions(emp, role))}
+
+
+def plan_of(staff: StaffPrincipal) -> list[str]:
+    """Every task the caller's role has now, in the order they are practised — what a training can be made of."""
+    if staff.is_super_admin or staff.is_installer:
+        return []
+    return [t.key for t in TASKS if staff.has(*t.perms)]
+
+
+def choose(mine: Sequence[str], wanted: Sequence[str] | None) -> tuple[list[str], list[str] | None]:
+    """The tasks of a round and what to remember of the choice: `wanted` narrowed to the role's own tasks, in their
+    order. Nothing chosen — or everything — is the whole plan (remembered as None). 422 for a key that does not exist
+    (`unknown_task`) or that the role does not have (`task_not_in_role`)."""
+    asked = list(dict.fromkeys(wanted or []))
+    if not asked:
+        return list(mine), None
+    if any(k not in TASK_BY_KEY for k in asked):
+        raise ValidationError(UNKNOWN_TASK, code="unknown_task")
+    if any(k not in mine for k in asked):
+        raise ValidationError(NOT_IN_ROLE, code="task_not_in_role")
+    picked = [k for k in mine if k in asked]
+    return picked, (None if len(picked) == len(mine) else picked)
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _snapshot(row: EmployeeTraining) -> dict[str, Any]:
+    """The row as it stands — what a repeat the employee started themselves gives back when they leave it."""
+    return {
+        "status": row.status,
+        "tasks": dict(row.tasks or {}),
+        "chosen": list(row.chosen) if row.chosen else None,
+        "startedAt": _iso(row.started_at),
+        "completedAt": _iso(row.completed_at),
+        "completedBy": str(row.completed_by) if row.completed_by else None,
+        "startedBy": str(row.started_by) if row.started_by else None,
+        "note": row.note,
+        "attempt": row.attempt or 1,
+    }
+
+
+def _restore(row: EmployeeTraining) -> None:
+    """Back to how it was before a voluntary repeat (as if it had never been started)."""
+    was = row.previous or {}
+    row.status = was.get("status") or "exempt"
+    row.tasks = dict(was.get("tasks") or {})
+    flag_modified(row, "tasks")
+    row.chosen = was.get("chosen") or None
+    row.started_at = _when(was.get("startedAt")) or row.started_at
+    row.completed_at = _when(was.get("completedAt")) or _now()
+    row.completed_by = uuid.UUID(was["completedBy"]) if was.get("completedBy") else None
+    row.started_by = uuid.UUID(was["startedBy"]) if was.get("startedBy") else None
+    row.note = was.get("note")
+    row.attempt = int(was.get("attempt") or 1)
+    row.previous = None
+    row.unavailable = []
+    row.reminded_at = None
+
+
+def _begin(row: EmployeeTraining, keys: Sequence[str], chosen: list[str] | None, by: uuid.UUID | None) -> None:
+    """A round starts: these tasks, none done, the clock from now."""
+    row.status = "active"
+    row.tasks = dict.fromkeys(keys)
+    flag_modified(row, "tasks")
+    row.chosen = chosen
+    row.started_at = _now()
+    row.started_by = by
+    row.completed_at = None
+    row.completed_by = None
+    row.note = None
+    row.unavailable = []
+    row.reminded_at = None
 
 
 async def load_or_init(session: AsyncSession, employee_id: uuid.UUID) -> EmployeeTraining | None:
@@ -150,12 +231,13 @@ def training_out(
     facility: OrgUnit | None = None,
     nowhere: bool = False,
     where: dict[str, TrainingTargetOut] | None = None,
+    plan: Sequence[str] = (),
 ) -> TrainingOut:
     """The caller's own view. `available`: need → is there something to practise it on (None = not looked at);
     `nowhere`: the employee has no facility to practise in at all — nothing can be done, nothing holds them back;
-    `where`: task key → the record to continue on."""
+    `where`: task key → the record to continue on; `plan`: every task their role has now."""
     if row is None:
-        return TrainingOut(state="exempt")
+        return TrainingOut(state="exempt", plan=list(plan))
     active = row.status == "active"
     stored = row.tasks or {}
 
@@ -183,6 +265,10 @@ def training_out(
         completed_at=row.completed_at,
         unit_id=str(facility.id) if facility is not None else None,
         unit_name=facility.name if facility is not None else None,
+        voluntary=active and row.previous is not None,
+        partial=bool(row.chosen),
+        attempt=row.attempt or 1,
+        plan=list(plan),
     )
 
 
@@ -207,22 +293,32 @@ async def _facility(session: AsyncSession, staff: StaffPrincipal, unit_id: uuid.
     return None
 
 
+def _round_tasks(mine: Sequence[str], chosen: Sequence[str] | None) -> list[str]:
+    """The tasks a round consists of: the role's own, narrowed to what was chosen for it."""
+    return [k for k in mine if k in chosen] if chosen else list(mine)
+
+
 async def _reconcile(staff: StaffPrincipal) -> EmployeeTraining | None:
     """The employee's row with the tasks of the role they hold NOW: a role changed in the middle of the training
-    must not leave tasks they may no longer do (they could never finish) — the marks of tasks already done stay.
-    A role with nothing to practise ends the training (`exempt`)."""
-    mine = [] if staff.is_installer else [t.key for t in TASKS if staff.has(*t.perms)]
+    must not leave tasks they may no longer do (they could never finish) — the marks of tasks already done stay,
+    and a partial plan stays partial. Nothing left to practise ends the round: a voluntary repeat gives back what
+    was before it, anything else becomes `exempt`."""
+    mine = plan_of(staff)
     async with SessionLocal() as session:
         row = await load_or_init(session, staff.id)
-        if row is None or row.status != "active" or list(row.tasks or {}) == mine:
+        if row is None or row.status != "active" or list(row.tasks or {}) == _round_tasks(mine, row.chosen):
             await session.commit()
             return row
         row = (await session.execute(select(EmployeeTraining).where(EmployeeTraining.employee_id == staff.id).with_for_update())).scalar_one()
         if row.status == "active":
-            row.tasks = {k: (row.tasks or {}).get(k) for k in mine}
+            keep = _round_tasks(mine, row.chosen)
+            row.tasks = {k: (row.tasks or {}).get(k) for k in keep}
             flag_modified(row, "tasks")
-            if not mine:
-                row.status, row.note, row.completed_at = "exempt", "no_tasks", _now()
+            if not keep:
+                if row.previous is not None:
+                    _restore(row)
+                else:
+                    row.status, row.note, row.completed_at = "exempt", "no_tasks", _now()
         await session.commit()
         ended = row.status != "active"
     if ended:
@@ -256,24 +352,33 @@ async def status(session: AsyncSession, staff: StaffPrincipal, unit_id: uuid.UUI
     they work in holds something to practise each remaining task on (`samples.ensure`)."""
     if staff.is_super_admin or not settings.training_enabled:
         return TrainingOut(state="exempt")
+    plan = plan_of(staff)
     row = await _reconcile(staff)
     if row is None or row.status != "active":
-        return training_out(row)
+        return training_out(row, plan=plan)
     if not realm.is_training():
         # the very request that started the training (or one that raced a reset) still runs on the real data: nothing
         # is seeded there — the next one is in the sandbox
-        return training_out(row)
+        return training_out(row, plan=plan)
     pending = [TASK_BY_KEY[k] for k, done in (row.tasks or {}).items() if not done and k in TASK_BY_KEY]
     facility = await _facility(session, staff, unit_id)
     if facility is None:
         await _remember_unavailable(row, [t.key for t in pending])
-        return training_out(row, nowhere=True)
-    available = await samples.ensure(session, staff, facility, {t.needs for t in pending if t.needs}, patients=any(t.key in RECEPTION_TASKS for t in pending))
+        return training_out(row, nowhere=True, plan=plan)
+    keys = {t.key for t in pending}
+    needs = {t.needs for t in pending if t.needs}
+    # the desk work is a chain — patient, cheque, service, payment. A plan that starts in its middle («only how to
+    # take a payment»), or a trainee whose own cheque is gone, is given a cheque to continue with
+    if "payment_take" in keys and not (_DESK_BEFORE_PAY & keys):
+        needs.add(UNPAID_ORDER)
+    elif "order_add_item" in keys and "order_create" not in keys:
+        needs.add(OPEN_ORDER)
+    available = await samples.ensure(session, staff, facility, needs, patients=any(t.key in RECEPTION_TASKS for t in pending))
     possible = [t for t in pending if t.needs is None or available.get(t.needs)]
     await _remember_unavailable(row, [t.key for t in pending if t not in possible])
     # the very record each remaining task is done on: the checklist leads there, not to a list
     where = await targets.find(session, staff, facility.id, [t.key for t in possible])
-    return training_out(row, available, facility=facility, where=where)
+    return training_out(row, available, facility=facility, where=where, plan=plan)
 
 
 async def complete(session: AsyncSession, staff: StaffPrincipal, unit_id: uuid.UUID | None, meta: RequestMeta) -> TrainingOut:
@@ -288,20 +393,96 @@ async def complete(session: AsyncSession, staff: StaffPrincipal, unit_id: uuid.U
         await samples.purge(session, staff.id)
     async with SessionLocal() as real:
         row = (await real.execute(select(EmployeeTraining).where(EmployeeTraining.employee_id == staff.id).with_for_update())).scalar_one()
+        own_wish = row.previous is not None
         row.status = "passed"
         row.completed_at = _now()
         row.completed_by = None
+        row.previous = None  # finished: there is nothing to go back to any more
         await audit(
             real, actor_type="staff", actor_id=staff.id, unit_id=staff.home_unit_id, action="training.complete", entity="employee", entity_id=staff.id,
-            after={"done": out.done, "total": out.total}, ip=meta.ip, request_id=meta.request_id,
+            after={"done": out.done, "total": out.total, "attempt": row.attempt or 1, "voluntary": own_wish}, ip=meta.ip, request_id=meta.request_id,
         )  # fmt: skip
         await real.commit()
-        result = training_out(row)
+        result = training_out(row, plan=out.plan)
     await _drop_state(staff.id)
-    # their managers (and the superadmins) are told — never at the price of the employee's own «finish»
-    from app.modules.training import oversight
+    if not own_wish:
+        # their managers (and the superadmins) are told — never at the price of the employee's own «finish».
+        # (A repeat the employee chose for themselves is their own business: nobody is told.)
+        from app.modules.training import oversight
 
-    await oversight.announce_passed(staff.id)
+        await oversight.announce_passed(staff.id)
+    return result
+
+
+async def restart(session: AsyncSession, staff: StaffPrincipal, wanted: Sequence[str] | None, unit_id: uuid.UUID | None, meta: RequestMeta) -> TrainingOut:
+    """The employee goes through the training again by their own wish — the whole plan of their role, or only the
+    tasks they name. From the next request they work in the sandbox; because it is their own choice they may leave
+    at any moment (`leave`) and are then exactly where they were before.
+
+    Someone who is in a MANDATORY training (the first one, or one a manager sent them to) cannot shorten it this
+    way: for them this starts the same tasks from the beginning. 422 `no_tasks` when the role has nothing to
+    practise; 503 `training_unavailable` when the sandbox is not there (nobody is moved into a place that does not
+    exist)."""
+    mine = plan_of(staff)
+    if not mine or not settings.training_enabled:
+        raise ValidationError(NOTHING_FOR_ME, code="no_tasks")
+    from app.infrastructure.db.session import engine
+    from app.modules.training import sandbox
+
+    if not await sandbox.ensure_ready(engine):
+        raise AppError(NOT_READY, code="training_unavailable", status=503)
+    async with SessionLocal() as real:
+        await load_or_init(real, staff.id)
+        row = (await real.execute(select(EmployeeTraining).where(EmployeeTraining.employee_id == staff.id).with_for_update())).scalar_one()
+        mandatory = row.status == "active" and row.previous is None
+        if mandatory:
+            keys, chosen = _round_tasks(mine, row.chosen) or list(mine), row.chosen
+            _begin(row, keys, chosen, row.started_by)
+        else:
+            keys, chosen = choose(mine, wanted)
+            if row.status != "active":
+                # a repeat begins: remember where to return to (a repeat restarted keeps the FIRST «before»)
+                row.previous = _snapshot(row)
+                row.attempt = (row.attempt or 1) + 1
+            _begin(row, keys, chosen, staff.id)
+        await audit(
+            real, actor_type="staff", actor_id=staff.id, unit_id=staff.home_unit_id, action="training.restart", entity="employee", entity_id=staff.id,
+            after={"tasks": list(keys), "voluntary": not mandatory, "attempt": row.attempt or 1}, ip=meta.ip, request_id=meta.request_id,
+        )  # fmt: skip
+        await real.commit()
+    # a clean start: what was practised before is gone
+    if realm.is_training():
+        await samples.purge(session, staff.id)
+    else:
+        await _purge_sandbox(staff.id)
+    await _drop_state(staff.id)
+    return await status(session, staff, unit_id)
+
+
+async def leave(session: AsyncSession, staff: StaffPrincipal, meta: RequestMeta) -> TrainingOut:
+    """The employee leaves a repeat they started themselves: back to the real data at once, their training as it was
+    before. 409 `training_mandatory` for a training that is not theirs to leave; a no-op when not in one."""
+    plan = plan_of(staff)
+    async with SessionLocal() as real:
+        row = (await real.execute(select(EmployeeTraining).where(EmployeeTraining.employee_id == staff.id).with_for_update())).scalar_one_or_none()
+        if row is None or row.status != "active":
+            await real.commit()
+            return training_out(row, plan=plan)
+        if row.previous is None:
+            raise StateError(MANDATORY, code="training_mandatory")
+        done, total = _counts(row)
+        _restore(row)
+        await audit(
+            real, actor_type="staff", actor_id=staff.id, unit_id=staff.home_unit_id, action="training.leave", entity="employee", entity_id=staff.id,
+            after={"done": done, "total": total, "back": row.status}, ip=meta.ip, request_id=meta.request_id,
+        )  # fmt: skip
+        await real.commit()
+        result = training_out(row, plan=plan)
+    if realm.is_training():
+        await samples.purge(session, staff.id)
+    else:
+        await _purge_sandbox(staff.id)
+    await _drop_state(staff.id)
     return result
 
 
@@ -321,14 +502,18 @@ def stall_cutoff() -> datetime | None:
     return _now() - timedelta(days=days) if days > 0 else None
 
 
-def colleague_out(row: EmployeeTraining | None, *, coming: Sequence[str] = (), by_name: str | None = None) -> EmployeeTrainingOut:
+def colleague_out(
+    row: EmployeeTraining | None, *, plan: Sequence[str] = (), by_name: str | None = None, started_by_name: str | None = None
+) -> EmployeeTrainingOut:
     """A colleague's training as a manager sees it: every task with its mark, and whether only «finish» is left.
-    `coming`: without a row (never signed in) — the tasks the first sign-in will give; none → nothing to practise."""
+    `plan`: every task their role has now — without a row (never signed in) these are the tasks the first sign-in
+    will give (none → nothing to practise); with one, what a manager may choose from when sending them back."""
     if row is None:
-        if not coming:
+        if not plan:
             return EmployeeTrainingOut(state="exempt")
-        return EmployeeTrainingOut(state="pending", total=len(coming), tasks=[TrainingTaskOut(key=k, done=False) for k in coming])
+        return EmployeeTrainingOut(state="pending", total=len(plan), tasks=[TrainingTaskOut(key=k, done=False) for k in plan], plan=list(plan))
     active = row.status == "active"
+    own_wish = active and row.previous is not None
     stored = row.tasks or {}
     # what the employee was last shown as «cannot be practised here» (kept by their own status request)
     off = set(row.unavailable or []) if active else set()
@@ -341,11 +526,17 @@ def colleague_out(row: EmployeeTraining | None, *, coming: Sequence[str] = (), b
         total=len(items),
         tasks=items,
         can_complete=active and all(i.done or not i.available for i in items),
-        stalled=active and cutoff is not None and row.started_at <= cutoff,
+        # a repeat the employee chose for themselves is never «overdue»: nobody is waiting for it
+        stalled=active and not own_wish and cutoff is not None and row.started_at <= cutoff,
         started_at=row.started_at,
         last_task_at=max(times) if times else None,
         completed_at=row.completed_at,
         completed_by_name=by_name,
+        voluntary=own_wish,
+        partial=bool(row.chosen),
+        attempt=row.attempt or 1,
+        started_by_name=None if own_wish else started_by_name,
+        plan=list(plan),
     )
 
 
@@ -356,17 +547,19 @@ async def employee_training_map(session: AsyncSession, employees: Sequence[Emplo
     if not employees:
         return {}
     rows = {r.employee_id: r for r in (await session.execute(select(EmployeeTraining).where(EmployeeTraining.employee_id.in_([e.id for e in employees])))).scalars()}
-    by = {r.completed_by for r in rows.values() if r.completed_by}
+    # who let them through / who sent them (back): a manager — never the employee's own name for a repeat of their own
+    by = {x for r in rows.values() for x in (r.completed_by, r.started_by) if x and x != r.employee_id}
     names = dict((await session.execute(select(Employee.id, Employee.full_name).where(Employee.id.in_(by)))).all()) if by else {}
-    new = {e.role_id for e in employees if e.id not in rows and e.role_id}
-    roles = {r.id: r for r in (await session.execute(select(Role).where(Role.id.in_(new)))).scalars()} if new else {}
+    role_ids = {e.role_id for e in employees if e.role_id}
+    roles = {r.id: r for r in (await session.execute(select(Role).where(Role.id.in_(role_ids)))).scalars()} if role_ids else {}
     out: dict[uuid.UUID, EmployeeTrainingOut] = {}
     for e in employees:
         row = rows.get(e.id)
+        plan = will_get(e, roles.get(e.role_id))
         if row is None:
-            out[e.id] = colleague_out(None, coming=will_get(e, roles.get(e.role_id)))
+            out[e.id] = colleague_out(None, plan=plan)
         else:
-            out[e.id] = colleague_out(row, by_name=names.get(row.completed_by) if row.completed_by else None)
+            out[e.id] = colleague_out(row, plan=plan, by_name=names.get(row.completed_by) if row.completed_by else None, started_by_name=names.get(row.started_by) if row.started_by else None)
     return out
 
 
@@ -391,49 +584,54 @@ async def _purge_sandbox(employee_id: uuid.UUID) -> None:
 
 async def skip(session: AsyncSession, employee_id: uuid.UUID, staff: StaffPrincipal, meta: RequestMeta) -> Employee:
     """A manager lets an employee through without the tasks (an experienced person): they work with the real data at
-    once. Nothing to do when they are not in training."""
+    once. A repeat the employee started themselves is simply ended — their training is again what it was before.
+    Nothing to do when they are not in training."""
     emp = await _target(session, employee_id, staff)
     row = await load_or_init(session, emp.id)
     if row is not None and row.status == "active":
         before = _counts(row)
-        row.status = "skipped"
-        row.completed_at = _now()
-        row.completed_by = staff.id
+        own_wish = row.previous is not None
+        if own_wish:
+            _restore(row)
+        else:
+            row.status = "skipped"
+            row.completed_at = _now()
+            row.completed_by = staff.id
         await session.flush()
         await audit(
             session, actor_type="staff", actor_id=staff.id, unit_id=emp.unit_id, action="training.skip", entity="employee", entity_id=emp.id,
-            after={"done": before[0], "total": before[1]}, ip=meta.ip, request_id=meta.request_id,
+            after={"done": before[0], "total": before[1], "back": row.status if own_wish else None}, ip=meta.ip, request_id=meta.request_id,
         )  # fmt: skip
         await _purge_sandbox(emp.id)
         await _drop_state(emp.id)
     return emp
 
 
-async def reset(session: AsyncSession, employee_id: uuid.UUID, staff: StaffPrincipal, meta: RequestMeta) -> Employee:
+async def reset(session: AsyncSession, employee_id: uuid.UUID, staff: StaffPrincipal, meta: RequestMeta, wanted: Sequence[str] | None = None) -> Employee:
     """A manager sends an employee (back) to the training: from their next request they work in the sandbox until the
-    tasks of their present role are done. 422 `no_tasks` when the role has nothing to practise."""
+    tasks are done — the whole plan of their present role, as on the first day, or only the tasks named (`wanted`).
+    It is mandatory: the employee cannot leave it by themselves. 422 `no_tasks` when the role has nothing to
+    practise, `unknown_task` / `task_not_in_role` for a wrong choice."""
     emp = await _target(session, employee_id, staff)
     if emp.is_super_admin:
         raise ValidationError(NOTHING_TO_LEARN, code="no_tasks")
-    mine = await _tasks_of(session, emp)
+    role = await session.get(Role, emp.role_id) if emp.role_id else None
+    mine = will_get(emp, role)
     if not mine:
         raise ValidationError(NOTHING_TO_LEARN, code="no_tasks")
+    keys, chosen = choose(mine, wanted)
+    known = await session.get(EmployeeTraining, emp.id) is not None
     row = await load_or_init(session, emp.id)
     if row is None:
         raise ValidationError(NOTHING_TO_LEARN, code="no_tasks")
-    row.status = "active"
-    row.tasks = mine
-    flag_modified(row, "tasks")
-    row.started_at = _now()
-    row.completed_at = None
-    row.completed_by = None
-    row.note = None
-    row.unavailable = []
-    row.reminded_at = None
+    _begin(row, keys, chosen, staff.id)
+    row.previous = None  # a manager's decision: not the employee's to leave
+    if known:
+        row.attempt = (row.attempt or 1) + 1
     await session.flush()
     await audit(
         session, actor_type="staff", actor_id=staff.id, unit_id=emp.unit_id, action="training.reset", entity="employee", entity_id=emp.id,
-        after={"tasks": sorted(mine)}, ip=meta.ip, request_id=meta.request_id,
+        after={"tasks": list(keys), "attempt": row.attempt or 1}, ip=meta.ip, request_id=meta.request_id,
     )  # fmt: skip
     await _purge_sandbox(emp.id)
     await _drop_state(emp.id)

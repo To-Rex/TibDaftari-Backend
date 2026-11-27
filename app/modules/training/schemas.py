@@ -51,6 +51,20 @@ class TrainingOut(CamelModel):
     #: the facility whose sandbox the employee practises in (where the samples were put)
     unit_id: str | None = None
     unit_name: str | None = None
+    #: a repeat they started themselves: they may leave it at any time (`POST /training/leave`)
+    voluntary: bool = False
+    #: only some tasks of the role were chosen for this round
+    partial: bool = False
+    #: which time this is (1 = the first training)
+    attempt: int = 1
+    #: every task the caller's role has NOW — what a repeat can be made of (`POST /training/restart`)
+    plan: list[str] = Field(default_factory=list)
+
+
+class TrainingRestartIn(CamelModel):
+    """Which tasks to go through (again). Omitted / empty = the whole plan of the role, as on the first day."""
+
+    tasks: list[str] | None = Field(default=None, max_length=32)
 
 
 class EmployeeTrainingOut(CamelModel):
@@ -71,6 +85,16 @@ class EmployeeTrainingOut(CamelModel):
     completed_at: datetime | None = None
     #: who let them through (state `skipped`)
     completed_by_name: str | None = None
+    #: a repeat the employee started themselves (they may leave it; nobody is reminded about it)
+    voluntary: bool = False
+    #: only some tasks of the role were chosen for this round
+    partial: bool = False
+    #: which time this is (1 = the first training)
+    attempt: int = 1
+    #: the manager who sent them (back) to the training; absent for the first training and for a voluntary repeat
+    started_by_name: str | None = None
+    #: every task the employee's role has NOW — what a manager can choose from when sending them (back)
+    plan: list[str] = Field(default_factory=list)
 
 
 class TrainingOverviewQuery(PageQuery):

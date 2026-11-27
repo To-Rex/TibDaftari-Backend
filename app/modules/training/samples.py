@@ -6,7 +6,10 @@ trainee's tasks need — made with the very services the real requests use (the 
 out of that facility's own catalogue, and only when nothing suitable is already waiting there:
 
 * `lab_item`        a paid cheque with one analysis that has a result form and waits for its result;
-* `submitted_item`  the same, with the result filled in and sent for approval (a template to print it must exist).
+* `submitted_item`  the same, with the result filled in and sent for approval (a template to print it must exist);
+* `open_order` / `unpaid_order`   a cheque to add a service to / one with something to pay — for a plan that begins
+                    in the middle of the desk work («only how to take a payment») and for a trainee whose own cheque
+                    is gone. Never a condition of a task: without it the checklist leads to the step before.
 
 A facility whose catalogue has no such service simply has nothing to practise these on — the task is then reported
 as unavailable and does not hold the training back.
@@ -30,12 +33,18 @@ from app.core.scope import load_scope
 from app.infrastructure.db import realm
 from app.infrastructure.db.base import alive
 from app.infrastructure.db.models import AttributeSchema, Order, OrderItem, OrgUnit, Patient
-from app.modules.training.tasks import LAB_ITEM, PAID_SERVICE, SERVICE, SUBMITTED_ITEM
+from app.modules.training.tasks import (
+    LAB_ITEM,
+    OPEN_ORDER,
+    PAID_SERVICE,
+    SAMPLE_NOTE,
+    SERVICE,
+    SUBMITTED_ITEM,
+    UNPAID_ORDER,
+)
 
 log = logging.getLogger("app.training")
 
-#: how the practice rows are told apart on the screen
-SAMPLE_NOTE = "O‘quv namunasi"
 SAMPLE_PATIENTS = (("Namunaviy Bemor Birinchi", "male", date(1990, 5, 14)), ("Namunaviy Bemor Ikkinchi", "female", date(1985, 9, 2)))
 SAMPLE_TECHNICIAN = "O‘quv laboranti"
 _META = RequestMeta(ip=None, request_id=None, user_agent="training")
@@ -225,6 +234,35 @@ async def _make(session: AsyncSession, staff: StaffPrincipal, facility: OrgUnit,
     return False
 
 
+async def _desk(session: AsyncSession, staff: StaffPrincipal, facility: OrgUnit, *, to_pay: bool) -> bool:
+    """A sample cheque of the trainee's own to continue the desk work on: empty (a service is added to it), or
+    (`to_pay`) with one paid service and nothing paid yet. Made only when they have no such cheque already."""
+    from app.modules.orders import service as orders_svc
+    from app.modules.orders.schemas import CreateOrderIn
+    from app.modules.training import targets
+
+    if await targets.own_order(session, staff, facility.id, unpaid=to_pay) is not None:
+        return True
+    scope = await load_scope(session, facility.id)
+    if scope is None:
+        return False
+    offered = sorted((s for s in await _offered(session, facility) if _price(s) > 0), key=lambda s: (_price(s), s.name)) if to_pay else [None]
+    for service in offered[:_TRIES]:
+        try:
+            async with session.begin_nested():
+                patient_id = await _patient(session, staff, facility, 0)
+                made = await orders_svc.create_order(
+                    session, scope, staff, CreateOrderIn(patient_id=str(patient_id), unit_id=str(facility.id), service_type_ids=[service.id] if service is not None else [], note=SAMPLE_NOTE), _META
+                )
+                if to_pay and made.order.total <= 0:
+                    raise AppError("nothing to pay")
+            return True
+        except AppError as exc:
+            log.info("training sample cheque skipped (%s)", exc.message)
+            continue
+    return False
+
+
 async def ensure(session: AsyncSession, staff: StaffPrincipal, facility: OrgUnit, needs: set[str], *, patients: bool = False) -> dict[str, bool]:
     """Put what `needs` names into the facility's sandbox when it is not there; says, per need, whether it is there now.
     `patients` also leaves two sample patients for a receptionist to look up."""
@@ -250,6 +288,10 @@ async def ensure(session: AsyncSession, staff: StaffPrincipal, facility: OrgUnit
                     await _patient(session, staff, facility, i)
         except AppError as exc:
             log.info("training sample patients skipped (%s)", exc.message)
+    if UNPAID_ORDER in needs:
+        out[UNPAID_ORDER] = await _desk(session, staff, facility, to_pay=True)
+    elif OPEN_ORDER in needs:
+        out[OPEN_ORDER] = await _desk(session, staff, facility, to_pay=False)
     return out
 
 

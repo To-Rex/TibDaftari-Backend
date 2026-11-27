@@ -72,7 +72,10 @@ verbatim in the UI.
 | 403 | payment_locked | To‘lovga 1 kundan ko‘p vaqt o‘tgan — uni faqat administrator yoki rahbar o‘zgartira oladi |
 | 403 | training_mode | O‘quv rejimida bu amalni bajarib bo‘lmaydi. Avval o‘quv topshiriqlarini yakunlang.  (an employee in training: any write outside `training.tasks.ALLOWED_WRITES`) |
 | 409 | training_incomplete | Avval barcha o‘quv topshiriqlarini bajaring  (`POST /training/complete` too early) |
-| 422 | no_tasks | Bu xodimning rolida mashq qilinadigan topshiriq yo‘q  (`…/training/reset` for a superadmin / a role with nothing to practise) |
+| 422 | no_tasks | Bu xodimning rolida mashq qilinadigan topshiriq yo‘q  (`…/training/reset` for a superadmin / a role with nothing to practise; `POST /training/restart`: «Sizning rolingizda …») |
+| 422 | unknown_task | Bunday o‘quv topshirig‘i yo‘q  (a task key that does not exist in `tasks` of `…/training/reset` / `POST /training/restart`) |
+| 422 | task_not_in_role | Tanlangan topshiriq bu rolga tegishli emas  (a chosen task the employee's role does not have) |
+| 409 | training_mandatory | Bu o‘quv majburiy: undan faqat topshiriqlarni bajarib yoki rahbar ruxsati bilan chiqiladi  (`POST /training/leave` in a training the employee did not start themselves) |
 | 503 | training_unavailable | O‘quv muhiti hozircha tayyor emas. Birozdan so‘ng qayta urinib ko‘ring.  (the sandbox is not built: a trainee is never let through to the real data) |
 | 404 | not_found | Birlik topilmadi · Muassasa topilmadi · Xodim topilmadi · Rol topilmadi · Bemor topilmadi · Bu raqam bilan bemor topilmadi. Klinikaga murojaat qiling. · Namuna muassasa topilmadi · Kategoriya topilmadi · Xizmat topilmadi · Sxema topilmadi · Shablon topilmadi · Rasm topilmadi · Chek topilmadi · Tahlil topilmadi · To‘lov topilmadi · Hujjat topilmadi · Fayl topilmadi |
 | 409 | conflict | Bu login band · Bu kod band  (a unit code or a service code already used) |
@@ -858,7 +861,7 @@ if status != cancelled: status = completed if (active and all approved) else ope
   `training.skip`; anything else is a no-op. `POST /employees/{id}/training/reset` — anyone with tasks → `active`
   with every task undone, audit `training.reset`; a superadmin or a role without tasks → 422 `no_tasks`.
   `EmployeeOut.training` = `{state, done, total, tasks[{key, done, doneAt, available}], canComplete, stalled,
-  startedAt, lastTaskAt, completedAt, completedByName}`; `pending` = no row yet (has not signed in since the
+  startedAt, lastTaskAt, completedAt, completedByName, voluntary, partial, attempt, startedByName, plan}`; `pending` = no row yet (has not signed in since the
   training exists) with the tasks the first sign-in will give — a role with none is `exempt`. `available: false`
   is what the employee was last shown as «cannot be practised here» (`employee_training.unavailable`, written by
   their own status request): `canComplete` means the same on both sides. `stalled` = in the training
@@ -887,5 +890,28 @@ if status != cancelled: status = completed if (active and all approved) else ope
   or longer, again every `TRAINING_REMIND_EVERY_DAYS` (default 7) while it lasts; four or more such employees for
   one reader in one run → ONE `training.stalled_many` `{count, days}` → `/admin/training?state=stalled`.
   `…/training/reset` starts the count again.
+* **A round** is the whole plan — every task the role has now, as on the first day — or only chosen tasks
+  (`tasks: [key…]` in the request, kept in `chosen`; choosing all of them is the whole plan). Unknown key → 422
+  `unknown_task`; a task the role does not have → 422 `task_not_in_role`. `partial` says which it is, `attempt`
+  which time it is (1 = the first training), `plan` = every task the role has now (what can be chosen from).
+* **Again, by a manager.** `POST /employees/{id}/training/reset` with optional `{tasks}`: the employee is in the
+  training again from their next request — MANDATORY (they cannot leave it), `startedByName` = the manager,
+  `attempt` + 1, the sandbox rows of an earlier round removed. Also for someone already in a mandatory training
+  (another plan).
+* **Again, by the employee.** `POST /training/restart?unitId=` with optional `{tasks}` (any employee whose role
+  has tasks; 422 `no_tasks` otherwise; 503 `training_unavailable` when the sandbox is not there — nobody is moved
+  into it then): VOLUNTARY — the row as it stood is kept (`previous`), `attempt` + 1, the answer's `X-Training`
+  is `1`. `POST /training/leave` ends it at any moment: the row is exactly what it was (status, marks, dates,
+  attempt), the sandbox rows are removed, `X-Training: 0`; 409 `training_mandatory` when the training is not
+  theirs to leave; a no-op when not in one. Restarting inside a voluntary repeat changes the choice and keeps the
+  same way back. Finishing it → `passed` (nothing to go back to). A manager's `…/skip` of a voluntary repeat gives
+  back what was before (never `skipped`). A voluntary repeat is never `stalled`, nobody is reminded about it and
+  nobody is told when it is finished.
+  Inside a MANDATORY training `restart` starts the SAME tasks from the beginning (marks and practice rows gone);
+  a choice sent with it is ignored — a mandatory plan is not the employee's to shorten.
+* **Something to begin with.** A plan whose first desk task is not the beginning of the chain gets a sample cheque
+  of the trainee's own: with `payment_take` and neither `order_create` nor `order_add_item` left to do — a cheque
+  with one paid service, unpaid; with `order_add_item` and no `order_create` left — an empty open cheque. Only
+  when they have no such cheque already; never a condition of the task.
 * **The session** carries `training` (`StaffSessionOut`), and every answer to a staff request the header
   `X-Training: 1|0` (the state after the request for `/training/*`).

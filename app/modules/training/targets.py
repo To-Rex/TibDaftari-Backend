@@ -22,8 +22,8 @@ from app.core.exceptions import AppError
 from app.infrastructure.db import realm
 from app.infrastructure.db.base import alive
 from app.infrastructure.db.models import Order, OrderItem, Patient
-from app.modules.training.samples import SAMPLE_NOTE
 from app.modules.training.schemas import TrainingTargetOut
+from app.modules.training.tasks import SAMPLE_NOTE
 
 #: an analysis whose result may still be entered
 ENTERABLE = ("pending", "rejected", "entered")
@@ -45,7 +45,7 @@ async def _patient(session: AsyncSession, staff: StaffPrincipal, facility_id: uu
     ).scalar_one_or_none()
 
 
-async def _order(session: AsyncSession, staff: StaffPrincipal, facility_id: uuid.UUID, *, unpaid: bool = False) -> uuid.UUID | None:
+async def own_order(session: AsyncSession, staff: StaffPrincipal, facility_id: uuid.UUID, *, unpaid: bool = False) -> uuid.UUID | None:
     """The employee's newest cheque that is still open — (`unpaid`) one with something left to pay."""
     stmt = select(Order.id).where(Order.created_by_employee_id == staff.id, Order.unit_id == facility_id, Order.status.notin_(_OPEN_ORDER), alive(Order))
     if unpaid:
@@ -104,7 +104,7 @@ async def find(session: AsyncSession, staff: StaffPrincipal, facility_id: uuid.U
     desk = wanted & {"order_create", "order_add_item", "payment_take"}
     if desk:
         # a cheque to continue with; without one — the patient to open a cheque for (the step before it)
-        open_order = await _order(session, staff, facility_id) if desk - {"order_create"} else None
+        open_order = await own_order(session, staff, facility_id) if desk - {"order_create"} else None
         patient_id = await _patient(session, staff, facility_id) if "order_create" in desk or open_order is None else None
         patient = TrainingTargetOut(patient_id=str(patient_id)) if patient_id is not None else None
         if "order_create" in desk and patient is not None:
@@ -115,7 +115,7 @@ async def find(session: AsyncSession, staff: StaffPrincipal, facility_id: uuid.U
                 out["order_add_item"] = target
         if "payment_take" in desk:
             # a cheque with something left to pay; else the open one (a service is added to it first)
-            unpaid = await _order(session, staff, facility_id, unpaid=True) if open_order is not None else None
+            unpaid = await own_order(session, staff, facility_id, unpaid=True) if open_order is not None else None
             target = TrainingTargetOut(order_id=str(unpaid or open_order)) if open_order is not None else patient
             if target is not None:
                 out["payment_take"] = target
