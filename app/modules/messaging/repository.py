@@ -14,21 +14,30 @@ from app.core.schemas import PageQuery
 from app.core.textutil import digits, fold
 from app.infrastructure.db.base import alive
 from app.infrastructure.db.models import (
+    Employee,
     MessagingAccount,
     Notification,
     Order,
     OrgUnitClosure,
     OtpChallenge,
     OutboxMessage,
+    Patient,
 )
 from app.infrastructure.db.models import Session as SessionModel
 
 QUEUE_STATUSES = ("queued", "scheduled")
 
 
-def outbox_select(unit_ids: Sequence[uuid.UUID], *, status: str | None, kind: str | None, search: str | None) -> Select:
-    """Outbox rows of the given facilities with the §8 filters (uses ix_outbox_unit_status_created)."""
+def outbox_select(
+    unit_ids: Sequence[uuid.UUID], *, status: str | None, kind: str | None, search: str | None, created_from: datetime | None = None, created_to: datetime | None = None
+) -> Select:
+    """Outbox rows of the given facilities with the §8 filters (uses ix_outbox_unit_status_created); `created_from`
+    / `created_to` = the half-open interval the message was written in."""
     stmt = select(OutboxMessage).where(OutboxMessage.unit_id.in_(unit_ids), alive(OutboxMessage))
+    if created_from is not None:
+        stmt = stmt.where(OutboxMessage.created_at >= created_from)
+    if created_to is not None:
+        stmt = stmt.where(OutboxMessage.created_at < created_to)
     if status:
         # the UI never sees `sending`; it belongs to the `queued` bucket
         stmt = stmt.where(OutboxMessage.status.in_(("queued", "sending")) if status == "queued" else OutboxMessage.status == status)
@@ -45,16 +54,78 @@ def outbox_select(unit_ids: Sequence[uuid.UUID], *, status: str | None, kind: st
     return stmt
 
 
-async def list_outbox(session: AsyncSession, unit_ids: Sequence[uuid.UUID], q: PageQuery, *, status: str | None, kind: str | None) -> tuple[list[OutboxMessage], int]:
+async def list_outbox(
+    session: AsyncSession, unit_ids: Sequence[uuid.UUID], q: PageQuery, *, status: str | None, kind: str | None, created_from: datetime | None = None, created_to: datetime | None = None
+) -> tuple[list[OutboxMessage], int]:
     """Page of outbox rows, newest first (fixed sort)."""
-    stmt = outbox_select(unit_ids, status=status, kind=kind, search=q.search)
+    stmt = outbox_select(unit_ids, status=status, kind=kind, search=q.search, created_from=created_from, created_to=created_to)
     return await paginate_query(session, stmt, q, order_by=[OutboxMessage.created_at.desc(), OutboxMessage.id.desc()])
 
 
-async def outbox_counts(session: AsyncSession, unit_ids: Sequence[uuid.UUID], *, kind: str | None, search: str | None) -> dict[str, int]:
+async def outbox_counts(
+    session: AsyncSession, unit_ids: Sequence[uuid.UUID], *, kind: str | None, search: str | None, created_from: datetime | None = None, created_to: datetime | None = None
+) -> dict[str, int]:
     """status → count for the outbox filters (one GROUP BY instead of one request per status tab)."""
-    base = outbox_select(unit_ids, status=None, kind=kind, search=search).with_only_columns(OutboxMessage.status, func.count()).order_by(None).group_by(OutboxMessage.status)
+    base = (
+        outbox_select(unit_ids, status=None, kind=kind, search=search, created_from=created_from, created_to=created_to)
+        .with_only_columns(OutboxMessage.status, func.count())
+        .order_by(None)
+        .group_by(OutboxMessage.status)
+    )
     return {str(st): int(n) for st, n in (await session.execute(base)).all()}
+
+
+async def get_outbox(session: AsyncSession, unit_ids: Sequence[uuid.UUID], message_id: uuid.UUID, *, lock: bool = False) -> OutboxMessage | None:
+    """One alive outbox row of the given facilities (`lock` = FOR UPDATE: whoever acts on it next waits)."""
+    stmt = select(OutboxMessage).where(OutboxMessage.id == message_id, OutboxMessage.unit_id.in_(unit_ids), alive(OutboxMessage))
+    if lock:
+        stmt = stmt.with_for_update()
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def outbox_names(session: AsyncSession, rows: Sequence[OutboxMessage]) -> tuple[dict[uuid.UUID, str], dict[uuid.UUID, str], dict[uuid.UUID, str]]:
+    """`(patient names, cheque numbers, sender names)` for a page of outbox rows — one query per kind that is
+    present. Deleted rows are named too: the journal still says who a message was for."""
+
+    async def named(model: type, column, ids: set[uuid.UUID]) -> dict[uuid.UUID, str]:
+        if not ids:
+            return {}
+        return {i: str(n) for i, n in (await session.execute(select(model.id, column).where(model.id.in_(ids)))).all()}
+
+    return (
+        await named(Patient, Patient.full_name, {m.patient_id for m in rows if m.patient_id}),
+        await named(Order, Order.number, {m.order_id for m in rows if m.order_id}),
+        await named(Employee, Employee.full_name, {m.created_by for m in rows if m.created_by}),
+    )
+
+
+async def cancel_outbox(session: AsyncSession, message_id: uuid.UUID, now: datetime) -> OutboxMessage | None:
+    """`scheduled` / `queued` → `cancelled`, in one statement: a row the dispatcher has already picked up
+    (`sending`) or finished is left alone and None comes back."""
+    stmt = (
+        update(OutboxMessage)
+        .where(OutboxMessage.id == message_id, alive(OutboxMessage), OutboxMessage.status.in_(QUEUE_STATUSES))
+        .values(status="cancelled", next_attempt_at=None, leased_until=None, updated_at=now)
+        .returning(OutboxMessage)
+        .execution_options(populate_existing=True)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def repeat_in_flight(session: AsyncSession, original: OutboxMessage) -> bool:
+    """Is a copy of `original` (sent again from the journal) still on its way?"""
+    stmt = (
+        select(OutboxMessage.id)
+        .where(
+            alive(OutboxMessage),
+            OutboxMessage.unit_id == original.unit_id,
+            OutboxMessage.to == original.to,
+            OutboxMessage.status.in_((*QUEUE_STATUSES, "sending")),
+            OutboxMessage.payload["resendOf"].astext == str(original.id),
+        )
+        .limit(1)
+    )
+    return (await session.execute(stmt)).first() is not None
 
 
 async def count_queued(session: AsyncSession, unit_ids: Sequence[uuid.UUID] | None) -> int:

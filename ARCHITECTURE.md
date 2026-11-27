@@ -133,7 +133,7 @@ to it:
   put into the facility's sandbox by `samples.ensure` through the very services the real requests use. A task that
   cannot be done in the facility (no service, no result form, no template) is reported `available: false` and does
   not hold the training back; the tasks follow the role when it changes (`service._reconcile`).
-* **Side effects** — a practice SMS / Telegram message is stored as delivered and never leaves (`messaging._enqueue`;
+* **Side effects** — a practice SMS / Telegram message is stored as delivered and never leaves (`messaging._practice` — automatic messages, manual sends and repeats alike;
   the outbox worker reads `public` only); result and receipt PDFs are rendered with «O‘QUV NAMUNASI» across the page
   and are not stored (`stored_files` is real); a practice document's public link resolves nowhere.
 * **The end** — `POST /training/complete` (409 `training_incomplete` until `canComplete`), or a manager's
@@ -228,6 +228,7 @@ orders:    GET/POST /units/{uid}/orders  GET /units/{uid}/orders/summary  GET /u
            POST /documents/{id}/printed
            public: GET /d/{token}  POST /d/{token}/open  POST /d/{token}/otp/request  POST /d/{token}/otp/verify  GET /v/{token}
 messaging: GET /units/{uid}/outbox  GET /units/{uid}/outbox/counts  POST /units/{uid}/messages/send
+           GET /units/{uid}/outbox/{id}  POST /units/{uid}/outbox/{id}/cancel  POST /units/{uid}/outbox/{id}/resend
            GET /notifications  POST /notifications/read
 reports:   GET /units/{uid}/reports/dashboard  GET /units/{uid}/reports/breakdown  GET /units/{uid}/reports/export.xlsx
            GET /units/{uid}/reports/{patients,results,results/list,services}

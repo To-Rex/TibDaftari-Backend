@@ -81,6 +81,7 @@ ALLOWED_WRITES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("POST", _p(rf"/items/{_ID}/(reject|revoke)")),
     ("POST", _p(rf"/documents/{_ID}/(printed|sms)")),
     ("POST", _p(rf"/units/{_ID}/messages/send")),
+    ("POST", _p(rf"/units/{_ID}/outbox/{_ID}/(cancel|resend)")),
     ("POST", _p(rf"/templates/{_ID}/preview\.pdf")),
 )
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request, Response
@@ -31,6 +32,24 @@ async def list_outbox(scope: Scope, q: Annotated[OutboxQuery, Query()], staff: S
 async def outbox_counts(scope: Scope, q: Annotated[OutboxQuery, Query()], staff: Staff, session: DbSession) -> OutboxCountsOut:
     staff.require("messaging.send", "reports.operations.read")
     return await service.outbox_counts(session, scope, q, staff)
+
+
+@router.get("/units/{unit_id}/outbox/{message_id}", response_model=OutboxMessageOut, summary="One outbox message of the unit — the full text, who it was for and what can be done with it")
+async def get_outbox_message(scope: Scope, message_id: uuid.UUID, staff: Staff, session: DbSession) -> OutboxMessageOut:
+    staff.require("messaging.send", "reports.operations.read")
+    return await service.get_message(session, scope, staff, message_id)
+
+
+@router.post("/units/{unit_id}/outbox/{message_id}/cancel", response_model=OutboxMessageOut, summary="Take a waiting (scheduled / queued) message out of the queue")
+async def cancel_outbox_message(scope: Scope, message_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta) -> OutboxMessageOut:
+    staff.require("messaging.send")
+    return await service.cancel(session, scope, staff, message_id, meta)
+
+
+@router.post("/units/{unit_id}/outbox/{message_id}/resend", response_model=OutboxMessageOut, status_code=201, summary="Send a finished SMS again as a new message")
+async def resend_outbox_message(scope: Scope, message_id: uuid.UUID, staff: Staff, session: DbSession, meta: Meta) -> OutboxMessageOut:
+    staff.require("messaging.send")
+    return await service.resend(session, scope, staff, message_id, meta)
 
 
 @router.post("/units/{unit_id}/messages/send", response_model=list[OutboxMessageOut], status_code=201, summary="Queue an SMS to one or many recipients from a facility")

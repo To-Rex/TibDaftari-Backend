@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Literal
 
 from pydantic import Field, field_validator
@@ -19,11 +19,14 @@ NotificationKind = Literal["info", "success", "warning", "error"]
 class OutboxQuery(PageQuery):
     """`listOutbox` filters (sort is fixed to createdAt desc; sortBy/sortDir are ignored).
 
-    `unitId` narrows the path unit's subtree to the given sub-units (facilities, districts …)."""
+    `unitId` narrows the path unit's subtree to the given sub-units (facilities, districts …); `dateFrom` /
+    `dateTo` are inclusive calendar days in Asia/Tashkent the message was written on."""
 
     status: MessageStatus | None = None
     kind: MessageKind | None = None
     unit_id: list[str] | None = Field(default=None, max_length=200)
+    date_from: date | None = None
+    date_to: date | None = None
 
 
 class OutboxCountsOut(CamelModel):
@@ -65,6 +68,20 @@ class OutboxMessageOut(CamelModel):
     cost: float | None = None
     #: Eskiz: the provider's own state word (DELIVERED, EXPIRED …)
     provider_status: str | None = None
+    #: who the message is for and which cheque it is about, by name (the row itself keeps only the ids)
+    patient_name: str | None = None
+    order_number: str | None = None
+    #: the employee who wrote it or sent it again; None = the system sent it on its own (a receipt, a result, a code)
+    sent_by_name: str | None = None
+    #: a message waiting for another try after a provider hiccup: when that try is due
+    next_attempt_at: datetime | None = None
+    #: the text is a credential (a code, a password): the journal keeps it masked and it cannot be sent again
+    secret: bool = False
+    #: the message this one repeats (it was sent again from the journal)
+    resend_of: uuid.UUID | None = None
+    #: what the reader may do with it right now (their permission and the message's state together)
+    can_cancel: bool = False
+    can_resend: bool = False
 
     @field_validator("status", mode="before")
     @classmethod

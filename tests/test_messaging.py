@@ -78,6 +78,7 @@ OUTBOX_KEYS = {
     "id", "unitId", "unitName", "patientId", "orderId", "channel", "kind", "to", "text", "status",
     "scheduledAt", "sentAt", "attempts", "providerMessageId", "error", "createdAt", "updatedAt",
     "countryCode", "parts", "cost", "providerStatus",
+    "patientName", "orderNumber", "sentByName", "nextAttemptAt", "secret", "resendOf", "canCancel", "canResend",
 }  # fmt: skip
 
 

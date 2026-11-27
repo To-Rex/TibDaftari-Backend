@@ -168,6 +168,8 @@ def test_task_and_whitelist_rules_cover_real_routes_only() -> None:
             ("POST", "/training/restart"),
             ("POST", "/units/{unit_id}/messages/send"),
             ("POST", "/units/{unit_id}/orders"),
+            ("POST", "/units/{unit_id}/outbox/{message_id}/cancel"),
+            ("POST", "/units/{unit_id}/outbox/{message_id}/resend"),
             ("POST", "/units/{unit_id}/patients"),
             ("POST", "/units/{unit_id}/patients/duplicates"),
             ("PUT", "/items/{item_id}/values"),
@@ -356,6 +358,12 @@ def test_a_reception_trainee_works_only_in_the_sandbox(env: dict[str, Any]) -> N
     assert _one(env, "SELECT count(*) FROM training.audit_log WHERE actor_id = :e AND action = 'order.create'", e=env["ids"]["reg"]) == 1
     # the facility's real cheque numbering was not used up
     assert _one(env, "SELECT count(*) FROM public.order_counters WHERE unit_id = :u", u=fac) == 0
+    # a message the trainee writes by hand, and one they send again from the journal, are practice like the rest
+    sent = c.post(f"{API}/units/{fac}/messages/send", json={"to": ["998900000077"], "text": "T-train salom", "kind": "reminder"}, headers=h)
+    assert sent.status_code == 201 and sent.json()[0]["status"] == "delivered", sent.text
+    again = c.post(f"{API}/units/{fac}/outbox/{sent.json()[0]['id']}/resend", headers=h)
+    assert again.status_code == 201 and again.json()["status"] == "delivered" and again.json()["resendOf"] == sent.json()[0]["id"], again.text
+    assert c.post(f"{API}/units/{fac}/outbox/{again.json()['id']}/cancel", headers=h).status_code == 409  # allowed to try — nothing waits
     # nothing was queued for a real phone: a practice message is "sent" on the spot and never leaves the sandbox
     assert _one(env, "SELECT count(*) FROM public.outbox_messages WHERE unit_id = :u", u=fac) == 0
     assert _one(env, "SELECT count(*) FROM training.outbox_messages WHERE unit_id = :u AND status IN ('queued', 'sending')", u=fac) == 0
