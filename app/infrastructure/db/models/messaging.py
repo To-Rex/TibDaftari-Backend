@@ -93,6 +93,10 @@ class Notification(PKMixin, AuditMixin, SoftDeleteMixin, Base):
     kind: Mapped[str] = mapped_column(String(10), nullable=False, default="info")  # info | success | warning | error
     link: Mapped[str | None] = mapped_column(String(300))
     read_by: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)), nullable=False, default=list)
+    #: what a notice written by the system is about (`training.passed` …) with its values: the interface says it in
+    #: the reader's language; `title` / `body` stay the Uzbek text (and all there is for a notice without a code)
+    code: Mapped[str | None] = mapped_column(String(40))
+    params: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
     __table_args__ = (Index("ix_notifications_unit_created", "unit_id", "created_at"),)
 

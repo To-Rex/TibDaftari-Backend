@@ -750,6 +750,10 @@ if status != cancelled: status = completed if (active and all approved) else ope
 * `send({to[], text, kind, scheduledAt?, unitId?})` (`POST /units/{id}/messages/send`): the sending facility = the path unit when it is one, else `unitId` (422 `facility_required`); one message per recipient (normalise phones, dedupe); status scheduled if scheduledAt future else queued; channel sms; permission messaging.send, >1 recipient requires messaging.broadcast. Real dispatch by the outbox worker → Xabarchi `POST /api/v1/public/messages` (X-API-Key) with the key of the account the message was queued with while it can still send, otherwise whatever account is in effect for its facility now; no usable account → `failed` with error code `sms_not_configured`; provider id stored; retries with backoff (max attempts) → failed with error text. Services queue optional SMS through `enqueue_sms_if_configured(unit)` — nothing is recorded when no account is in effect (`sms` = `not_configured` in their answers).
 * `notifications()`: for everyone, for my units (or the units above them) or addressed to me (`employee_id` null or = me), newest first, limit 50; `read` = me ∈ read_by. `markRead(id?)`: mark one or all visible.
 * System notifications created by services: e.g. approve failure of SMS, submitted items pending approval (daily aggregate optional).
+* A notice the system itself writes names what it is about: `code` (e.g. `training.passed`) + `params` (the
+  values of its sentence). The interface words it in the reader's language when it knows the code; `title` /
+  `body` are always filled with the Uzbek wording (an older client, an unknown code). A notice without a `code`
+  (the assistant's scheduled answers, anything a person wrote) is shown as it is. Codes so far: §13 «Who is told».
 
 ## 9. Reports
 * Every report (`GET /units/{id}/reports/…`) is over the URL unit's subtree, optionally narrowed by `unitId` to a
@@ -853,7 +857,35 @@ if status != cancelled: status = completed if (active and all approved) else ope
   `POST /employees/{id}/training/skip` — `active` → `skipped` (`completedBy`), sandbox rows removed, audit
   `training.skip`; anything else is a no-op. `POST /employees/{id}/training/reset` — anyone with tasks → `active`
   with every task undone, audit `training.reset`; a superadmin or a role without tasks → 422 `no_tasks`.
-  `EmployeeOut.training` = `{state, done, total, startedAt, completedAt, completedByName}`; `pending` = no row yet
-  (has not signed in since the training exists).
+  `EmployeeOut.training` = `{state, done, total, tasks[{key, done, doneAt, available}], canComplete, stalled,
+  startedAt, lastTaskAt, completedAt, completedByName}`; `pending` = no row yet (has not signed in since the
+  training exists) with the tasks the first sign-in will give — a role with none is `exempt`. `available: false`
+  is what the employee was last shown as «cannot be practised here» (`employee_training.unavailable`, written by
+  their own status request): `canComplete` means the same on both sides. `stalled` = in the training
+  `TRAINING_STALL_DAYS` (default 3; 0 = never) or longer.
+* **Where to continue.** The caller's own `GET /training/status` gives each remaining task a `target`
+  `{patientId?, orderId?, itemId?}` — the record of THEIR sandbox it is done on (what they made themselves before
+  the samples): `order_create` → a patient; `order_add_item` → their open cheque (none → the patient);
+  `payment_take` → their cheque with something left to pay, else the open one (none → the patient);
+  `result_enter` → an analysis `pending` / `rejected` / `entered`; `result_submit` → one already `entered`, else
+  as before; `result_approve` → a `submitted` one that can be approved. `patient_create` has none (a form). A
+  manager never receives a target.
+* **The overview.** `GET /training/overview` (`admin.employee.read`): active accounts inside the caller's scope
+  (a superadmin: every company; `unitId` narrows — outside the scope → 403), never a superadmin. `state` =
+  `open` (default: `active` or `pending`) | `active` | `stalled` | `ready` (every task done or unavailable,
+  «finish» not pressed) | `pending` | `passed` | `skipped` | `all`; `search` (name / login), paging, `sortBy` =
+  `fullName | startedAt | completedAt | lastLoginAt | progress` (default: longest in the training first; the
+  finished — newest first). Answer: `items[{id, fullName, login, roleName, unitId, unitName, lastLoginAt,
+  training}]`, `counts{active, stalled, ready, pending, passed, skipped}` (of the same scope and search, whatever
+  `state` is), `stallDays`.
+* **Who is told.** Every active superadmin, and every active employee whose scope (home or extra unit) covers the
+  employee's unit and who holds `admin.employee.write` — never the employee themselves, never someone who only
+  looks (a rahbar). In-app notices addressed to each of them, with `code` + `params` and a link:
+  `training.passed` `{employeeId, name, unit, done, total, days}` → `/admin/employees/{id}` when the employee
+  finishes (not when a manager lets them through — that is the manager's own decision);
+  `training.stalled` `{employeeId, name, unit, days, done, total}` once they have been in it `TRAINING_STALL_DAYS`
+  or longer, again every `TRAINING_REMIND_EVERY_DAYS` (default 7) while it lasts; four or more such employees for
+  one reader in one run → ONE `training.stalled_many` `{count, days}` → `/admin/training?state=stalled`.
+  `…/training/reset` starts the count again.
 * **The session** carries `training` (`StaffSessionOut`), and every answer to a staff request the header
   `X-Training: 1|0` (the state after the request for `/training/*`).

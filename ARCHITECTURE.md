@@ -140,6 +140,20 @@ to it:
   `POST /employees/{id}/training/skip`; `…/reset` sends anyone (back). The employee's sandbox rows are removed
   (`samples.purge` — every table named with the schema; `samples.sweep` at start clears leftovers). Every staff
   answer carries `X-Training: 1|0`, so an open page follows the change at once.
+* **Where to continue** (`targets.py`) — the employee's own status names, per remaining task, the very record it is
+  done on (`task.target`: the patient to open a cheque for, the cheque to add a service to or to pay, the analysis
+  waiting for its result, the result waiting for approval — their own work before the samples). Looked for in
+  their sandbox only; the ids mean nothing anywhere else and are never given to a manager.
+* **Seen from above** (`oversight.py`, migration `v2_0012`) — `EmployeeOut.training` carries every task with its
+  mark; what the employee was last shown as «cannot be practised here» is kept in `employee_training.unavailable`,
+  so a manager sees the same picture (`canComplete`). `GET /training/overview` is one list of everyone the
+  training concerns inside the caller's scope (a superadmin: everywhere) with counts per state. The people who
+  answer for an employee — every superadmin, and every employee whose scope covers their unit and who holds
+  `admin.employee.write` — get an in-app notice when the employee finishes (`announce_passed`) and when they have
+  been in the training `TRAINING_STALL_DAYS` or longer (worker `training-reminders`, `remind_once`: a row is claimed
+  under a lock before anyone is told, repeated every `TRAINING_REMIND_EVERY_DAYS`, many people for one reader are
+  one notice). Such a notice carries `code` + `params` (`notifications.code/params`): the interface says it in
+  the reader's language, `title` / `body` stay the Uzbek wording.
 * `TRAINING_ENABLED=false` switches all of it off.
 
 ## Rules every module follows
@@ -214,6 +228,7 @@ portal:    GET /portal/overview  GET /portal/orders/{id}  GET /portal/documents/
 files:     GET /files/{id}  (public assets & PDFs by unguessable id; PDFs also via /d/{token})
 telegram:  POST /telegram/webhook/{accountId}/{secret} (optional; polling is default)
 training:  GET /training/status?unitId=  POST /training/complete?unitId=  (the caller's own training)
+           GET /training/overview?state=&unitId=&search=  (everyone it concerns in the caller's scope — admin.employee.read)
            POST /employees/{id}/training/skip | reset  (a manager: let through / send back — admin.employee.write)
 health:    GET /health  GET /health/ready
 ```

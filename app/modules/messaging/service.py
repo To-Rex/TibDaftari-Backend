@@ -306,9 +306,13 @@ async def notify(
     body: str,
     kind: str = "info",
     link: str | None = None,
+    code: str | None = None,
+    params: Mapping[str, Any] | None = None,
 ) -> Notification:
-    """An in-app notice for `unit_id` and everything under it (None = everyone), optionally for one employee only."""
-    n = Notification(unit_id=unit_id, employee_id=employee_id, title=title, body=body, kind=kind, link=link, read_by=[])
+    """An in-app notice for `unit_id` and everything under it (None = everyone), optionally for one employee only.
+    A notice the system itself writes names what it is about (`code` + `params`), so the interface can say it in the
+    reader's language; `title` / `body` are then the Uzbek wording an older client still shows."""
+    n = Notification(unit_id=unit_id, employee_id=employee_id, title=title, body=body, kind=kind, link=link, read_by=[], code=code, params=dict(params) if params else None)
     session.add(n)
     await session.flush()
     return n
@@ -479,7 +483,7 @@ async def list_notifications(session: AsyncSession, staff: StaffPrincipal) -> li
     `read` = me ∈ read_by."""
     rows = await repo.list_notifications(session, staff.id, _notification_roots(staff))
     return [
-        NotificationOut(id=n.id, title=n.title, body=n.body, kind=n.kind, created_at=n.created_at, read=staff.id in (n.read_by or []), link=n.link)
+        NotificationOut(id=n.id, title=n.title, body=n.body, kind=n.kind, created_at=n.created_at, read=staff.id in (n.read_by or []), link=n.link, code=n.code, params=n.params)
         for n in rows
     ]
 

@@ -544,7 +544,9 @@ def test_a_manager_lets_through_or_sends_back(env: dict[str, Any]) -> None:
     page = c.get(f"{API}/units/{fac}/employees", params={"pageSize": 100}, headers=h_mgr).json()
     by_id = {e["id"]: e["training"] for e in page["items"]}
     assert by_id[ids["reg"]]["state"] == "passed" and by_id[ids["old"]]["state"] == "exempt" and by_id[ids["ghost"]]["state"] == "pending"
-    assert by_id[ids["lab2"]] | {"startedAt": None} == {"state": "active", "done": 0, "total": 2, "startedAt": None, "completedAt": None, "completedByName": None}
+    lab2 = by_id[ids["lab2"]]
+    assert (lab2["state"], lab2["done"], lab2["total"], lab2["completedAt"], lab2["completedByName"]) == ("active", 0, 2, None, None) and lab2["startedAt"]
+    assert [(t["key"], t["done"]) for t in lab2["tasks"]] == [("result_enter", False), ("result_submit", False)]
 
     # only someone who may edit employees, never oneself, never while in training oneself
     assert c.post(f"{API}/employees/{ids['lab2']}/training/skip", headers=_h(env, "old")).status_code == 403
@@ -562,7 +564,9 @@ def test_a_manager_lets_through_or_sends_back(env: dict[str, Any]) -> None:
 
     # back to school: an experienced colleague too
     r = c.post(f"{API}/employees/{ids['old']}/training/reset", headers=h_mgr)
-    assert r.status_code == 200 and r.json()["training"] | {"startedAt": None} == {"state": "active", "done": 0, "total": 4, "startedAt": None, "completedAt": None, "completedByName": None}
+    sent = r.json()["training"]
+    assert r.status_code == 200 and (sent["state"], sent["done"], sent["total"], sent["completedAt"], sent["completedByName"]) == ("active", 0, 4, None, None)
+    assert len(sent["tasks"]) == 4 and not any(t["done"] for t in sent["tasks"])
     assert _status(env, "old")["active"] is True
     assert c.get(f"{API}/units/{fac}/orders", headers=_h(env, "old")).status_code == 200
     assert c.post(f"{API}/employees/{ids['old']}/training/skip", headers=h_mgr).json()["training"]["state"] == "skipped"

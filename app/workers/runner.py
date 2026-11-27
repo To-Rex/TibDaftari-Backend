@@ -31,6 +31,7 @@ async def start_workers() -> list[asyncio.Task]:
     from app.modules.assistant.schedule_runner import run_due_once
     from app.modules.messaging.dispatcher import dispatch_outbox_once
     from app.modules.messaging.maintenance import maintenance_once
+    from app.modules.training.oversight import REMIND_POLL_SECONDS, remind_once
 
     tasks = [
         asyncio.create_task(_loop("outbox", dispatch_outbox_once, settings.outbox_poll_seconds), name="worker:outbox"),
@@ -38,6 +39,9 @@ async def start_workers() -> list[asyncio.Task]:
         # the assistant's scheduled tasks: a task is claimed (row lock) before it runs, so a tick that outlives the
         # lease cannot run one twice
         asyncio.create_task(_loop("assistant-schedules", run_due_once, SCHEDULE_POLL_SECONDS), name="worker:assistant-schedules"),
+        # «still in the training after N days»: the managers are told; a person is claimed (row lock) before anyone
+        # hears of them, so two runs cannot mention the same one twice
+        asyncio.create_task(_loop("training-reminders", remind_once, REMIND_POLL_SECONDS), name="worker:training-reminders"),
     ]
     log.info("workers started: %s", [t.get_name() for t in tasks])
     return tasks

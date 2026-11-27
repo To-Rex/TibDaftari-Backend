@@ -149,7 +149,8 @@ def test_notifications_and_mark_read(ctx: dict) -> None:
     assert r.status_code == 200
     items = [n for n in r.json() if n["title"].startswith("T-messaging")]
     assert {n["title"] for n in items} == {"T-messaging unit-wide", "T-messaging personal"}
-    assert set(items[0]) == {"id", "title", "body", "kind", "createdAt", "read", "link"}
+    assert set(items[0]) == {"id", "title", "body", "kind", "createdAt", "read", "link", "code", "params"}
+    assert all(n["code"] is None and n["params"] is None for n in items)  # written by a person: shown as it is
     assert all(n["read"] is False for n in items)
     personal = next(n for n in items if n["title"] == "T-messaging personal")
     assert c.post(f"{API}/notifications/read", json={"id": personal["id"]}, headers=h(ctx, "admin-a")).status_code == 200

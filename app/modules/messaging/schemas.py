@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, field_validator
 
@@ -98,6 +98,10 @@ class NotificationOut(CamelModel):
     created_at: datetime
     read: bool
     link: str | None = None
+    #: a notice written by the system: what it is about and its values — shown in the reader's language when the
+    #: interface knows the code, else `title` / `body` as they are
+    code: str | None = None
+    params: dict[str, Any] | None = None
 
 
 class MarkReadIn(CamelModel):

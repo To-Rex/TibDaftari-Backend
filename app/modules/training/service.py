@@ -10,10 +10,10 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
@@ -29,8 +29,8 @@ from app.infrastructure.db.base import alive
 from app.infrastructure.db.models import Employee, EmployeeTraining, OrgUnit, Role
 from app.infrastructure.db.session import SessionLocal, session_scope
 from app.infrastructure.redis.client import get_redis
-from app.modules.training import samples
-from app.modules.training.schemas import EmployeeTrainingOut, TrainingOut, TrainingTaskOut
+from app.modules.training import samples, targets
+from app.modules.training.schemas import EmployeeTrainingOut, TrainingOut, TrainingTargetOut, TrainingTaskOut
 from app.modules.training.tasks import TASK_BY_KEY, TASKS, tasks_for
 
 log = logging.getLogger("app.training")
@@ -143,9 +143,17 @@ def _counts(row: EmployeeTraining | None) -> tuple[int, int]:
     return sum(1 for k in known if tasks[k]), len(known)
 
 
-def training_out(row: EmployeeTraining | None, available: dict[str, bool] | None = None, *, facility: OrgUnit | None = None, nowhere: bool = False) -> TrainingOut:
+def training_out(
+    row: EmployeeTraining | None,
+    available: dict[str, bool] | None = None,
+    *,
+    facility: OrgUnit | None = None,
+    nowhere: bool = False,
+    where: dict[str, TrainingTargetOut] | None = None,
+) -> TrainingOut:
     """The caller's own view. `available`: need → is there something to practise it on (None = not looked at);
-    `nowhere`: the employee has no facility to practise in at all — nothing can be done, nothing holds them back."""
+    `nowhere`: the employee has no facility to practise in at all — nothing can be done, nothing holds them back;
+    `where`: task key → the record to continue on."""
     if row is None:
         return TrainingOut(state="exempt")
     active = row.status == "active"
@@ -158,7 +166,11 @@ def training_out(row: EmployeeTraining | None, available: dict[str, bool] | None
             return False
         return True if (available is None or t.needs is None) else bool(available.get(t.needs))
 
-    items = [TrainingTaskOut(key=t.key, done=bool(stored.get(t.key)), done_at=_when(stored.get(t.key)), available=_possible(t)) for t in TASKS if t.key in stored]
+    items = [
+        TrainingTaskOut(key=t.key, done=bool(stored.get(t.key)), done_at=_when(stored.get(t.key)), available=_possible(t), target=None if stored.get(t.key) else (where or {}).get(t.key))
+        for t in TASKS
+        if t.key in stored
+    ]
     done = sum(1 for i in items if i.done)
     return TrainingOut(
         state=row.status,  # type: ignore[arg-type]
@@ -218,6 +230,20 @@ async def _reconcile(staff: StaffPrincipal) -> EmployeeTraining | None:
     return row
 
 
+async def _remember_unavailable(row: EmployeeTraining, keys: list[str]) -> None:
+    """Keep what the employee was just shown as «cannot be practised here», so a manager sees the same picture (and
+    «ready to finish» means the same on both sides). Written only when it changes."""
+    keys = sorted(keys)
+    if sorted(row.unavailable or []) == keys:
+        return
+    try:
+        async with SessionLocal() as real:
+            await real.execute(update(EmployeeTraining).where(EmployeeTraining.employee_id == row.employee_id, EmployeeTraining.status == "active").values(unavailable=keys))
+            await real.commit()
+    except Exception:  # pragma: no cover — a note for the manager's view; the employee's own answer does not depend on it
+        log.exception("could not note the unavailable tasks of %s", row.employee_id)
+
+
 async def session_flag(staff: StaffPrincipal) -> bool:
     """For the session payload: is this employee in training."""
     if staff.is_super_admin:
@@ -240,9 +266,14 @@ async def status(session: AsyncSession, staff: StaffPrincipal, unit_id: uuid.UUI
     pending = [TASK_BY_KEY[k] for k, done in (row.tasks or {}).items() if not done and k in TASK_BY_KEY]
     facility = await _facility(session, staff, unit_id)
     if facility is None:
+        await _remember_unavailable(row, [t.key for t in pending])
         return training_out(row, nowhere=True)
     available = await samples.ensure(session, staff, facility, {t.needs for t in pending if t.needs}, patients=any(t.key in RECEPTION_TASKS for t in pending))
-    return training_out(row, available, facility=facility)
+    possible = [t for t in pending if t.needs is None or available.get(t.needs)]
+    await _remember_unavailable(row, [t.key for t in pending if t not in possible])
+    # the very record each remaining task is done on: the checklist leads there, not to a list
+    where = await targets.find(session, staff, facility.id, [t.key for t in possible])
+    return training_out(row, available, facility=facility, where=where)
 
 
 async def complete(session: AsyncSession, staff: StaffPrincipal, unit_id: uuid.UUID | None, meta: RequestMeta) -> TrainingOut:
@@ -267,31 +298,75 @@ async def complete(session: AsyncSession, staff: StaffPrincipal, unit_id: uuid.U
         await real.commit()
         result = training_out(row)
     await _drop_state(staff.id)
+    # their managers (and the superadmins) are told — never at the price of the employee's own «finish»
+    from app.modules.training import oversight
+
+    await oversight.announce_passed(staff.id)
     return result
 
 
 # ----------------------------------------------------------------------------- a manager's side
 
 
+def will_get(emp: Employee, role: Role | None) -> list[str]:
+    """The tasks an employee gets when their training starts (their role now) — in the order they are practised."""
+    if emp.is_super_admin or _is_installer(role):
+        return []
+    return [t.key for t in tasks_for(_permissions(emp, role))]
+
+
+def stall_cutoff() -> datetime | None:
+    """Someone whose training started before this moment has been in it «too long»; None = nobody is counted."""
+    days = settings.training_stall_days
+    return _now() - timedelta(days=days) if days > 0 else None
+
+
+def colleague_out(row: EmployeeTraining | None, *, coming: Sequence[str] = (), by_name: str | None = None) -> EmployeeTrainingOut:
+    """A colleague's training as a manager sees it: every task with its mark, and whether only «finish» is left.
+    `coming`: without a row (never signed in) — the tasks the first sign-in will give; none → nothing to practise."""
+    if row is None:
+        if not coming:
+            return EmployeeTrainingOut(state="exempt")
+        return EmployeeTrainingOut(state="pending", total=len(coming), tasks=[TrainingTaskOut(key=k, done=False) for k in coming])
+    active = row.status == "active"
+    stored = row.tasks or {}
+    # what the employee was last shown as «cannot be practised here» (kept by their own status request)
+    off = set(row.unavailable or []) if active else set()
+    items = [TrainingTaskOut(key=t.key, done=bool(stored.get(t.key)), done_at=_when(stored.get(t.key)), available=bool(stored.get(t.key)) or t.key not in off) for t in TASKS if t.key in stored]
+    times = [i.done_at for i in items if i.done_at is not None]
+    cutoff = stall_cutoff()
+    return EmployeeTrainingOut(
+        state=row.status,  # type: ignore[arg-type]
+        done=sum(1 for i in items if i.done),
+        total=len(items),
+        tasks=items,
+        can_complete=active and all(i.done or not i.available for i in items),
+        stalled=active and cutoff is not None and row.started_at <= cutoff,
+        started_at=row.started_at,
+        last_task_at=max(times) if times else None,
+        completed_at=row.completed_at,
+        completed_by_name=by_name,
+    )
+
+
 async def employee_training_map(session: AsyncSession, employees: Sequence[Employee]) -> dict[uuid.UUID, EmployeeTrainingOut]:
-    """Training of a page of employees for their cards (one query). Someone who has not signed in since the training
-    exists has no row yet: `pending` — it starts at their first sign-in."""
+    """Training of a page of employees for their cards and the overview (three queries). Someone who has not signed
+    in since the training exists has no row yet: `pending` with the tasks their role will give them — it starts at
+    their first sign-in — or `exempt` when the role has nothing to practise."""
     if not employees:
         return {}
     rows = {r.employee_id: r for r in (await session.execute(select(EmployeeTraining).where(EmployeeTraining.employee_id.in_([e.id for e in employees])))).scalars()}
     by = {r.completed_by for r in rows.values() if r.completed_by}
     names = dict((await session.execute(select(Employee.id, Employee.full_name).where(Employee.id.in_(by)))).all()) if by else {}
+    new = {e.role_id for e in employees if e.id not in rows and e.role_id}
+    roles = {r.id: r for r in (await session.execute(select(Role).where(Role.id.in_(new)))).scalars()} if new else {}
     out: dict[uuid.UUID, EmployeeTrainingOut] = {}
     for e in employees:
         row = rows.get(e.id)
         if row is None:
-            out[e.id] = EmployeeTrainingOut(state="exempt" if e.is_super_admin else "pending")
-            continue
-        done, total = _counts(row)
-        out[e.id] = EmployeeTrainingOut(
-            state=row.status,  # type: ignore[arg-type]
-            done=done, total=total, started_at=row.started_at, completed_at=row.completed_at, completed_by_name=names.get(row.completed_by) if row.completed_by else None,
-        )  # fmt: skip
+            out[e.id] = colleague_out(None, coming=will_get(e, roles.get(e.role_id)))
+        else:
+            out[e.id] = colleague_out(row, by_name=names.get(row.completed_by) if row.completed_by else None)
     return out
 
 
@@ -353,6 +428,8 @@ async def reset(session: AsyncSession, employee_id: uuid.UUID, staff: StaffPrinc
     row.completed_at = None
     row.completed_by = None
     row.note = None
+    row.unavailable = []
+    row.reminded_at = None
     await session.flush()
     await audit(
         session, actor_type="staff", actor_id=staff.id, unit_id=emp.unit_id, action="training.reset", entity="employee", entity_id=emp.id,

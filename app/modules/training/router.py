@@ -1,4 +1,5 @@
-"""Training endpoints: the employee's own (`/training/*`) and a manager's (`/employees/{id}/training/*`)."""
+"""Training endpoints: the employee's own (`/training/status|complete`) and a manager's (`/training/overview`,
+`/employees/{id}/training/*`)."""
 
 from __future__ import annotations
 
@@ -10,8 +11,8 @@ from fastapi import APIRouter, Query, Request
 from app.api.deps import DbSession, Meta, Staff
 from app.modules.staff import service as staff_service
 from app.modules.staff.schemas import EmployeeOut
-from app.modules.training import service
-from app.modules.training.schemas import TrainingOut
+from app.modules.training import oversight, service
+from app.modules.training.schemas import TrainingOut, TrainingOverviewOut, TrainingOverviewQuery
 
 router = APIRouter()
 
@@ -31,6 +32,12 @@ async def training_complete(request: Request, staff: Staff, session: DbSession, 
     out = await service.complete(session, staff, unit_id, meta)
     request.state.training = out.active  # this very answer already tells the page: the real data from now on
     return out
+
+
+@router.get("/training/overview", response_model=TrainingOverviewOut, summary="Everyone the training concerns in my scope: who is in it and how far, who has not signed in, who finished")
+async def training_overview(q: Annotated[TrainingOverviewQuery, Query()], staff: Staff, session: DbSession) -> TrainingOverviewOut:
+    staff.require("admin.employee.read")
+    return await oversight.overview(session, staff, q)
 
 
 @router.post("/employees/{employee_id}/training/skip", response_model=EmployeeOut, summary="Let an employee work with the real data without the training")

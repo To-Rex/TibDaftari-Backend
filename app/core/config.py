@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     # A new employee works in a sandbox until the tasks of their role are done (app/modules/training). The switch
     # turns the whole thing off: nobody is in training, everyone works with the real data.
     training_enabled: bool = True
+    # The managers of someone who has been in the training this many days without finishing are told so (and the
+    # superadmins with them), then again every `training_remind_every_days` while it lasts. 0 = never.
+    training_stall_days: int = 3
+    training_remind_every_days: int = 7
 
     # ---- background workers ------------------------------------------------
     workers_enabled: bool = True

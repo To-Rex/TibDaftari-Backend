@@ -73,8 +73,13 @@ class EmployeeTraining(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("employees.id"))
-    #: why exempt / who it concerns: existing | superadmin | no_tasks
+    #: why exempt / who it concerns: existing | superadmin | installer | no_tasks
     note: Mapped[str | None] = mapped_column(String(40))
+    #: task keys that could not be practised where the employee works when they last looked — they do not hold
+    #: the training back, and a manager is shown the same picture
+    unavailable: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
+    #: when the managers were last told this person has not finished (see `training.oversight`)
+    reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
